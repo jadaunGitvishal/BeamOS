@@ -1,29 +1,29 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const { db } = require('../db/database');
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
-const config = require('../config');
-const VERSION = require('../version');
-const { PLATFORM_ROLES } = require('../middleware/auth');
-const loopLag = require('../services/loop-lag');
+const { db } = require("../db/database");
+const os = require("os");
+const path = require("path");
+const fs = require("fs");
+const config = require("../config");
+const VERSION = require("../version");
+const { PLATFORM_ROLES } = require("../middleware/auth");
+const loopLag = require("../services/loop-lag");
 // #146 P3.8: soak observability — internal limiter/maintenance states.
-const flapLimiter = require('../lib/flap-limiter');
-const otaBreaker = require('../lib/ota-breaker');
-const otaDownloadGuard = require('../lib/ota-download-guard');
-const logCoalescer = require('../lib/log-coalescer');
-const { getMaintenanceStats } = require('../db/database');
-const heartbeat = require('../services/heartbeat');
-const appSettings = require('../lib/app-settings');
+const flapLimiter = require("../lib/flap-limiter");
+const otaBreaker = require("../lib/ota-breaker");
+const otaDownloadGuard = require("../lib/ota-download-guard");
+const logCoalescer = require("../lib/log-coalescer");
+const { getMaintenanceStats } = require("../db/database");
+const heartbeat = require("../services/heartbeat");
+const appSettings = require("../lib/app-settings");
 
 // Public status page
-router.get('/', (req, res) => {
+router.get("/", (req, res) => {
   const uptime = process.uptime();
   const version = VERSION;
 
   const body = {
-    status: 'ok',
+    status: "ok",
     version,
     uptime_human: formatUptime(uptime),
     timestamp: new Date().toISOString(),
@@ -39,12 +39,12 @@ router.get('/', (req, res) => {
   // #146: the debug block is admin-toggleable (app_settings.status_debug_enabled),
   // defaulting to the STATUS_DEBUG_ENABLED env behavior. Cheap cached boolean. When off,
   // the `debug` key is omitted entirely. Aggregate counts only (no ids/secrets).
-  if (appSettings.getBool('status_debug_enabled', config.statusDebugEnabled)) {
+  if (appSettings.getBool("status_debug_enabled", config.statusDebugEnabled)) {
     body.debug = {
-      flap: flapLimiter.stats(),                  // buckets, quarantined, refused{Total,LastWindow}, quarantineStarts{Total,LastWindow}
-      ota_breaker: otaBreaker.stats(),            // rateBackoff{Total,LastWindow}
-      ota_download: otaDownloadGuard.stats(),     // inFlight, served/shed ThisWindow + Total
-      maintenance: getMaintenanceStats(),         // deleted, ms, at, running, sweepsTotal
+      flap: flapLimiter.stats(), // buckets, quarantined, refused{Total,LastWindow}, quarantineStarts{Total,LastWindow}
+      ota_breaker: otaBreaker.stats(), // rateBackoff{Total,LastWindow}
+      ota_download: otaDownloadGuard.stats(), // inFlight, served/shed ThisWindow + Total
+      maintenance: getMaintenanceStats(), // deleted, ms, at, running, sweepsTotal
       log_coalescer_buffer: logCoalescer._size(),
     };
   }
@@ -62,96 +62,182 @@ function formatUptime(seconds) {
 }
 
 // Full database backup (superadmin only)
-router.get('/backup', (req, res) => {
+router.get("/backup", (req, res) => {
   const token = req.query.token;
-  if (!token) return res.status(401).json({ error: 'Token required' });
+  if (!token) return res.status(401).json({ error: "Token required" });
 
   try {
-    const jwt = require('jsonwebtoken');
-    const config = require('../config');
+    const jwt = require("jsonwebtoken");
+    const config = require("../config");
     const decoded = jwt.verify(token, config.jwtSecret);
-    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(decoded.id);
-    if (!user || !PLATFORM_ROLES.includes(user.role)) return res.status(403).json({ error: 'Platform admin only' });
+    const user = db
+      .prepare("SELECT role FROM users WHERE id = ?")
+      .get(decoded.id);
+    if (!user || !PLATFORM_ROLES.includes(user.role))
+      return res.status(403).json({ error: "Platform admin only" });
   } catch {
-    return res.status(401).json({ error: 'Invalid token' });
+    return res.status(401).json({ error: "Invalid token" });
   }
 
-  const dbPath = require('../config').dbPath;
-  res.download(dbPath, `remotedisplay-backup-${new Date().toISOString().split('T')[0]}.db`);
+  const dbPath = require("../config").dbPath;
+  res.download(
+    dbPath,
+    `remotedisplay-backup-${new Date().toISOString().split("T")[0]}.db`,
+  );
 });
 
 // User data export (own data only)
-router.get('/export', (req, res) => {
+router.get("/export", (req, res) => {
   const token = req.query.token;
-  if (!token) return res.status(401).json({ error: 'Token required' });
+  if (!token) return res.status(401).json({ error: "Token required" });
 
   let userId;
   let workspaceId;
   try {
-    const jwt = require('jsonwebtoken');
-    const config = require('../config');
+    const jwt = require("jsonwebtoken");
+    const config = require("../config");
     const decoded = jwt.verify(token, config.jwtSecret);
     userId = decoded.id;
     workspaceId = decoded.current_workspace_id || null;
-    if (!userId) return res.status(401).json({ error: 'Invalid token' });
+    if (!userId) return res.status(401).json({ error: "Invalid token" });
   } catch {
-    return res.status(401).json({ error: 'Invalid token' });
+    return res.status(401).json({ error: "Invalid token" });
   }
 
-  const user = db.prepare('SELECT id, email, name, role, auth_provider, plan_id, created_at FROM users WHERE id = ?').get(userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  const user = db
+    .prepare(
+      "SELECT id, email, name, role, auth_provider, plan_id, created_at FROM users WHERE id = ?",
+    )
+    .get(userId);
+  if (!user) return res.status(404).json({ error: "User not found" });
 
   // Phase 2.2f: export workspace-scoped branding. Fall back to first-accessible
   // workspace if the JWT didn't carry one.
   if (!workspaceId) {
-    const w = db.prepare(`
+    const w = db
+      .prepare(
+        `
       SELECT w.id FROM workspaces w
       JOIN workspace_members wm ON wm.workspace_id = w.id
       WHERE wm.user_id = ? ORDER BY wm.joined_at ASC LIMIT 1
-    `).get(userId);
+    `,
+      )
+      .get(userId);
     workspaceId = w?.id || null;
   }
 
-  const devices = db.prepare('SELECT id, name, status, ip_address, android_version, app_version, screen_width, screen_height, created_at FROM devices WHERE user_id = ?').all(userId);
-  const deviceIds = devices.map(d => d.id);
-  const devicePlaceholders = deviceIds.map(() => '?').join(',') || "'__none__'";
+  const devices = db
+    .prepare(
+      "SELECT id, name, status, ip_address, android_version, app_version, screen_width, screen_height, created_at FROM devices WHERE user_id = ?",
+    )
+    .all(userId);
+  const deviceIds = devices.map((d) => d.id);
+  const devicePlaceholders = deviceIds.map(() => "?").join(",") || "'__none__'";
 
-  const content = db.prepare('SELECT id, filename, mime_type, file_size, duration_sec, remote_url, width, height, created_at FROM content WHERE user_id = ?').all(userId);
-  const widgets = db.prepare('SELECT id, widget_type, name, config, created_at FROM widgets WHERE user_id = ?').all(userId);
-  const layouts = db.prepare('SELECT id, name, width, height, is_template, template_category, created_at FROM layouts WHERE user_id = ? AND is_template = 0').all(userId);
-  const layoutIds = layouts.map(l => l.id);
-  const layoutPlaceholders = layoutIds.map(() => '?').join(',') || "'__none__'";
-  const layoutZones = layoutIds.length ? db.prepare(`SELECT * FROM layout_zones WHERE layout_id IN (${layoutPlaceholders})`).all(...layoutIds) : [];
+  const content = db
+    .prepare(
+      "SELECT id, filename, mime_type, file_size, duration_sec, remote_url, width, height, created_at FROM content WHERE user_id = ?",
+    )
+    .all(userId);
+  const widgets = db
+    .prepare(
+      "SELECT id, widget_type, name, config, created_at FROM widgets WHERE user_id = ?",
+    )
+    .all(userId);
+  const layouts = db
+    .prepare(
+      "SELECT id, name, width, height, is_template, template_category, created_at FROM layouts WHERE user_id = ? AND is_template = 0",
+    )
+    .all(userId);
+  const layoutIds = layouts.map((l) => l.id);
+  const layoutPlaceholders = layoutIds.map(() => "?").join(",") || "'__none__'";
+  const layoutZones = layoutIds.length
+    ? db
+        .prepare(
+          `SELECT * FROM layout_zones WHERE layout_id IN (${layoutPlaceholders})`,
+        )
+        .all(...layoutIds)
+    : [];
 
-  const playlists = db.prepare('SELECT id, name, description, is_auto_generated, created_at, updated_at FROM playlists WHERE user_id = ?').all(userId);
-  const playlistIds = playlists.map(p => p.id);
-  const playlistPlaceholders = playlistIds.map(() => '?').join(',') || "'__none__'";
-  const playlistItems = playlistIds.length ? db.prepare(`SELECT id, playlist_id, content_id, widget_id, sort_order, duration_sec FROM playlist_items WHERE playlist_id IN (${playlistPlaceholders})`).all(...playlistIds) : [];
+  const playlists = db
+    .prepare(
+      "SELECT id, name, description, is_auto_generated, created_at, updated_at FROM playlists WHERE user_id = ?",
+    )
+    .all(userId);
+  const playlistIds = playlists.map((p) => p.id);
+  const playlistPlaceholders =
+    playlistIds.map(() => "?").join(",") || "'__none__'";
+  const playlistItems = playlistIds.length
+    ? db
+        .prepare(
+          `SELECT id, playlist_id, content_id, widget_id, sort_order, duration_sec FROM playlist_items WHERE playlist_id IN (${playlistPlaceholders})`,
+        )
+        .all(...playlistIds)
+    : [];
 
-  const schedules = db.prepare('SELECT id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at FROM schedules WHERE user_id = ?').all(userId);
-  const videoWalls = db.prepare('SELECT * FROM video_walls WHERE user_id = ?').all(userId);
-  const wallIds = videoWalls.map(w => w.id);
-  const wallPlaceholders = wallIds.map(() => '?').join(',') || "'__none__'";
-  const wallDevices = wallIds.length ? db.prepare(`SELECT * FROM video_wall_devices WHERE wall_id IN (${wallPlaceholders})`).all(...wallIds) : [];
+  const schedules = db
+    .prepare(
+      "SELECT id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at FROM schedules WHERE user_id = ?",
+    )
+    .all(userId);
+  const videoWalls = db
+    .prepare("SELECT * FROM video_walls WHERE user_id = ?")
+    .all(userId);
+  const wallIds = videoWalls.map((w) => w.id);
+  const wallPlaceholders = wallIds.map(() => "?").join(",") || "'__none__'";
+  const wallDevices = wallIds.length
+    ? db
+        .prepare(
+          `SELECT * FROM video_wall_devices WHERE wall_id IN (${wallPlaceholders})`,
+        )
+        .all(...wallIds)
+    : [];
 
-  const kioskPages = db.prepare('SELECT id, name, config, created_at FROM kiosk_pages WHERE user_id = ?').all(userId);
-  const deviceGroups = db.prepare('SELECT id, name, color, created_at FROM device_groups WHERE user_id = ?').all(userId);
-  const groupIds = deviceGroups.map(g => g.id);
-  const groupPlaceholders = groupIds.map(() => '?').join(',') || "'__none__'";
-  const groupMembers = groupIds.length ? db.prepare(`SELECT * FROM device_group_members WHERE group_id IN (${groupPlaceholders})`).all(...groupIds) : [];
-  const alertConfigs = db.prepare('SELECT id, alert_type, enabled, config, created_at FROM alert_configs WHERE user_id = ?').all(userId);
-  const whiteLabel = workspaceId ? db.prepare('SELECT * FROM white_labels WHERE workspace_id = ?').get(workspaceId) : null;
+  const kioskPages = db
+    .prepare(
+      "SELECT id, name, config, created_at FROM kiosk_pages WHERE user_id = ?",
+    )
+    .all(userId);
+  const deviceGroups = db
+    .prepare(
+      "SELECT id, name, color, created_at FROM device_groups WHERE user_id = ?",
+    )
+    .all(userId);
+  const groupIds = deviceGroups.map((g) => g.id);
+  const groupPlaceholders = groupIds.map(() => "?").join(",") || "'__none__'";
+  const groupMembers = groupIds.length
+    ? db
+        .prepare(
+          `SELECT * FROM device_group_members WHERE group_id IN (${groupPlaceholders})`,
+        )
+        .all(...groupIds)
+    : [];
+  const alertConfigs = db
+    .prepare(
+      "SELECT id, alert_type, enabled, config, created_at FROM alert_configs WHERE user_id = ?",
+    )
+    .all(userId);
+  const whiteLabel = workspaceId
+    ? db
+        .prepare("SELECT * FROM white_labels WHERE workspace_id = ?")
+        .get(workspaceId)
+    : null;
 
   const exportData = {
-    format: 'screentinker-export-v2',
+    format: "screentinker-export-v2",
     exported_at: new Date().toISOString(),
     user,
-    devices: devices.map(d => {
-      const dev = db.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(d.id);
+    devices: devices.map((d) => {
+      const dev = db
+        .prepare("SELECT playlist_id FROM devices WHERE id = ?")
+        .get(d.id);
       return { ...d, playlist_id: dev?.playlist_id || null };
     }),
     content,
-    widgets: widgets.map(w => ({ ...w, config: JSON.parse(w.config || '{}') })),
+    widgets: widgets.map((w) => ({
+      ...w,
+      config: JSON.parse(w.config || "{}"),
+    })),
     layouts,
     layout_zones: layoutZones,
     playlists,
@@ -159,91 +245,132 @@ router.get('/export', (req, res) => {
     schedules,
     video_walls: videoWalls,
     video_wall_devices: wallDevices,
-    kiosk_pages: kioskPages.map(k => ({ ...k, config: JSON.parse(k.config || '{}') })),
+    kiosk_pages: kioskPages.map((k) => ({
+      ...k,
+      config: JSON.parse(k.config || "{}"),
+    })),
     device_groups: deviceGroups,
     device_group_members: groupMembers,
-    alert_configs: alertConfigs.map(a => ({ ...a, config: JSON.parse(a.config || '{}') })),
+    alert_configs: alertConfigs.map((a) => ({
+      ...a,
+      config: JSON.parse(a.config || "{}"),
+    })),
     white_label: whiteLabel || null,
   };
 
   // If include_files requested, bundle as ZIP with content files
-  if (req.query.include_files === 'true') {
-    const archiver = require('archiver');
-    const dateStr = new Date().toISOString().split('T')[0];
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename=screentinker-export-${dateStr}.zip`);
+  if (req.query.include_files === "true") {
+    const archiver = require("archiver");
+    const dateStr = new Date().toISOString().split("T")[0];
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=screentinker-export-${dateStr}.zip`,
+    );
 
-    const archive = archiver('zip', { zlib: { level: 5 } });
+    const archive = archiver("zip", { zlib: { level: 5 } });
     archive.pipe(res);
 
     // Collect file info and add files to archive
     const filesToInclude = [];
     for (const c of exportData.content) {
       if (c.remote_url || !c.filename) continue;
-      const row = db.prepare('SELECT filepath, thumbnail_path FROM content WHERE id = ?').get(c.id);
+      const row = db
+        .prepare("SELECT filepath, thumbnail_path FROM content WHERE id = ?")
+        .get(c.id);
       if (row?.filepath) {
-        const filePath = path.join(config.contentDir, path.basename(row.filepath));
+        const filePath = path.join(
+          config.contentDir,
+          path.basename(row.filepath),
+        );
         if (fs.existsSync(filePath)) {
           c.original_filepath = path.basename(row.filepath);
-          archive.file(filePath, { name: `files/${c.id}/${c.original_filepath}` });
+          archive.file(filePath, {
+            name: `files/${c.id}/${c.original_filepath}`,
+          });
         }
       }
       if (row?.thumbnail_path) {
-        const thumbPath = path.join(config.contentDir, path.basename(row.thumbnail_path));
+        const thumbPath = path.join(
+          config.contentDir,
+          path.basename(row.thumbnail_path),
+        );
         if (fs.existsSync(thumbPath)) {
           c.original_thumbnail = path.basename(row.thumbnail_path);
-          archive.file(thumbPath, { name: `files/${c.id}/${c.original_thumbnail}` });
+          archive.file(thumbPath, {
+            name: `files/${c.id}/${c.original_thumbnail}`,
+          });
         }
       }
     }
 
     // Add JSON manifest (after filepath fields are populated)
-    archive.append(JSON.stringify(exportData, null, 2), { name: 'export.json' });
+    archive.append(JSON.stringify(exportData, null, 2), {
+      name: "export.json",
+    });
     archive.finalize();
     return;
   }
 
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', `attachment; filename=screentinker-export-${new Date().toISOString().split('T')[0]}.json`);
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename=screentinker-export-${new Date().toISOString().split("T")[0]}.json`,
+  );
   res.json(exportData);
 });
 
 // User data import (JSON or ZIP with files)
-const multer = require('multer');
-const importUpload = multer({ dest: path.join(os.tmpdir(), 'screentinker-import'), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB max
+const multer = require("multer");
+const importUpload = multer({
+  dest: path.join(os.tmpdir(), "screentinker-import"),
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 },
+}); // 2GB max
 
-router.post('/import', importUpload.single('file'), async (req, res) => {
+router.post("/import", importUpload.single("file"), async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Token required' });
+  if (!authHeader?.startsWith("Bearer "))
+    return res.status(401).json({ error: "Token required" });
 
   let userId;
   let workspaceId;
   try {
-    const jwt = require('jsonwebtoken');
-    const jwtConfig = require('../config');
-    const decoded = jwt.verify(authHeader.split(' ')[1], jwtConfig.jwtSecret);
+    const jwt = require("jsonwebtoken");
+    const jwtConfig = require("../config");
+    const decoded = jwt.verify(authHeader.split(" ")[1], jwtConfig.jwtSecret);
     userId = decoded.id;
     workspaceId = decoded.current_workspace_id || null;
-    if (!userId) return res.status(401).json({ error: 'Invalid token' });
+    if (!userId) return res.status(401).json({ error: "Invalid token" });
   } catch {
-    return res.status(401).json({ error: 'Invalid token' });
+    return res.status(401).json({ error: "Invalid token" });
   }
 
-  const user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  const user = db
+    .prepare("SELECT id, role FROM users WHERE id = ?")
+    .get(userId);
+  if (!user) return res.status(404).json({ error: "User not found" });
 
   // Phase 2.2b: imports stamp workspace_id on devices and content so the
   // rows are visible to the workspace-filtered list endpoints. Fall back to
   // the importer's first accessible workspace if the JWT didn't carry one.
   if (!workspaceId) {
-    const w = db.prepare(`
+    const w = db
+      .prepare(
+        `
       SELECT w.id FROM workspaces w
       JOIN workspace_members wm ON wm.workspace_id = w.id
       WHERE wm.user_id = ? ORDER BY wm.joined_at ASC LIMIT 1
-    `).get(userId);
+    `,
+      )
+      .get(userId);
     workspaceId = w?.id || null;
   }
-  if (!workspaceId) return res.status(403).json({ error: 'No workspace context for import. Switch to a workspace first.' });
+  if (!workspaceId)
+    return res
+      .status(403)
+      .json({
+        error: "No workspace context for import. Switch to a workspace first.",
+      });
 
   let data;
   let extractedFiles = {}; // Map of old content ID -> { filepath, thumbnail }
@@ -251,27 +378,32 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
   if (req.file) {
     // ZIP upload — extract export.json and files/
     try {
-      const unzipper = require('unzipper');
-      const extractDir = path.join(os.tmpdir(), `screentinker-import-${Date.now()}`);
+      const unzipper = require("unzipper");
+      const extractDir = path.join(
+        os.tmpdir(),
+        `screentinker-import-${Date.now()}`,
+      );
       fs.mkdirSync(extractDir, { recursive: true });
 
       await new Promise((resolve, reject) => {
         fs.createReadStream(req.file.path)
           .pipe(unzipper.Extract({ path: extractDir }))
-          .on('close', resolve)
-          .on('error', reject);
+          .on("close", resolve)
+          .on("error", reject);
       });
 
       // Read the JSON manifest
-      const jsonPath = path.join(extractDir, 'export.json');
+      const jsonPath = path.join(extractDir, "export.json");
       if (!fs.existsSync(jsonPath)) {
         fs.unlinkSync(req.file.path);
-        return res.status(400).json({ error: 'ZIP does not contain export.json' });
+        return res
+          .status(400)
+          .json({ error: "ZIP does not contain export.json" });
       }
-      data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+      data = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
 
       // Map extracted files by content ID, with path traversal validation
-      const filesDir = path.join(extractDir, 'files');
+      const filesDir = path.join(extractDir, "files");
       const resolvedExtractDir = path.resolve(extractDir);
       if (fs.existsSync(filesDir)) {
         for (const contentDir of fs.readdirSync(filesDir)) {
@@ -280,51 +412,91 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
           if (!contentPath.startsWith(resolvedExtractDir)) continue;
           if (!fs.statSync(contentPath).isDirectory()) continue;
           const files = fs.readdirSync(contentPath);
-          extractedFiles[contentDir] = files.map(f => {
-            const filePath = path.resolve(contentPath, f);
-            // Validate each file path is within extractDir
-            if (!filePath.startsWith(resolvedExtractDir)) return null;
-            return { name: f, path: filePath };
-          }).filter(Boolean);
+          extractedFiles[contentDir] = files
+            .map((f) => {
+              const filePath = path.resolve(contentPath, f);
+              // Validate each file path is within extractDir
+              if (!filePath.startsWith(resolvedExtractDir)) return null;
+              return { name: f, path: filePath };
+            })
+            .filter(Boolean);
         }
       }
 
       // Cleanup uploaded zip
       fs.unlinkSync(req.file.path);
     } catch (err) {
-      if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
-      return res.status(400).json({ error: 'Failed to extract ZIP: ' + err.message });
+      if (req.file?.path)
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch {}
+      return res
+        .status(400)
+        .json({ error: "Failed to extract ZIP: " + err.message });
     }
   } else {
     data = req.body;
   }
-  if (!data || !data.format || !data.format.startsWith('screentinker-export')) {
-    return res.status(400).json({ error: 'Invalid export file. Must be a ScreenTinker export JSON.' });
+  if (!data || !data.format || !data.format.startsWith("screentinker-export")) {
+    return res
+      .status(400)
+      .json({ error: "Invalid export file. Must be a BeamOS export JSON." });
   }
 
-  const isV2 = data.format === 'screentinker-export-v2';
-  const uuid = require('uuid');
-  const stats = { devices: 0, content: 0, widgets: 0, layouts: 0, playlists: 0, schedules: 0, video_walls: 0, kiosk_pages: 0, device_groups: 0 };
+  const isV2 = data.format === "screentinker-export-v2";
+  const uuid = require("uuid");
+  const stats = {
+    devices: 0,
+    content: 0,
+    widgets: 0,
+    layouts: 0,
+    playlists: 0,
+    schedules: 0,
+    video_walls: 0,
+    kiosk_pages: 0,
+    device_groups: 0,
+  };
 
   // Map old IDs to new IDs
-  const idMap = { devices: {}, content: {}, widgets: {}, layouts: {}, zones: {}, playlists: {}, groups: {}, walls: {}, kiosk: {} };
+  const idMap = {
+    devices: {},
+    content: {},
+    widgets: {},
+    layouts: {},
+    zones: {},
+    playlists: {},
+    groups: {},
+    walls: {},
+    kiosk: {},
+  };
 
   const importDb = db.transaction(() => {
     // Import devices (as offline, unlinked - they'll need re-pairing)
-    for (const d of (data.devices || [])) {
+    for (const d of data.devices || []) {
       const newId = uuid.v4();
       idMap.devices[d.id] = newId;
       const pairingCode = String(Math.floor(100000 + Math.random() * 900000));
-      db.prepare(`INSERT INTO devices (id, user_id, workspace_id, name, pairing_code, status, screen_width, screen_height, created_at) VALUES (?, ?, ?, ?, ?, 'provisioning', ?, ?, ?)`).run(newId, userId, workspaceId, d.name, pairingCode, d.screen_width || null, d.screen_height || null, d.created_at || Math.floor(Date.now() / 1000));
+      db.prepare(
+        `INSERT INTO devices (id, user_id, workspace_id, name, pairing_code, status, screen_width, screen_height, created_at) VALUES (?, ?, ?, ?, ?, 'provisioning', ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        workspaceId,
+        d.name,
+        pairingCode,
+        d.screen_width || null,
+        d.screen_height || null,
+        d.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.devices++;
     }
 
     // Import content metadata + files from ZIP if available
-    for (const c of (data.content || [])) {
+    for (const c of data.content || []) {
       const newId = uuid.v4();
       idMap.content[c.id] = newId;
 
-      let newFilepath = '';
+      let newFilepath = "";
       let newThumbnail = null;
 
       // Copy files from ZIP extract if available
@@ -339,7 +511,10 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
             // Match original filepath vs thumbnail
             if (c.original_filepath && f.name === c.original_filepath) {
               newFilepath = destName;
-            } else if (c.original_thumbnail && f.name === c.original_thumbnail) {
+            } else if (
+              c.original_thumbnail &&
+              f.name === c.original_thumbnail
+            ) {
               newThumbnail = destName;
             } else if (!newFilepath) {
               // Fallback: first non-thumbnail file is the content
@@ -352,54 +527,130 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
         }
       }
 
-      db.prepare(`INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, remote_url, thumbnail_path, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(newId, userId, workspaceId, c.filename, newFilepath, c.mime_type, c.file_size || 0, c.duration_sec || null, c.remote_url || null, newThumbnail, c.width || null, c.height || null, c.created_at || Math.floor(Date.now() / 1000));
+      db.prepare(
+        `INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, remote_url, thumbnail_path, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        workspaceId,
+        c.filename,
+        newFilepath,
+        c.mime_type,
+        c.file_size || 0,
+        c.duration_sec || null,
+        c.remote_url || null,
+        newThumbnail,
+        c.width || null,
+        c.height || null,
+        c.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.content++;
     }
 
     // Import widgets
-    for (const w of (data.widgets || [])) {
+    for (const w of data.widgets || []) {
       const newId = uuid.v4();
       idMap.widgets[w.id] = newId;
-      const config = typeof w.config === 'string' ? w.config : JSON.stringify(w.config || {});
-      db.prepare(`INSERT INTO widgets (id, user_id, workspace_id, widget_type, name, config, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(newId, userId, workspaceId, w.widget_type, w.name, config, w.created_at || Math.floor(Date.now() / 1000));
+      const config =
+        typeof w.config === "string"
+          ? w.config
+          : JSON.stringify(w.config || {});
+      db.prepare(
+        `INSERT INTO widgets (id, user_id, workspace_id, widget_type, name, config, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        workspaceId,
+        w.widget_type,
+        w.name,
+        config,
+        w.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.widgets++;
     }
 
     // Import layouts and zones
-    for (const l of (data.layouts || [])) {
+    for (const l of data.layouts || []) {
       const newId = uuid.v4();
       idMap.layouts[l.id] = newId;
-      db.prepare(`INSERT INTO layouts (id, user_id, workspace_id, name, width, height, is_template, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`).run(newId, userId, workspaceId, l.name, l.width || 1920, l.height || 1080, l.created_at || Math.floor(Date.now() / 1000));
+      db.prepare(
+        `INSERT INTO layouts (id, user_id, workspace_id, name, width, height, is_template, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+      ).run(
+        newId,
+        userId,
+        workspaceId,
+        l.name,
+        l.width || 1920,
+        l.height || 1080,
+        l.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.layouts++;
     }
-    for (const z of (data.layout_zones || [])) {
+    for (const z of data.layout_zones || []) {
       const newLayoutId = idMap.layouts[z.layout_id];
       if (!newLayoutId) continue;
       const newId = uuid.v4();
       idMap.zones[z.id] = newId;
-      db.prepare(`INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent, z_index, zone_type, fit_mode, background_color, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(newId, newLayoutId, z.name, z.x_percent, z.y_percent, z.width_percent, z.height_percent, z.z_index || 0, z.zone_type || 'content', z.fit_mode || 'cover', z.background_color || '#000000', z.sort_order || 0);
+      db.prepare(
+        `INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent, z_index, zone_type, fit_mode, background_color, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        newLayoutId,
+        z.name,
+        z.x_percent,
+        z.y_percent,
+        z.width_percent,
+        z.height_percent,
+        z.z_index || 0,
+        z.zone_type || "content",
+        z.fit_mode || "cover",
+        z.background_color || "#000000",
+        z.sort_order || 0,
+      );
     }
 
     // Import playlists (v2) or convert assignments to playlists (v1)
     if (isV2) {
-      for (const p of (data.playlists || [])) {
+      for (const p of data.playlists || []) {
         const newId = uuid.v4();
         idMap.playlists[p.id] = newId;
-        db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, description, is_auto_generated, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(newId, userId, workspaceId, p.name, p.description || '', p.is_auto_generated || 0, p.created_at || Math.floor(Date.now() / 1000), p.updated_at || Math.floor(Date.now() / 1000));
+        db.prepare(
+          "INSERT INTO playlists (id, user_id, workspace_id, name, description, is_auto_generated, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          newId,
+          userId,
+          workspaceId,
+          p.name,
+          p.description || "",
+          p.is_auto_generated || 0,
+          p.created_at || Math.floor(Date.now() / 1000),
+          p.updated_at || Math.floor(Date.now() / 1000),
+        );
         stats.playlists++;
       }
-      for (const pi of (data.playlist_items || [])) {
+      for (const pi of data.playlist_items || []) {
         const playlistId = idMap.playlists[pi.playlist_id];
         if (!playlistId) continue;
         const contentId = pi.content_id ? idMap.content[pi.content_id] : null;
         const widgetId = pi.widget_id ? idMap.widgets[pi.widget_id] : null;
         if (!contentId && !widgetId) continue;
-        db.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)').run(playlistId, contentId, widgetId, pi.sort_order || 0, pi.duration_sec || 10);
+        db.prepare(
+          "INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)",
+        ).run(
+          playlistId,
+          contentId,
+          widgetId,
+          pi.sort_order || 0,
+          pi.duration_sec || 10,
+        );
       }
       // Set device playlist_id references
-      for (const d of (data.devices || [])) {
+      for (const d of data.devices || []) {
         if (d.playlist_id && idMap.playlists[d.playlist_id]) {
-          db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(idMap.playlists[d.playlist_id], idMap.devices[d.id]);
+          db.prepare("UPDATE devices SET playlist_id = ? WHERE id = ?").run(
+            idMap.playlists[d.playlist_id],
+            idMap.devices[d.id],
+          );
         }
       }
     } else {
@@ -408,69 +659,173 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
     }
 
     // Import schedules
-    for (const s of (data.schedules || [])) {
-      const devId = s.device_id ? (idMap.devices[s.device_id] || null) : null;
-      const grpId = s.group_id ? (idMap.groups[s.group_id] || null) : null;
+    for (const s of data.schedules || []) {
+      const devId = s.device_id ? idMap.devices[s.device_id] || null : null;
+      const grpId = s.group_id ? idMap.groups[s.group_id] || null : null;
       // Must have either a mapped device or group target
       if (!devId && !grpId) continue;
       const newId = uuid.v4();
-      const playlistId = s.playlist_id ? (idMap.playlists[s.playlist_id] || null) : null;
-      db.prepare(`INSERT INTO schedules (id, user_id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(newId, userId, devId, grpId, s.zone_id ? (idMap.zones[s.zone_id] || null) : null, s.content_id ? (idMap.content[s.content_id] || null) : null, s.widget_id ? (idMap.widgets[s.widget_id] || null) : null, s.layout_id ? (idMap.layouts[s.layout_id] || null) : null, playlistId, s.title || '', s.start_time, s.end_time, s.timezone || 'UTC', s.recurrence || null, s.recurrence_end || null, s.priority || 0, s.enabled !== undefined ? s.enabled : 1, s.color || '#3B82F6', s.created_at || Math.floor(Date.now() / 1000));
+      const playlistId = s.playlist_id
+        ? idMap.playlists[s.playlist_id] || null
+        : null;
+      db.prepare(
+        `INSERT INTO schedules (id, user_id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        devId,
+        grpId,
+        s.zone_id ? idMap.zones[s.zone_id] || null : null,
+        s.content_id ? idMap.content[s.content_id] || null : null,
+        s.widget_id ? idMap.widgets[s.widget_id] || null : null,
+        s.layout_id ? idMap.layouts[s.layout_id] || null : null,
+        playlistId,
+        s.title || "",
+        s.start_time,
+        s.end_time,
+        s.timezone || "UTC",
+        s.recurrence || null,
+        s.recurrence_end || null,
+        s.priority || 0,
+        s.enabled !== undefined ? s.enabled : 1,
+        s.color || "#3B82F6",
+        s.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.schedules++;
     }
 
     // Import video walls
-    for (const w of (data.video_walls || [])) {
+    for (const w of data.video_walls || []) {
       const newId = uuid.v4();
       idMap.walls[w.id] = newId;
-      db.prepare(`INSERT INTO video_walls (id, user_id, name, grid_cols, grid_rows, bezel_h_mm, bezel_v_mm, screen_w_mm, screen_h_mm, sync_mode, content_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(newId, userId, w.name, w.grid_cols, w.grid_rows, w.bezel_h_mm || 0, w.bezel_v_mm || 0, w.screen_w_mm || 400, w.screen_h_mm || 225, w.sync_mode || 'leader', w.content_id ? (idMap.content[w.content_id] || null) : null, w.created_at || Math.floor(Date.now() / 1000));
+      db.prepare(
+        `INSERT INTO video_walls (id, user_id, name, grid_cols, grid_rows, bezel_h_mm, bezel_v_mm, screen_w_mm, screen_h_mm, sync_mode, content_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        w.name,
+        w.grid_cols,
+        w.grid_rows,
+        w.bezel_h_mm || 0,
+        w.bezel_v_mm || 0,
+        w.screen_w_mm || 400,
+        w.screen_h_mm || 225,
+        w.sync_mode || "leader",
+        w.content_id ? idMap.content[w.content_id] || null : null,
+        w.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.video_walls++;
     }
-    for (const wd of (data.video_wall_devices || [])) {
+    for (const wd of data.video_wall_devices || []) {
       const wallId = idMap.walls[wd.wall_id];
       const devId = idMap.devices[wd.device_id];
       if (!wallId || !devId) continue;
-      db.prepare(`INSERT INTO video_wall_devices (wall_id, device_id, grid_col, grid_row, rotation) VALUES (?, ?, ?, ?, ?)`).run(wallId, devId, wd.grid_col, wd.grid_row, wd.rotation || 0);
+      db.prepare(
+        `INSERT INTO video_wall_devices (wall_id, device_id, grid_col, grid_row, rotation) VALUES (?, ?, ?, ?, ?)`,
+      ).run(wallId, devId, wd.grid_col, wd.grid_row, wd.rotation || 0);
     }
 
     // Import kiosk pages
-    for (const k of (data.kiosk_pages || [])) {
+    for (const k of data.kiosk_pages || []) {
       const newId = uuid.v4();
       idMap.kiosk[k.id] = newId;
-      const config = typeof k.config === 'string' ? k.config : JSON.stringify(k.config || {});
-      db.prepare(`INSERT INTO kiosk_pages (id, user_id, workspace_id, name, config, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(newId, userId, workspaceId, k.name, config, k.created_at || Math.floor(Date.now() / 1000));
+      const config =
+        typeof k.config === "string"
+          ? k.config
+          : JSON.stringify(k.config || {});
+      db.prepare(
+        `INSERT INTO kiosk_pages (id, user_id, workspace_id, name, config, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        workspaceId,
+        k.name,
+        config,
+        k.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.kiosk_pages++;
     }
 
     // Import device groups
-    for (const g of (data.device_groups || [])) {
+    for (const g of data.device_groups || []) {
       const newId = uuid.v4();
       idMap.groups[g.id] = newId;
-      db.prepare(`INSERT INTO device_groups (id, user_id, workspace_id, name, color, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(newId, userId, workspaceId, g.name, g.color || '#3B82F6', g.created_at || Math.floor(Date.now() / 1000));
+      db.prepare(
+        `INSERT INTO device_groups (id, user_id, workspace_id, name, color, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        workspaceId,
+        g.name,
+        g.color || "#3B82F6",
+        g.created_at || Math.floor(Date.now() / 1000),
+      );
       stats.device_groups++;
     }
-    for (const gm of (data.device_group_members || [])) {
+    for (const gm of data.device_group_members || []) {
       const groupId = idMap.groups[gm.group_id];
       const devId = idMap.devices[gm.device_id];
       if (!groupId || !devId) continue;
-      db.prepare(`INSERT OR IGNORE INTO device_group_members (group_id, device_id) VALUES (?, ?)`).run(groupId, devId);
+      db.prepare(
+        `INSERT OR IGNORE INTO device_group_members (group_id, device_id) VALUES (?, ?)`,
+      ).run(groupId, devId);
     }
 
     // Import alert configs
-    for (const a of (data.alert_configs || [])) {
+    for (const a of data.alert_configs || []) {
       const newId = uuid.v4();
-      const config = typeof a.config === 'string' ? a.config : JSON.stringify(a.config || {});
-      db.prepare(`INSERT INTO alert_configs (id, user_id, alert_type, enabled, config, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(newId, userId, a.alert_type, a.enabled !== undefined ? a.enabled : 1, config, a.created_at || Math.floor(Date.now() / 1000));
+      const config =
+        typeof a.config === "string"
+          ? a.config
+          : JSON.stringify(a.config || {});
+      db.prepare(
+        `INSERT INTO alert_configs (id, user_id, alert_type, enabled, config, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        userId,
+        a.alert_type,
+        a.enabled !== undefined ? a.enabled : 1,
+        config,
+        a.created_at || Math.floor(Date.now() / 1000),
+      );
     }
 
     // Import white label - UPSERT into the importer's current workspace.
     if (data.white_label && workspaceId) {
       const wl = data.white_label;
-      const existing = db.prepare('SELECT id FROM white_labels WHERE workspace_id = ?').get(workspaceId);
+      const existing = db
+        .prepare("SELECT id FROM white_labels WHERE workspace_id = ?")
+        .get(workspaceId);
       if (existing) {
-        db.prepare(`UPDATE white_labels SET brand_name=?, logo_url=?, favicon_url=?, primary_color=?, bg_color=?, custom_domain=?, custom_css=?, hide_branding=?, updated_at=strftime('%s','now') WHERE workspace_id=?`).run(wl.brand_name || 'ScreenTinker', wl.logo_url || null, wl.favicon_url || null, wl.primary_color || '#3B82F6', wl.bg_color || '#111827', wl.custom_domain || null, wl.custom_css || null, wl.hide_branding || 0, workspaceId);
+        db.prepare(
+          `UPDATE white_labels SET brand_name=?, logo_url=?, favicon_url=?, primary_color=?, bg_color=?, custom_domain=?, custom_css=?, hide_branding=?, updated_at=strftime('%s','now') WHERE workspace_id=?`,
+        ).run(
+          wl.brand_name || "BeamOS",
+          wl.logo_url || null,
+          wl.favicon_url || null,
+          wl.primary_color || "#3B82F6",
+          wl.bg_color || "#111827",
+          wl.custom_domain || null,
+          wl.custom_css || null,
+          wl.hide_branding || 0,
+          workspaceId,
+        );
       } else {
-        db.prepare(`INSERT INTO white_labels (id, user_id, workspace_id, brand_name, logo_url, favicon_url, primary_color, bg_color, custom_domain, custom_css, hide_branding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(uuid.v4(), userId, workspaceId, wl.brand_name || 'ScreenTinker', wl.logo_url || null, wl.favicon_url || null, wl.primary_color || '#3B82F6', wl.bg_color || '#111827', wl.custom_domain || null, wl.custom_css || null, wl.hide_branding || 0);
+        db.prepare(
+          `INSERT INTO white_labels (id, user_id, workspace_id, brand_name, logo_url, favicon_url, primary_color, bg_color, custom_domain, custom_css, hide_branding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          uuid.v4(),
+          userId,
+          workspaceId,
+          wl.brand_name || "BeamOS",
+          wl.logo_url || null,
+          wl.favicon_url || null,
+          wl.primary_color || "#3B82F6",
+          wl.bg_color || "#111827",
+          wl.custom_domain || null,
+          wl.custom_css || null,
+          wl.hide_branding || 0,
+        );
       }
     }
   });
@@ -480,38 +835,64 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
 
     // v1: convert assignments to per-device playlists AFTER transaction (content files now on disk)
     if (!isV2 && data.assignments?.length) {
-      const { execFile } = require('child_process');
+      const { execFile } = require("child_process");
 
       async function probeImportedContent(newContentId) {
-        const c = db.prepare('SELECT id, mime_type, filepath, duration_sec FROM content WHERE id = ?').get(newContentId);
-        if (!c || !c.mime_type?.startsWith('video/') || !c.filepath) return c?.duration_sec ? Math.ceil(c.duration_sec) : null;
+        const c = db
+          .prepare(
+            "SELECT id, mime_type, filepath, duration_sec FROM content WHERE id = ?",
+          )
+          .get(newContentId);
+        if (!c || !c.mime_type?.startsWith("video/") || !c.filepath)
+          return c?.duration_sec ? Math.ceil(c.duration_sec) : null;
         if (c.duration_sec) return Math.ceil(c.duration_sec);
         try {
           const fullPath = path.join(config.contentDir, c.filepath);
           const stdout = await new Promise((resolve, reject) => {
-            execFile('ffprobe', ['-v', 'quiet', '-print_format', 'json', '-show_format', fullPath],
-              { timeout: 15000 }, (err, out) => err ? reject(err) : resolve(out));
+            execFile(
+              "ffprobe",
+              [
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                fullPath,
+              ],
+              { timeout: 15000 },
+              (err, out) => (err ? reject(err) : resolve(out)),
+            );
           });
           const info = JSON.parse(stdout);
           if (info.format?.duration) {
             const dur = parseFloat(info.format.duration);
-            db.prepare('UPDATE content SET duration_sec = ? WHERE id = ?').run(dur, c.id);
+            db.prepare("UPDATE content SET duration_sec = ? WHERE id = ?").run(
+              dur,
+              c.id,
+            );
             return Math.ceil(dur);
           }
-        } catch (e) { /* probe failed, fall back to default */ }
+        } catch (e) {
+          /* probe failed, fall back to default */
+        }
         return null;
       }
 
       const assignmentsByDevice = {};
-      for (const a of (data.assignments || [])) {
-        if (!assignmentsByDevice[a.device_id]) assignmentsByDevice[a.device_id] = [];
+      for (const a of data.assignments || []) {
+        if (!assignmentsByDevice[a.device_id])
+          assignmentsByDevice[a.device_id] = [];
         assignmentsByDevice[a.device_id].push(a);
       }
 
-      for (const [oldDevId, assignments] of Object.entries(assignmentsByDevice)) {
+      for (const [oldDevId, assignments] of Object.entries(
+        assignmentsByDevice,
+      )) {
         const devId = idMap.devices[oldDevId];
         if (!devId) continue;
-        const devName = (data.devices || []).find(d => d.id === oldDevId)?.name || 'Display';
+        const devName =
+          (data.devices || []).find((d) => d.id === oldDevId)?.name ||
+          "Display";
         const playlistId = uuid.v4();
 
         const items = [];
@@ -524,41 +905,69 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
             const probed = await probeImportedContent(contentId);
             if (probed) duration = probed;
           }
-          items.push({ contentId, widgetId, sort_order: a.sort_order || 0, duration });
+          items.push({
+            contentId,
+            widgetId,
+            sort_order: a.sort_order || 0,
+            duration,
+          });
         }
 
-        db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, description, is_auto_generated) VALUES (?, ?, ?, ?, ?, 1)')
-          .run(playlistId, userId, workspaceId, `${devName} (imported)`, 'Converted from v1 assignments');
+        db.prepare(
+          "INSERT INTO playlists (id, user_id, workspace_id, name, description, is_auto_generated) VALUES (?, ?, ?, ?, ?, 1)",
+        ).run(
+          playlistId,
+          userId,
+          workspaceId,
+          `${devName} (imported)`,
+          "Converted from v1 assignments",
+        );
         for (const item of items) {
-          db.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)')
-            .run(playlistId, item.contentId, item.widgetId, item.sort_order, item.duration);
+          db.prepare(
+            "INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)",
+          ).run(
+            playlistId,
+            item.contentId,
+            item.widgetId,
+            item.sort_order,
+            item.duration,
+          );
         }
-        db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(playlistId, devId);
+        db.prepare("UPDATE devices SET playlist_id = ? WHERE id = ?").run(
+          playlistId,
+          devId,
+        );
         stats.playlists++;
       }
     }
 
     // Collect pairing codes for imported devices
-    const devicePairings = (data.devices || []).map(d => {
-      const newId = idMap.devices[d.id];
-      const dev = db.prepare('SELECT name, pairing_code FROM devices WHERE id = ?').get(newId);
-      return dev ? { name: dev.name, pairing_code: dev.pairing_code } : null;
-    }).filter(Boolean);
+    const devicePairings = (data.devices || [])
+      .map((d) => {
+        const newId = idMap.devices[d.id];
+        const dev = db
+          .prepare("SELECT name, pairing_code FROM devices WHERE id = ?")
+          .get(newId);
+        return dev ? { name: dev.name, pairing_code: dev.pairing_code } : null;
+      })
+      .filter(Boolean);
 
     res.json({
       success: true,
-      message: 'Import complete',
+      message: "Import complete",
       stats,
       device_pairings: devicePairings,
       notes: [
-        'Devices need to be re-paired. Use the pairing codes below or re-pair from the Displays page.',
-        stats.files_restored ? `${stats.files_restored} content files restored from export.` : 'File-based content needs to be re-uploaded. Remote URL content works immediately.',
-        'All IDs have been regenerated to avoid conflicts.',
-      ]
+        "Devices need to be re-paired. Use the pairing codes below or re-pair from the Displays page.",
+        stats.files_restored
+          ? `${stats.files_restored} content files restored from export.`
+          : "File-based content needs to be re-uploaded. Remote URL content works immediately.",
+        "All IDs have been regenerated to avoid conflicts.",
+      ],
     });
   } catch (err) {
-    console.error('Import error:', err);
-    res.status(500).json({ error: 'Import failed: ' + err.message });
+    console.error("Import error:", err);
+    res.status(500).json({ error: "Import failed: " + err.message });
   }
 });
 

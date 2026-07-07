@@ -18,10 +18,10 @@
 // for an existing user, so a failed Graph send is surfaced in the logs and left
 // alone rather than retried (that code would be dead).
 
-const { db } = require('../db/database');
-const { sendEmail } = require('./email');
-const { getClientIp } = require('./activity');
-const config = require('../config');
+const { db } = require("../db/database");
+const { sendEmail } = require("./email");
+const { getClientIp } = require("./activity");
+const config = require("../config");
 
 // Admin signup-notify recipient. Sourced from env (not hardcoded) so the
 // hosted .com address never ships in open-source code: a self-hoster who
@@ -31,16 +31,22 @@ const config = require('../config');
 const ADMIN_NOTIFY_TO = process.env.ADMIN_NOTIFY_EMAIL || null;
 
 const LINKS = {
-  player:     'https://screentinker.com/player/',
-  pi:         'https://screentinker.com/guides/raspberry-pi-digital-signage.html',
-  androidTv:  'https://screentinker.com/guides/digital-signage-android-tv.html',
-  selfHosted: 'https://screentinker.com/guides/self-hosted-digital-signage.html',
-  discord:    'https://discord.gg/utTdsrqq4Z',
+  player: "https://screentinker.com/player/",
+  pi: "https://screentinker.com/guides/raspberry-pi-digital-signage.html",
+  androidTv: "https://screentinker.com/guides/digital-signage-android-tv.html",
+  selfHosted:
+    "https://screentinker.com/guides/self-hosted-digital-signage.html",
+  discord: "https://discord.gg/utTdsrqq4Z",
 };
 
 function htmlEscape(s) {
-  return String(s).replace(/[&<>"']/g, c =>
-    ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
 }
 
 // Plain-text body. Pure ASCII on purpose: "->" not the arrow glyph, "-" not the
@@ -49,9 +55,9 @@ function htmlEscape(s) {
 function welcomeText(name) {
   return `Hi ${name},
 
-Thanks for signing up for ScreenTinker. Glad you're here.
+Thanks for signing up for BeamOS. Glad you're here.
 
-One thing worth knowing up front. ScreenTinker is run by one person, me.
+One thing worth knowing up front. BeamOS is run by one person, me.
 There's no support queue or ticket robot. If you hit reply to this email,
 it comes straight to me and I'll answer.
 
@@ -74,14 +80,14 @@ Want to ask a human or see what others are building? Discord's here:
 Just hit reply if anything's unclear or not working. I read every email.
 
 - Dan
-ScreenTinker`;
+BeamOS`;
 }
 
 function welcomeHtml(name) {
   return `<div style="font-family:-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.6;color:#222;max-width:560px">
 <p>Hi ${htmlEscape(name)},</p>
-<p>Thanks for signing up for ScreenTinker. Glad you're here.</p>
-<p>One thing worth knowing up front. ScreenTinker is run by one person, me. There's no support queue or ticket robot. If you hit reply to this email, it comes straight to me and I'll answer.</p>
+<p>Thanks for signing up for BeamOS. Glad you're here.</p>
+<p>One thing worth knowing up front. BeamOS is run by one person, me. There's no support queue or ticket robot. If you hit reply to this email, it comes straight to me and I'll answer.</p>
 <p>The fastest way to see it work is to put something on a screen. You can turn any browser into a display in about a minute with the web player:</p>
 <p><a href="${LINKS.player}" style="font-weight:600">Open the web player</a></p>
 <p>Open that on whatever you want to use as a screen, pair it from your dashboard, and you're live.</p>
@@ -93,33 +99,48 @@ function welcomeHtml(name) {
 </ul>
 <p>Want to ask a human or see what others are building? <a href="${LINKS.discord}">Discord's here</a>.</p>
 <p>Just hit reply if anything's unclear or not working. I read every email.</p>
-<p>- Dan<br>ScreenTinker</p>
+<p>- Dan<br>BeamOS</p>
 </div>`;
 }
 
 function fmtUtc(unixSec) {
-  return new Date(unixSec * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+  return new Date(unixSec * 1000)
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d+Z$/, " UTC");
 }
 
 function fmtCentral(unixSec) {
-  return new Date(unixSec * 1000).toLocaleString('en-US', {
-    timeZone: 'America/Chicago',
-    year: 'numeric', month: 'short', day: 'numeric',
-    hour: 'numeric', minute: '2-digit', hour12: true,
+  return new Date(unixSec * 1000).toLocaleString("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
   });
 }
 
-function adminText({ name, email, orgName, signupUnix, ip, country, userAgent }) {
-  return `New ScreenTinker signup.
+function adminText({
+  name,
+  email,
+  orgName,
+  signupUnix,
+  ip,
+  country,
+  userAgent,
+}) {
+  return `New BeamOS signup.
 
 Name:       ${name}
 Email:      ${email}
 Org:        ${orgName}
 Plan:       pro (14-day trial)
 Signed up:  ${fmtUtc(signupUnix)}  (${fmtCentral(signupUnix)} America/Chicago)
-IP:         ${ip || 'unknown'}
-Country:    ${country || 'unknown'}
-User agent: ${userAgent || 'unknown'}`;
+IP:         ${ip || "unknown"}
+Country:    ${country || "unknown"}
+User agent: ${userAgent || "unknown"}`;
 }
 
 // Public entry point. `user` only needs `.id`; everything else is re-read from
@@ -130,31 +151,38 @@ function sendSignupEmails(user, req) {
     // Hosted instance only.
     if (config.selfHosted) return;
 
-    const row = db.prepare(
-      'SELECT email, name, created_at, welcome_email_sent_at FROM users WHERE id = ?'
-    ).get(user.id);
+    const row = db
+      .prepare(
+        "SELECT email, name, created_at, welcome_email_sent_at FROM users WHERE id = ?",
+      )
+      .get(user.id);
     if (!row || row.welcome_email_sent_at) return; // unknown or already handled
 
     const email = row.email;
-    const name = (row.name && row.name.trim()) ? row.name.trim() : email.split('@')[0];
+    const name =
+      row.name && row.name.trim() ? row.name.trim() : email.split("@")[0];
     const signupUnix = row.created_at || Math.floor(Date.now() / 1000);
 
     // Workspace name is always "Default" at signup, so use the org name instead.
-    const orgRow = db.prepare(
-      'SELECT name FROM organizations WHERE owner_user_id = ? ORDER BY created_at ASC LIMIT 1'
-    ).get(user.id);
+    const orgRow = db
+      .prepare(
+        "SELECT name FROM organizations WHERE owner_user_id = ? ORDER BY created_at ASC LIMIT 1",
+      )
+      .get(user.id);
     const orgName = orgRow ? orgRow.name : `${name}'s organization`;
 
     const ip = getClientIp(req);
-    const country = (req && req.headers && req.headers['cf-ipcountry']) || 'unknown';
-    const userAgent = (req && req.headers && req.headers['user-agent']) || 'unknown';
+    const country =
+      (req && req.headers && req.headers["cf-ipcountry"]) || "unknown";
+    const userAgent =
+      (req && req.headers && req.headers["user-agent"]) || "unknown";
 
     (async () => {
       const w = await sendEmail({
         to: email,
-        fromName: 'Dan at ScreenTinker',
+        fromName: "Dan at BeamOS",
         rawSubject: true,
-        subject: 'Welcome to ScreenTinker',
+        subject: "Welcome to BeamOS",
         text: welcomeText(name),
         html: welcomeHtml(name),
       });
@@ -165,18 +193,35 @@ function sendSignupEmails(user, req) {
           to: ADMIN_NOTIFY_TO,
           rawSubject: true,
           subject: `New signup: ${email}`,
-          text: adminText({ name, email, orgName, signupUnix, ip, country, userAgent }),
+          text: adminText({
+            name,
+            email,
+            orgName,
+            signupUnix,
+            ip,
+            country,
+            userAgent,
+          }),
         });
-        console.log(`[SIGNUP-EMAIL] admin-notify (${email}) -> ${ADMIN_NOTIFY_TO}: ${JSON.stringify(a)}`);
+        console.log(
+          `[SIGNUP-EMAIL] admin-notify (${email}) -> ${ADMIN_NOTIFY_TO}: ${JSON.stringify(a)}`,
+        );
       } else {
-        console.log('[SIGNUP-EMAIL] admin notify skipped (ADMIN_NOTIFY_EMAIL unset)');
+        console.log(
+          "[SIGNUP-EMAIL] admin notify skipped (ADMIN_NOTIFY_EMAIL unset)",
+        );
       }
 
       // Stamp after the send block regardless of per-email outcome (no retry):
       // marks this user handled so we never double-send.
-      db.prepare("UPDATE users SET welcome_email_sent_at = strftime('%s','now') WHERE id = ?")
-        .run(user.id);
-    })().catch(e => console.error(`[SIGNUP-EMAIL] unexpected failure for ${email}: ${e.message}`));
+      db.prepare(
+        "UPDATE users SET welcome_email_sent_at = strftime('%s','now') WHERE id = ?",
+      ).run(user.id);
+    })().catch((e) =>
+      console.error(
+        `[SIGNUP-EMAIL] unexpected failure for ${email}: ${e.message}`,
+      ),
+    );
   } catch (e) {
     // Never let signup-email bookkeeping affect the signup request itself.
     console.error(`[SIGNUP-EMAIL] setup failed: ${e.message}`);
