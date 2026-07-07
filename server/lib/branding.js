@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 // Issue #15: instance-level default white-label branding.
 //
@@ -18,33 +18,41 @@
 // workspaces with NO row fall through to the platform default. No row-copying at
 // creation, so editing the platform default propagates everywhere instantly.
 
-const PLATFORM_DEFAULT_ID = 'platform-default';
+const PLATFORM_DEFAULT_ID = "platform-default";
 
 const HARDCODED_BRANDING = {
-  brand_name: 'ScreenTinker',
+  brand_name: "BeamOS",
   logo_url: null,
   favicon_url: null,
-  primary_color: '#3B82F6',
-  secondary_color: '#1E293B',
-  bg_color: '#111827',
+  primary_color: "#3B82F6",
+  secondary_color: "#1E293B",
+  bg_color: "#111827",
   custom_css: null,
   hide_branding: 0,
 };
 
 // The single platform-default row (fixed id), or null if none has been set.
 function platformDefaultRow(db) {
-  return db.prepare('SELECT * FROM white_labels WHERE id = ?').get(PLATFORM_DEFAULT_ID) || null;
+  return (
+    db
+      .prepare("SELECT * FROM white_labels WHERE id = ?")
+      .get(PLATFORM_DEFAULT_ID) || null
+  );
 }
 
 // Resolve effective branding for a context. Pass whichever you have:
 //   { workspaceId } for the authed app, { domain } for the public/login path.
 function resolveBranding(db, { workspaceId = null, domain = null } = {}) {
   if (workspaceId) {
-    const wl = db.prepare('SELECT * FROM white_labels WHERE workspace_id = ?').get(workspaceId);
+    const wl = db
+      .prepare("SELECT * FROM white_labels WHERE workspace_id = ?")
+      .get(workspaceId);
     if (wl) return wl;
   }
   if (domain) {
-    const wl = db.prepare('SELECT * FROM white_labels WHERE custom_domain = ?').get(domain);
+    const wl = db
+      .prepare("SELECT * FROM white_labels WHERE custom_domain = ?")
+      .get(domain);
     if (wl) return wl;
   }
   return platformDefaultRow(db) || { ...HARDCODED_BRANDING };
@@ -53,11 +61,27 @@ function resolveBranding(db, { workspaceId = null, domain = null } = {}) {
 // Presentational fields only. The PUBLIC resolver (GET /api/branding) and the
 // by-domain lookup must not leak internal columns (id, user_id, workspace_id,
 // custom_domain, timestamps) to unauthenticated / cross-tenant callers.
-const PUBLIC_BRANDING_FIELDS = ['brand_name', 'logo_url', 'favicon_url', 'primary_color', 'secondary_color', 'bg_color', 'custom_css', 'hide_branding'];
+const PUBLIC_BRANDING_FIELDS = [
+  "brand_name",
+  "logo_url",
+  "favicon_url",
+  "primary_color",
+  "secondary_color",
+  "bg_color",
+  "custom_css",
+  "hide_branding",
+];
 function publicBranding(row) {
   const out = {};
-  for (const f of PUBLIC_BRANDING_FIELDS) out[f] = row ? (row[f] ?? null) : null;
+  for (const f of PUBLIC_BRANDING_FIELDS)
+    out[f] = row ? (row[f] ?? null) : null;
   return out;
 }
 
-module.exports = { resolveBranding, platformDefaultRow, publicBranding, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID };
+module.exports = {
+  resolveBranding,
+  platformDefaultRow,
+  publicBranding,
+  HARDCODED_BRANDING,
+  PLATFORM_DEFAULT_ID,
+};
