@@ -1,6 +1,6 @@
 {
-  "name": "ScreenTinker",
-  "short_name": "ScreenTinker",
+  "name": "BeamOS",
+  "short_name": "BeamOS",
   "description": "Digital Signage Management",
   "start_url": "/",
   "display": "standalone",
