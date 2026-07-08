@@ -50,14 +50,14 @@ Every resource (device, content row, playlist, schedule, etc.) carries a `worksp
 
 Six roles, top wins:
 
-| Role | Scope | Cap |
-|---|---|---|
-| `platform_admin` | every workspace in the system | full read/write (via acting-as on workspaces they're not a direct member of) |
-| `org_owner` | one organization | billing + delete + admin within all workspaces in the org |
-| `org_admin` | one organization | admin within all workspaces in the org (no billing) |
-| `workspace_admin` | one workspace | manage members, rename, full read/write |
-| `workspace_editor` | one workspace | create/edit content, devices, playlists, schedules; no member changes |
-| `workspace_viewer` | one workspace | read-only |
+| Role               | Scope                         | Cap                                                                          |
+| ------------------ | ----------------------------- | ---------------------------------------------------------------------------- |
+| `platform_admin`   | every workspace in the system | full read/write (via acting-as on workspaces they're not a direct member of) |
+| `org_owner`        | one organization              | billing + delete + admin within all workspaces in the org                    |
+| `org_admin`        | one organization              | admin within all workspaces in the org (no billing)                          |
+| `workspace_admin`  | one workspace                 | manage members, rename, full read/write                                      |
+| `workspace_editor` | one workspace                 | create/edit content, devices, playlists, schedules; no member changes        |
+| `workspace_viewer` | one workspace                 | read-only                                                                    |
 
 ### Workspace switcher
 
@@ -95,7 +95,7 @@ npm install
 SELF_HOSTED=true npm start
 ```
 
-The server starts on port 3001 (HTTP). If SSL certificates are present in `server/certs/`, it starts on port 3443 (HTTPS) with automatic HTTP-to-HTTPS redirect. Open the URL shown in the startup banner. The first registered user gets full access with all features unlocked.
+The server starts on port 4001 (HTTP). If SSL certificates are present in `server/certs/`, it starts on port 3443 (HTTPS) with automatic HTTP-to-HTTPS redirect. Open the URL shown in the startup banner. The first registered user gets full access with all features unlocked.
 
 Schema migrations run automatically on first boot — no manual migration commands at any point in the lifecycle.
 
@@ -103,24 +103,24 @@ Schema migrations run automatically on first boot — no manual migration comman
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | HTTP port | `3001` |
-| `HTTPS_PORT` | HTTPS port (used when SSL certs are present) | `3443` |
-| `NODE_ENV` | Runtime env (`production` enables Express production optimizations + stricter error handling) | _(none)_ |
-| `SELF_HOSTED` | First user gets all features unlocked | `false` |
-| `HIDE_BILLING` | Hide the Subscription nav item + billing view; `#/billing` redirects to the dashboard (UI-only, opt-in) | `false` |
-| `DISABLE_REGISTRATION` | Block new account creation (including OAuth auto-signup). First-user setup on an empty DB is still allowed. | `false` |
-| `DISABLE_HOMEPAGE` | Redirect `/` to `/app` instead of serving the marketing landing page. For internal-only self-hosted deployments. | `false` |
-| `APP_URL` | Your public URL (used for Stripe callbacks and invite-accept URLs in emailed invites) | _(none)_ |
-| `JWT_SECRET` | JWT signing key (auto-generated if not set) | _(auto)_ |
-| `SSL_CERT` | Path to SSL certificate | `server/certs/cert.pem` |
-| `SSL_KEY` | Path to SSL private key | `server/certs/key.pem` |
-| `PING_INTERVAL` | Socket.IO Engine.IO ping interval (ms). Raise for slow TV WebKits that miss pongs under decode load. | `30000` |
-| `PING_TIMEOUT` | Socket.IO Engine.IO pong wait (ms). Lower = faster dead-socket detection; higher = more forgiving of laggy clients. | `30000` |
-| `HEARTBEAT_INTERVAL` | App-level offline-checker frequency (ms). How often the server sweeps the device list looking for stale heartbeats. | `10000` |
-| `HEARTBEAT_TIMEOUT` | How long without an app-level heartbeat (ms) before marking a device offline. Raise for slow/jittery networks. | `45000` |
-| `COMMAND_QUEUE_TTL_MS` | How long the server holds commands and playlist-updates for a device that's offline at emit time (ms). Flushed in order on reconnect within this window; dropped past TTL. | `30000` |
+| Variable               | Description                                                                                                                                                                | Default                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `PORT`                 | HTTP port                                                                                                                                                                  | `4001`                  |
+| `HTTPS_PORT`           | HTTPS port (used when SSL certs are present)                                                                                                                               | `3443`                  |
+| `NODE_ENV`             | Runtime env (`production` enables Express production optimizations + stricter error handling)                                                                              | _(none)_                |
+| `SELF_HOSTED`          | First user gets all features unlocked                                                                                                                                      | `false`                 |
+| `HIDE_BILLING`         | Hide the Subscription nav item + billing view; `#/billing` redirects to the dashboard (UI-only, opt-in)                                                                    | `false`                 |
+| `DISABLE_REGISTRATION` | Block new account creation (including OAuth auto-signup). First-user setup on an empty DB is still allowed.                                                                | `false`                 |
+| `DISABLE_HOMEPAGE`     | Redirect `/` to `/app` instead of serving the marketing landing page. For internal-only self-hosted deployments.                                                           | `false`                 |
+| `APP_URL`              | Your public URL (used for Stripe callbacks and invite-accept URLs in emailed invites)                                                                                      | _(none)_                |
+| `JWT_SECRET`           | JWT signing key (auto-generated if not set)                                                                                                                                | _(auto)_                |
+| `SSL_CERT`             | Path to SSL certificate                                                                                                                                                    | `server/certs/cert.pem` |
+| `SSL_KEY`              | Path to SSL private key                                                                                                                                                    | `server/certs/key.pem`  |
+| `PING_INTERVAL`        | Socket.IO Engine.IO ping interval (ms). Raise for slow TV WebKits that miss pongs under decode load.                                                                       | `30000`                 |
+| `PING_TIMEOUT`         | Socket.IO Engine.IO pong wait (ms). Lower = faster dead-socket detection; higher = more forgiving of laggy clients.                                                        | `30000`                 |
+| `HEARTBEAT_INTERVAL`   | App-level offline-checker frequency (ms). How often the server sweeps the device list looking for stale heartbeats.                                                        | `10000`                 |
+| `HEARTBEAT_TIMEOUT`    | How long without an app-level heartbeat (ms) before marking a device offline. Raise for slow/jittery networks.                                                             | `45000`                 |
+| `COMMAND_QUEUE_TTL_MS` | How long the server holds commands and playlist-updates for a device that's offline at emit time (ms). Flushed in order on reconnect within this window; dropped past TTL. | `30000`                 |
 
 ### Optional Integrations
 
@@ -151,11 +151,11 @@ If you want to charge your users, plug in your own Stripe keys. Without them, al
    ```
 5. Set the environment variables:
 
-| Variable | Description |
-|----------|-------------|
-| `STRIPE_SECRET_KEY` | Your Stripe secret key (`sk_live_...` or `sk_test_...`) |
-| `STRIPE_WEBHOOK_SECRET` | Webhook signing secret (`whsec_...`) |
-| `APP_URL` | Your public URL (e.g. `https://signage.yourcompany.com`) |
+| Variable                | Description                                              |
+| ----------------------- | -------------------------------------------------------- |
+| `STRIPE_SECRET_KEY`     | Your Stripe secret key (`sk_live_...` or `sk_test_...`)  |
+| `STRIPE_WEBHOOK_SECRET` | Webhook signing secret (`whsec_...`)                     |
+| `APP_URL`               | Your public URL (e.g. `https://signage.yourcompany.com`) |
 
 The default plans are: Free (2 devices), Starter (8 devices), Pro (25 devices), and Enterprise (unlimited). Edit the `plans` table to change pricing, limits, or add/remove tiers. In self-hosted mode, the first user gets Enterprise automatically.
 
@@ -168,8 +168,8 @@ Let users sign in with Google.
 3. Create OAuth 2.0 credentials (web application)
 4. Add `https://yourdomain.com` as an authorized origin
 
-| Variable | Description |
-|----------|-------------|
+| Variable           | Description                 |
+| ------------------ | --------------------------- |
 | `GOOGLE_CLIENT_ID` | Your Google OAuth client ID |
 
 #### Microsoft OAuth
@@ -180,22 +180,22 @@ Let users sign in with Microsoft/Azure AD.
 2. Add a web redirect URI: `https://yourdomain.com`
 3. Note the Application (client) ID
 
-| Variable | Description |
-|----------|-------------|
-| `MICROSOFT_CLIENT_ID` | Your Azure AD application client ID |
+| Variable              | Description                           |
+| --------------------- | ------------------------------------- |
+| `MICROSOFT_CLIENT_ID` | Your Azure AD application client ID   |
 | `MICROSOFT_TENANT_ID` | Tenant ID (`common` for multi-tenant) |
 
 #### Email Alerts (Microsoft Graph)
 
 Send email notifications when devices go offline. Backed by Microsoft Graph Mail.Send via the client-credentials flow.
 
-| Variable | Description |
-|----------|-------------|
-| `GRAPH_TENANT_ID` | Microsoft Azure AD tenant ID |
-| `GRAPH_CLIENT_ID` | Azure AD app registration client ID |
-| `GRAPH_CLIENT_SECRET` | Azure AD app registration client secret |
-| `GRAPH_SENDER_EMAIL` | Mailbox to send from (must be a valid mailbox or alias in the tenant) |
-| `GRAPH_SENDER_NAME` | Display name shown in the email `From` field (defaults to `ScreenTinker`) |
+| Variable              | Description                                                               |
+| --------------------- | ------------------------------------------------------------------------- |
+| `GRAPH_TENANT_ID`     | Microsoft Azure AD tenant ID                                              |
+| `GRAPH_CLIENT_ID`     | Azure AD app registration client ID                                       |
+| `GRAPH_CLIENT_SECRET` | Azure AD app registration client secret                                   |
+| `GRAPH_SENDER_EMAIL`  | Mailbox to send from (must be a valid mailbox or alias in the tenant)     |
+| `GRAPH_SENDER_NAME`   | Display name shown in the email `From` field (defaults to `ScreenTinker`) |
 
 **Azure AD app setup:**
 
@@ -210,13 +210,14 @@ Send email notifications when devices go offline. Backed by Microsoft Graph Mail
 
 **Dev safety allow-list:**
 
-| Variable | Description |
-|----------|-------------|
+| Variable                | Description                                                                                                                                         |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GRAPH_DEV_RESTRICT_TO` | Comma-separated allow-list of recipient emails. When set, sends to addresses **not** in the list are suppressed (logged but never posted to Graph). |
 
 Use this in local dev when running against a fresh production database clone to prevent accidental emails to real users. Leave it **unset in production** so emails flow to everyone normally.
 
 **Alert spam protections** (also live, no configuration needed):
+
 - **2-hour dedup window** per (alert-type, target-id) pair — the same device won't trigger repeated alerts within two hours
 - **24-hour long-offline cutoff** — devices that have been offline for more than 24 hours stop generating alerts (the user already knows or the device is abandoned; further alerts are noise)
 - **Sequential send pattern** through the offline-alert backlog — avoids Graph's per-app concurrent-send throttling (HTTP 429 `ApplicationThrottled`)
@@ -249,7 +250,7 @@ User=screentinker
 WorkingDirectory=/opt/screentinker/server
 ExecStart=/usr/bin/node server.js
 Restart=always
-Environment=PORT=3001
+Environment=PORT=4001
 Environment=NODE_ENV=production
 Environment=SELF_HOSTED=true
 # Lock down an internal / provisioned-only instance (all accounts created by your
@@ -295,7 +296,7 @@ server {
     client_max_body_size 500M;
 
     location / {
-        proxy_pass http://127.0.0.1:3001;
+        proxy_pass http://127.0.0.1:4001;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";

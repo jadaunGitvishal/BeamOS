@@ -51,11 +51,11 @@ echo "==> Installing server deps (npm ci --omit=dev)"
 echo "==> Restarting $SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
 
-# Best-effort: report the running version. Tries HTTP :3001 then HTTPS :3443.
+# Best-effort: report the running version. Tries HTTP :4001 then HTTPS :3443.
 echo "==> Waiting for the service to answer..."
 OUT=""
 for i in $(seq 1 30); do
-  for URL in "${STATUS_URL:-}" http://localhost:3001/api/status https://localhost:3443/api/status; do
+  for URL in "${STATUS_URL:-}" http://localhost:4001/api/status https://localhost:3443/api/status; do
     [ -z "$URL" ] && continue
     OUT="$(curl -skf "$URL" 2>/dev/null || true)"
     [ -n "$OUT" ] && break

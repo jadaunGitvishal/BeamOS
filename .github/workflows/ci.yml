@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
           cache: npm
           cache-dependency-path: server/package-lock.json
       - run: npm ci
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
       - name: Lint the public API spec
         run: npx --yes @redocly/cli@latest lint docs/openapi.yaml
       # Contract integrity: the spec documents ONLY the token-reachable public surface.
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
       - uses: android-actions/setup-android@v3
       # ScheduleEvalTest reads the SHARED shared/schedule-vectors.json (wired via
       # the test task in app/build.gradle.kts), so a ScheduleEval.kt change that
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
           cache: npm
           cache-dependency-path: server/package-lock.json
 
@@ -88,17 +88,17 @@ jobs:
 
       # Boot against a fresh SQLite db (clean checkout = no db yet). SELF_HOSTED
       # makes the first user an admin with no billing. No certs present, so the
-      # server listens on plain HTTP at :3001. Background it and wait until it
+      # server listens on plain HTTP at :4001. Background it and wait until it
       # answers.
       - name: Boot server
         working-directory: server
         env:
-          SELF_HOSTED: 'true'
+          SELF_HOSTED: "true"
         run: |
           node server.js > "$RUNNER_TEMP/server.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/server.pid"
           for i in $(seq 1 30); do
-            curl -sf http://localhost:3001/api/status >/dev/null && exit 0
+            curl -sf http://localhost:4001/api/status >/dev/null && exit 0
             sleep 1
           done
           echo "server did not come up within 30s:"; cat "$RUNNER_TEMP/server.log"; exit 1
@@ -107,7 +107,7 @@ jobs:
       # VERSION file - this is what proves the single-source-of-truth wiring.
       - name: Assert /api/status ok and version matches VERSION
         run: |
-          STATUS="$(curl -sf http://localhost:3001/api/status)"
+          STATUS="$(curl -sf http://localhost:4001/api/status)"
           echo "status: $STATUS"
           EXPECTED="$(cat VERSION)"
           REPORTED="$(echo "$STATUS" | jq -r .version)"

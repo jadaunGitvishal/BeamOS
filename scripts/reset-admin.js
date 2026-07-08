@@ -6,19 +6,26 @@
  * Usage: node scripts/reset-admin.js
  */
 
-const path = require('path');
-const config = require(path.join(__dirname, '..', 'server', 'config'));
-const jwt = require(path.join(__dirname, '..', 'server', 'node_modules', 'jsonwebtoken'));
-const crypto = require('crypto');
+const path = require("path");
+const config = require(path.join(__dirname, "..", "server", "config"));
+const jwt = require(
+  path.join(__dirname, "..", "server", "node_modules", "jsonwebtoken"),
+);
+const crypto = require("crypto");
 
-const nonce = crypto.randomBytes(8).toString('hex');
+const nonce = crypto.randomBytes(8).toString("hex");
 const token = jwt.sign(
-  { id: 'recovery-' + nonce, email: 'admin@localhost', role: 'admin', recovery: true },
+  {
+    id: "recovery-" + nonce,
+    email: "admin@localhost",
+    role: "admin",
+    recovery: true,
+  },
   config.jwtSecret,
-  { expiresIn: '1h' }
+  { expiresIn: "1h" },
 );
 
-const port = config.port || 3001;
+const port = config.port || 4001;
 
 console.log(`
 ╔══════════════════════════════════════════════════╗
@@ -35,7 +42,7 @@ To use: Open your ScreenTinker instance, open browser
 console (F12), and run:
 
   localStorage.setItem('token', '${token}');
-  localStorage.setItem('user', '${JSON.stringify({ id: 'recovery-' + nonce, email: 'admin@localhost', name: 'Recovery Admin', role: 'admin', plan_id: 'enterprise' }).replace(/'/g, "\\'")}');
+  localStorage.setItem('user', '${JSON.stringify({ id: "recovery-" + nonce, email: "admin@localhost", name: "Recovery Admin", role: "admin", plan_id: "enterprise" }).replace(/'/g, "\\'")}');
   location.reload();
 
 Or use the API directly:
