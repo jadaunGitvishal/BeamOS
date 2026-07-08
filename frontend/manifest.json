@@ -9,7 +9,7 @@
   "orientation": "any",
   "icons": [
     {
-      "src": "/assets/icon-192.png",
+      "src": "/assets/icon-192-v2.png",
       "sizes": "192x192",
       "type": "image/png"
     },
