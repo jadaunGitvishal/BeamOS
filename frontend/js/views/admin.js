@@ -291,7 +291,6 @@ async function loadUsers() {
           <th style="padding:8px;text-align:left;color:var(--text-muted)">${t("admin.col.auth")}</th>
           <th style="padding:8px;text-align:left;color:var(--text-muted)">${t("admin.col.last_login")}</th>
           <th style="padding:8px;text-align:left;color:var(--text-muted)">${t("admin.col.role")}</th>
-          <th style="padding:8px;text-align:left;color:var(--text-muted)">${t("admin.col.plan")}</th>
           <th style="padding:8px;text-align:left;color:var(--text-muted)">${t("admin.col.workspace")}</th>
           <th style="padding:8px;text-align:left;color:var(--text-muted)">${t("admin.col.actions")}</th>
         </tr></thead>
@@ -308,11 +307,7 @@ async function loadUsers() {
                   ${PLATFORM_ROLE_OPTIONS.map((r) => `<option value="${r}" ${u.role === r ? "selected" : ""}>${t("admin.role." + r)}</option>`).join("")}
                 </select>
               </td>
-              <td style="padding:8px">
-                <select class="input" style="max-width:130px;width:100%;background:var(--bg-input);font-size:12px;padding:4px" data-plan-user="${u.id}">
-                  ${plans.map((p) => `<option value="${p.id}" ${u.plan_id === p.id ? "selected" : ""}>${p.display_name}</option>`).join("")}
-                </select>
-              </td>
+              
               ${workspaceCell(u)}
               <td style="padding:8px;white-space:nowrap">
                 ${u.auth_provider === "local" && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm" data-reset-pw-user="${u.id}" data-user-email="${u.email}" style="margin-right:4px">${t("admin.reset_password")}</button>` : ""}
