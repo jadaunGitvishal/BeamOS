@@ -19,7 +19,7 @@ set -euo pipefail
 
 # -- Configuration --
 SCREENTINKER_DIR="/opt/screentinker"
-SCREENTINKER_PORT=3001
+SCREENTINKER_PORT=4001
 NODE_MAJOR=20
 LOG_FILE="/var/log/screentinker-setup.log"
 
@@ -547,9 +547,9 @@ echo "CPU Temp:  $(vcgencmd measure_temp 2>/dev/null | cut -d= -f2 || echo 'n/a'
 echo "Disk:      $(df -h /opt/screentinker 2>/dev/null | tail -1 | awk '{print $3 "/" $2 " (" $5 " used)"}')"
 echo "Memory:    $(free -h | awk '/Mem:/ {print $3 " / " $2}')"
 echo ""
-echo "Dashboard: http://${IP}:3001"
-echo "Player:    http://${IP}:3001/player"
-echo "mDNS:      http://$(hostname).local:3001"
+echo "Dashboard: http://${IP}:4001"
+echo "Player:    http://${IP}:4001/player"
+echo "mDNS:      http://$(hostname).local:4001"
 echo ""
 STATUSEOF
     chmod +x /usr/local/bin/screentinker-status
