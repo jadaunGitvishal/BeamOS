@@ -92,9 +92,7 @@ export async function render(container) {
     </div>
 
     <div class="settings-section">
-      // <h3>${t("admin.plans")}</h3>
-      // <div id="plansTable"><p style="color:var(--text-muted)">${t("common.loading")}</p></div>
-    </div>
+         </div>
 
     <div class="settings-section">
       <h3>${t("admin.system")}</h3>
@@ -142,7 +140,6 @@ export async function render(container) {
   loadUsers();
   loadOrgs();
   loadBranding();
-  // loadPlans();
   loadSystem();
   loadStatusDebug();
 }
@@ -459,37 +456,6 @@ async function loadStatusDebug() {
     }
   };
 }
-
-// async function loadPlans() {
-//   const el = document.getElementById('plansTable');
-//   try {
-//     const plans = await fetch('/api/subscription/plans').then(r => r.json());
-//     el.innerHTML = `
-//       <div class="table-wrap">
-//       <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:500px">
-//         <thead><tr style="border-bottom:1px solid var(--border)">
-//           <th style="padding:8px;text-align:left;color:var(--text-muted)">${t('admin.col.plan')}</th>
-//           <th style="padding:8px;text-align:right;color:var(--text-muted)">${t('admin.col.devices')}</th>
-//           <th style="padding:8px;text-align:right;color:var(--text-muted)">${t('admin.col.storage')}</th>
-//           <th style="padding:8px;text-align:right;color:var(--text-muted)">${t('admin.col.monthly')}</th>
-//           <th style="padding:8px;text-align:right;color:var(--text-muted)">${t('admin.col.yearly')}</th>
-//         </tr></thead>
-//         <tbody>
-//           ${plans.map(p => `
-//             <tr style="border-bottom:1px solid var(--border)">
-//               <td style="padding:8px;font-weight:500">${p.display_name}</td>
-//               <td style="padding:8px;text-align:right">${p.max_devices === -1 ? t('admin.unlimited') : p.max_devices}</td>
-//               <td style="padding:8px;text-align:right">${p.max_storage_mb === -1 ? t('admin.unlimited') : p.max_storage_mb >= 1024 ? (p.max_storage_mb/1024)+'GB' : p.max_storage_mb+'MB'}</td>
-//               <td style="padding:8px;text-align:right">${p.price_monthly > 0 ? '$'+p.price_monthly : t('admin.free')}</td>
-//               <td style="padding:8px;text-align:right">${p.price_yearly > 0 ? '$'+p.price_yearly : '-'}</td>
-//             </tr>
-//           `).join('')}
-//         </tbody>
-//       </table>
-//       </div>
-//     `;
-//   } catch (err) { el.innerHTML = `<p style="color:var(--danger)">${esc(err.message)}</p>`; }
-// }
 
 async function loadSystem() {
   const el = document.getElementById("systemInfo");
