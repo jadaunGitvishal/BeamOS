@@ -11,9 +11,11 @@
 //     (never add maintenance pressure while already loaded); startup runs un-gated so
 //     it can clear an existing backlog and self-heal without a restart.
 //
-// better-sqlite3's bundled SQLite is NOT built with SQLITE_ENABLE_UPDATE_DELETE_LIMIT,
-// so `DELETE ... LIMIT` is a syntax error. We delete by `rowid IN (SELECT rowid ...
-// LIMIT ?)`, which is portable and rides whatever index the inner SELECT uses.
+// Callers delete via `id IN (SELECT id ... LIMIT ?)` rather than a direct
+// `DELETE ... LIMIT`, which rides whatever index the inner SELECT uses (MySQL
+// supports `DELETE ... LIMIT` directly, but the subquery form was kept as-is
+// during the SQLite -> MySQL migration to avoid changing query behavior
+// alongside the engine swap).
 
 const config = require('../config');
 
@@ -29,7 +31,7 @@ function currentBand() {
   try { return _getBand(); } catch { return 'normal'; }
 }
 
-// Run `runBatch(limit)` (a synchronous DELETE returning rows-deleted) to completion in
+// Run `runBatch(limit)` (a DELETE returning rows-deleted, sync or async) to completion in
 // bounded batches, yielding between each. Stops when a batch deletes < limit (drained).
 // Returns { skipped, deleted, batches }.
 async function chunkedDelete(runBatch, opts = {}) {
@@ -37,7 +39,7 @@ async function chunkedDelete(runBatch, opts = {}) {
   if (opts.bandGate && currentBand() !== 'normal') return { skipped: true, deleted: 0, batches: 0 };
   let total = 0, batches = 0, n;
   do {
-    n = runBatch(batch);
+    n = await runBatch(batch);
     total += n;
     batches += 1;
     if (n > 0) await yieldTick();

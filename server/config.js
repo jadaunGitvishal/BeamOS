@@ -33,7 +33,16 @@ module.exports = {
   port: process.env.PORT || 4001,
   httpsPort: process.env.HTTPS_PORT || 3443,
   dataDir: DATA_DIR,
-  dbPath: process.env.DB_PATH || path.join(DATA_DIR, "db", "remote_display.db"),
+  // MySQL connection settings. mysqlSocketPath (MYSQL_SOCKET_PATH), when set,
+  // connects via a local Unix socket instead of host/port (common on managed
+  // MySQL installs) - mysql2 accepts socketPath instead of host/port in that case.
+  mysqlHost: process.env.MYSQL_HOST || "localhost",
+  mysqlPort: parseInt(process.env.MYSQL_PORT) || 3306,
+  mysqlUser: process.env.MYSQL_USER || "beamos_user",
+  mysqlPassword: process.env.MYSQL_PASSWORD || "",
+  mysqlDatabase: process.env.MYSQL_DATABASE || "beamos",
+  mysqlSocketPath: process.env.MYSQL_SOCKET_PATH || "",
+  mysqlPoolSize: parseInt(process.env.MYSQL_POOL_SIZE) || 10,
   uploadsDir,
   contentDir: path.join(uploadsDir, "content"),
   screenshotsDir: path.join(uploadsDir, "screenshots"),

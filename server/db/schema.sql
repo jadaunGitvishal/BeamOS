@@ -1,177 +1,352 @@
-CREATE TABLE IF NOT EXISTS plans (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    display_name    TEXT NOT NULL,
-    max_devices     INTEGER NOT NULL DEFAULT 2,
-    max_storage_mb  INTEGER NOT NULL DEFAULT 500,
-    remote_control  INTEGER NOT NULL DEFAULT 0,
-    remote_url      INTEGER NOT NULL DEFAULT 0,
-    priority_support INTEGER NOT NULL DEFAULT 0,
-    price_monthly   REAL NOT NULL DEFAULT 0,
-    price_yearly    REAL NOT NULL DEFAULT 0,
-    stripe_monthly_id TEXT,
-    stripe_yearly_id  TEXT,
-    sort_order      INTEGER NOT NULL DEFAULT 0,
-    active          INTEGER NOT NULL DEFAULT 1
-);
+-- BeamOS MySQL schema (converted from the historical SQLite schema.sql +
+-- every incremental migration previously carried in server/db/database.js
+-- and scripts/migrate-multitenancy.js). This file is the full target shape
+-- for a FRESH install — there is no separate migrations array to replay on
+-- top of it, because there is no pre-existing MySQL install to upgrade.
+--
+-- Type conventions used throughout:
+--   - id / FK columns holding UUID-ish strings:  VARCHAR(64)
+--   - short enum-like strings (role, status,...): VARCHAR(50)
+--   - names/paths/urls/hashes:                    VARCHAR(255) or VARCHAR(500)
+--   - unbounded text (config JSON, notes, css):    TEXT
+--   - known-large blobs (thumbnails, published
+--     playlist snapshots):                        MEDIUMTEXT
+--   - unix-seconds timestamps:                     BIGINT (avoids the INT/2038
+--     rollover the original strftime('%s','now') INTEGER columns were exposed to)
+--   - boolean-style 0/1 flags:                     TINYINT(1)
+--
+-- IMPORTANT: unlike SQLite, MySQL/InnoDB silently DROPS inline column-level
+-- `REFERENCES` (SQL-92 style) — it parses but never creates an actual constraint,
+-- so every FK below uses an explicit table-level `FOREIGN KEY (...) REFERENCES ...`
+-- clause instead (verified against a live MySQL 8.0 instance: the inline form
+-- produced zero rows in information_schema.KEY_COLUMN_USAGE and no cascade on
+-- delete; the explicit form does both correctly).
+--
+-- FOREIGN_KEY_CHECKS is disabled for the duration of this script because
+-- several tables forward-reference tables defined later in the file (e.g.
+-- devices.playlist_id -> playlists, which is defined after devices) — the
+-- same reason a mysqldump full-schema file always brackets itself this way.
+-- Verified: explicit FOREIGN KEY clauses tolerate forward references under
+-- FOREIGN_KEY_CHECKS=0 and still enforce/cascade correctly once re-enabled.
+--
+-- db/database.js's initDb() re-runs this whole file on every boot (matching the
+-- old SQLite behavior of re-executing schema.sql on every start). CREATE TABLE
+-- IF NOT EXISTS and INSERT IGNORE are natively idempotent; the standalone
+-- CREATE INDEX statements below are NOT (MySQL has no `CREATE INDEX IF NOT
+-- EXISTS` - confirmed against a live 8.0.36 instance, it's a parse error) so
+-- initDb() splits this file into individual statements and swallows
+-- ER_DUP_KEYNAME ("Duplicate key name") on the second-and-later boot, the same
+-- discipline the old inline migrations array used for SQLite's "duplicate
+-- column name".
+SET FOREIGN_KEY_CHECKS = 0;
 
--- Default plans
-INSERT OR IGNORE INTO plans (id, name, display_name, max_devices, max_storage_mb, remote_control, remote_url, priority_support, price_monthly, price_yearly, sort_order)
+CREATE TABLE IF NOT EXISTS plans (
+    id                VARCHAR(64) PRIMARY KEY,
+    name              VARCHAR(50) NOT NULL,
+    display_name      VARCHAR(255) NOT NULL,
+    max_devices       INT NOT NULL DEFAULT 2,
+    max_storage_mb    INT NOT NULL DEFAULT 500,
+    remote_control    TINYINT(1) NOT NULL DEFAULT 0,
+    remote_url        TINYINT(1) NOT NULL DEFAULT 0,
+    priority_support  TINYINT(1) NOT NULL DEFAULT 0,
+    price_monthly     DOUBLE NOT NULL DEFAULT 0,
+    price_yearly      DOUBLE NOT NULL DEFAULT 0,
+    stripe_monthly_id VARCHAR(255),
+    stripe_yearly_id  VARCHAR(255),
+    stripe_price_monthly TEXT,
+    stripe_price_yearly  TEXT,
+    sort_order        INT NOT NULL DEFAULT 0,
+    active            TINYINT(1) NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT IGNORE INTO plans (id, name, display_name, max_devices, max_storage_mb, remote_control, remote_url, priority_support, price_monthly, price_yearly, sort_order)
 VALUES
---   ('free',       'free',       'Free',       2,    500,   0, 0, 0, 0,     0,     0),
---   ('starter',    'starter',    'Starter',    8,    2048,  1, 0, 0, 9.99,  99,    1),
---   ('pro',        'pro',        'Pro',        25,   10240, 1, 1, 0, 24.99, 249,   2),
---   ('enterprise', 'enterprise', 'Enterprise', -1,   -1,    1, 1, 1, 49.99, 499,   3);
-('free',       'free',       'Free',       -1,   -1,    1, 1, 1, 0,     0,     0),
+  ('free',       'free',       'Free',       -1,   -1,    1, 1, 1, 0,     0,     0),
   ('starter',    'starter',    'Starter',    -1,   -1,    1, 1, 1, 9.99,  99,    1),
   ('pro',        'pro',        'Pro',        -1,   -1,    1, 1, 1, 24.99, 249,   2),
   ('enterprise', 'enterprise', 'Enterprise', -1,   -1,    1, 1, 1, 49.99, 499,   3);
 
 CREATE TABLE IF NOT EXISTS users (
-    id              TEXT PRIMARY KEY,
-    email           TEXT UNIQUE NOT NULL,
-    name            TEXT NOT NULL DEFAULT '',
+    id              VARCHAR(64) PRIMARY KEY,
+    email           VARCHAR(255) UNIQUE NOT NULL,
+    name            VARCHAR(255) NOT NULL DEFAULT '',
     password_hash   TEXT,
-    auth_provider   TEXT NOT NULL DEFAULT 'local',
-    provider_id     TEXT,
-    avatar_url      TEXT,
-    role            TEXT NOT NULL DEFAULT 'user',
-    plan_id         TEXT DEFAULT 'free' REFERENCES plans(id),
-    stripe_customer_id TEXT,
-    stripe_subscription_id TEXT,
-    subscription_status TEXT DEFAULT 'active',
-    subscription_ends  INTEGER,
+    auth_provider   VARCHAR(50) NOT NULL DEFAULT 'local',
+    provider_id     VARCHAR(255),
+    avatar_url      VARCHAR(500),
+    role            VARCHAR(50) NOT NULL DEFAULT 'user',
+    plan_id         VARCHAR(64) DEFAULT 'free',
+    stripe_customer_id VARCHAR(255),
+    stripe_subscription_id VARCHAR(255),
+    subscription_status VARCHAR(50) DEFAULT 'active',
+    subscription_ends  BIGINT,
     -- #100: TOTP MFA (opt-in, local accounts only). totp_secret_enc is secretbox-
     -- encrypted (REVERSIBLE - the server recomputes codes). totp_last_step blocks
     -- intra-window replay (a code from an already-consumed 30s step is rejected).
     totp_secret_enc TEXT,
-    totp_enabled    INTEGER NOT NULL DEFAULT 0,
-    totp_last_step  INTEGER NOT NULL DEFAULT 0,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    totp_enabled    TINYINT(1) NOT NULL DEFAULT 0,
+    totp_last_step  BIGINT NOT NULL DEFAULT 0,
+    email_alerts    TINYINT(1) DEFAULT 1,
+    trial_started   BIGINT,
+    trial_plan      VARCHAR(50) DEFAULT 'pro',
+    last_login      BIGINT,
+    must_change_password TINYINT(1) NOT NULL DEFAULT 0,
+    welcome_email_sent_at    BIGINT,
+    activation_nudge_sent_at BIGINT,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (plan_id) REFERENCES plans(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- #100: single-use TOTP recovery codes. SHA-256 hashed (same discipline as
 -- api_tokens.token_hash); plaintext shown once at enrollment. used_at NULL = available.
 CREATE TABLE IF NOT EXISTS totp_recovery_codes (
-    id          TEXT PRIMARY KEY,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    code_hash   TEXT NOT NULL,
-    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    used_at     INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_totp_recovery_user ON totp_recovery_codes(user_id);
+    id          VARCHAR(64) PRIMARY KEY,
+    user_id     VARCHAR(64) NOT NULL,
+    code_hash   VARCHAR(255) NOT NULL,
+    created_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    used_at     BIGINT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_totp_recovery_user ON totp_recovery_codes(user_id);
+
+-- ===================== ORGANIZATIONS / WORKSPACES (multi-tenancy) =====================
+-- Originally created by scripts/migrate-multitenancy.js's Phase 1 auto-migration
+-- (server/db/database.js -> ensureMultitenancyMigration), not by this file. Folded in
+-- directly here since a fresh MySQL install has no pre-tenancy data to backfill.
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id                      VARCHAR(64) PRIMARY KEY,
+    name                    VARCHAR(255) NOT NULL,
+    slug                    VARCHAR(255) UNIQUE,
+    owner_user_id           VARCHAR(64) NOT NULL,
+    plan_id                 VARCHAR(64) DEFAULT 'free',
+    stripe_customer_id      VARCHAR(255),
+    stripe_subscription_id  VARCHAR(255),
+    subscription_status     VARCHAR(50) DEFAULT 'active',
+    subscription_ends       BIGINT,
+    grace_period_ends       BIGINT,
+    locked_at               BIGINT,
+    default_brand_name      VARCHAR(255),
+    default_logo_url        VARCHAR(500),
+    default_primary_color   VARCHAR(20),
+    created_at              BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at              BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (owner_user_id) REFERENCES users(id),
+    FOREIGN KEY (plan_id) REFERENCES plans(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS organization_members (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    organization_id VARCHAR(64) NOT NULL,
+    user_id         VARCHAR(64) NOT NULL,
+    role            VARCHAR(50) NOT NULL DEFAULT 'org_admin',
+    invited_by      VARCHAR(64),
+    joined_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    UNIQUE(organization_id, user_id),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (invited_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_organization_members_user ON organization_members(user_id);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id                    VARCHAR(64) PRIMARY KEY,
+    organization_id       VARCHAR(64) NOT NULL,
+    name                  VARCHAR(255) NOT NULL,
+    slug                  VARCHAR(255),
+    created_by            VARCHAR(64),
+    billing_type          VARCHAR(50) DEFAULT 'client_billable',
+    billing_notes         TEXT,
+    billing_contact_email VARCHAR(255),
+    billing_contract_ref  VARCHAR(255),
+    created_at            BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at            BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    UNIQUE(organization_id, slug),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_workspaces_organization ON workspaces(organization_id);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    workspace_id    VARCHAR(64) NOT NULL,
+    user_id         VARCHAR(64) NOT NULL,
+    role            VARCHAR(50) NOT NULL DEFAULT 'workspace_viewer',
+    invited_by      VARCHAR(64),
+    joined_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    UNIQUE(workspace_id, user_id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (invited_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_workspace_members_user ON workspace_members(user_id);
+
+CREATE TABLE IF NOT EXISTS workspace_invites (
+    id              VARCHAR(64) PRIMARY KEY,
+    workspace_id    VARCHAR(64) NOT NULL,
+    email           VARCHAR(255) NOT NULL,
+    role            VARCHAR(50) NOT NULL DEFAULT 'workspace_viewer',
+    invited_by      VARCHAR(64) NOT NULL,
+    expires_at      BIGINT NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (invited_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS devices (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT REFERENCES users(id),
-    name            TEXT NOT NULL DEFAULT 'Unnamed Display',
-    pairing_code    TEXT UNIQUE,
-    status          TEXT NOT NULL DEFAULT 'offline',
-    blocked         INTEGER NOT NULL DEFAULT 0,
-    last_heartbeat  INTEGER,
-    ip_address      TEXT,
-    android_version TEXT,
-    app_version     TEXT,
-    screen_width    INTEGER,
-    screen_height   INTEGER,
-    playlist_id     TEXT REFERENCES playlists(id) ON DELETE SET NULL,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64),
+    workspace_id    VARCHAR(64),
+    name            VARCHAR(255) NOT NULL DEFAULT 'Unnamed Display',
+    pairing_code    VARCHAR(50) UNIQUE,
+    status          VARCHAR(50) NOT NULL DEFAULT 'offline',
+    blocked         TINYINT(1) NOT NULL DEFAULT 0,
+    last_heartbeat  BIGINT,
+    ip_address      VARCHAR(45),
+    android_version VARCHAR(50),
+    app_version     VARCHAR(50),
+    screen_width    INT,
+    screen_height   INT,
+    render_width    INT,
+    render_height   INT,
+    playlist_id     VARCHAR(64),
+    layout_id       VARCHAR(64),
+    timezone        VARCHAR(100) DEFAULT 'UTC',
+    reported_timezone VARCHAR(100),
+    reported_utc    BIGINT,
+    reported_at     BIGINT,
+    wall_id         VARCHAR(64),
+    team_id         VARCHAR(64),
+    notes           TEXT,
+    orientation     VARCHAR(50) DEFAULT 'landscape',
+    default_content_id VARCHAR(64),
+    device_token    VARCHAR(255),
+    sort_order      INT NOT NULL DEFAULT 0,
+    ota_status      VARCHAR(50) DEFAULT 'none',
+    ota_target_version VARCHAR(100),
+    ota_attempts    INT DEFAULT 0,
+    ota_updated_at  BIGINT,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_devices_workspace ON devices(workspace_id);
+CREATE INDEX idx_devices_provisioning ON devices(status, created_at);
 
 CREATE TABLE IF NOT EXISTS device_telemetry (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    battery_level   INTEGER,
-    battery_charging INTEGER NOT NULL DEFAULT 0,
-    storage_free_mb INTEGER,
-    storage_total_mb INTEGER,
-    ram_free_mb     INTEGER,
-    ram_total_mb    INTEGER,
-    cpu_usage       REAL,
-    wifi_ssid       TEXT,
-    wifi_rssi       INTEGER,
-    uptime_seconds  INTEGER,
-    reported_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id       VARCHAR(64) NOT NULL,
+    battery_level   INT,
+    battery_charging TINYINT(1) NOT NULL DEFAULT 0,
+    storage_free_mb INT,
+    storage_total_mb INT,
+    ram_free_mb     INT,
+    ram_total_mb    INT,
+    cpu_usage       DOUBLE,
+    wifi_ssid       VARCHAR(255),
+    wifi_rssi       INT,
+    uptime_seconds  BIGINT,
+    reported_at     BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE INDEX IF NOT EXISTS idx_telemetry_device ON device_telemetry(device_id, reported_at DESC);
+CREATE INDEX idx_telemetry_device ON device_telemetry(device_id, reported_at DESC);
 
 CREATE TABLE IF NOT EXISTS content (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT REFERENCES users(id),
-    filename        TEXT NOT NULL,
-    filepath        TEXT NOT NULL DEFAULT '',
-    mime_type       TEXT NOT NULL,
-    file_size       INTEGER NOT NULL DEFAULT 0,
-    duration_sec    REAL,
-    thumbnail_path  TEXT,
-    width           INTEGER,
-    height          INTEGER,
-    remote_url      TEXT,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64),
+    workspace_id    VARCHAR(64),
+    team_id         VARCHAR(64),
+    filename        VARCHAR(500) NOT NULL,
+    filepath        VARCHAR(500) NOT NULL DEFAULT '',
+    mime_type       VARCHAR(100) NOT NULL,
+    file_size       BIGINT NOT NULL DEFAULT 0,
+    duration_sec    DOUBLE,
+    thumbnail_path  VARCHAR(500),
+    width           INT,
+    height          INT,
+    remote_url      VARCHAR(1000),
+    folder          VARCHAR(255),
+    folder_id       VARCHAR(64),
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (folder_id) REFERENCES content_folders(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_content_workspace ON content(workspace_id);
+CREATE INDEX idx_content_folder ON content(folder_id);
 
 CREATE TABLE IF NOT EXISTS assignments (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    content_id      TEXT REFERENCES content(id) ON DELETE CASCADE,
-    widget_id       TEXT REFERENCES widgets(id) ON DELETE CASCADE,
-    zone_id         TEXT,
-    sort_order      INTEGER NOT NULL DEFAULT 0,
-    duration_sec    INTEGER NOT NULL DEFAULT 10,
-    schedule_start  TEXT,
-    schedule_end    TEXT,
-    schedule_days   TEXT,
-    enabled         INTEGER NOT NULL DEFAULT 1,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    device_id       VARCHAR(64) NOT NULL,
+    content_id      VARCHAR(64),
+    widget_id       VARCHAR(64),
+    zone_id         VARCHAR(64),
+    sort_order      INT NOT NULL DEFAULT 0,
+    duration_sec    INT NOT NULL DEFAULT 10,
+    schedule_start  VARCHAR(20),
+    schedule_end    VARCHAR(20),
+    schedule_days   VARCHAR(50),
+    enabled         TINYINT(1) NOT NULL DEFAULT 1,
+    muted           TINYINT(1) DEFAULT 0,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE,
+    FOREIGN KEY (widget_id) REFERENCES widgets(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS screenshots (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    filepath        TEXT NOT NULL,
-    captured_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    device_id       VARCHAR(64) NOT NULL,
+    filepath        VARCHAR(500) NOT NULL,
+    captured_at     BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE INDEX IF NOT EXISTS idx_screenshots_device ON screenshots(device_id, captured_at DESC);
+CREATE INDEX idx_screenshots_device ON screenshots(device_id, captured_at DESC);
 
 -- ===================== LAYOUTS & ZONES =====================
 
 CREATE TABLE IF NOT EXISTS layouts (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT REFERENCES users(id),
-    team_id         TEXT,
-    name            TEXT NOT NULL,
-    width           INTEGER NOT NULL DEFAULT 1920,
-    height          INTEGER NOT NULL DEFAULT 1080,
-    is_template     INTEGER NOT NULL DEFAULT 0,
-    template_category TEXT,
-    thumbnail_data  TEXT,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64),
+    workspace_id    VARCHAR(64),
+    team_id         VARCHAR(64),
+    name            VARCHAR(255) NOT NULL,
+    width           INT NOT NULL DEFAULT 1920,
+    height          INT NOT NULL DEFAULT 1080,
+    is_template     TINYINT(1) NOT NULL DEFAULT 0,
+    template_category VARCHAR(50),
+    thumbnail_data  MEDIUMTEXT,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS layout_zones (
-    id              TEXT PRIMARY KEY,
-    layout_id       TEXT NOT NULL REFERENCES layouts(id) ON DELETE CASCADE,
-    name            TEXT NOT NULL DEFAULT 'Zone',
-    x_percent       REAL NOT NULL DEFAULT 0,
-    y_percent       REAL NOT NULL DEFAULT 0,
-    width_percent   REAL NOT NULL DEFAULT 100,
-    height_percent  REAL NOT NULL DEFAULT 100,
-    z_index         INTEGER NOT NULL DEFAULT 0,
-    zone_type       TEXT NOT NULL DEFAULT 'content',
-    fit_mode        TEXT NOT NULL DEFAULT 'contain',
-    background_color TEXT DEFAULT '#000000',
-    sort_order      INTEGER NOT NULL DEFAULT 0
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    layout_id       VARCHAR(64) NOT NULL,
+    name            VARCHAR(255) NOT NULL DEFAULT 'Zone',
+    x_percent       DOUBLE NOT NULL DEFAULT 0,
+    y_percent       DOUBLE NOT NULL DEFAULT 0,
+    width_percent   DOUBLE NOT NULL DEFAULT 100,
+    height_percent  DOUBLE NOT NULL DEFAULT 100,
+    z_index         INT NOT NULL DEFAULT 0,
+    zone_type       VARCHAR(50) NOT NULL DEFAULT 'content',
+    fit_mode        VARCHAR(50) NOT NULL DEFAULT 'contain',
+    background_color VARCHAR(20) DEFAULT '#000000',
+    sort_order      INT NOT NULL DEFAULT 0,
+    FOREIGN KEY (layout_id) REFERENCES layouts(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE INDEX IF NOT EXISTS idx_zones_layout ON layout_zones(layout_id);
+CREATE INDEX idx_zones_layout ON layout_zones(layout_id);
 
 -- Seed templates
-INSERT OR IGNORE INTO layouts (id, user_id, name, is_template, template_category) VALUES
+INSERT IGNORE INTO layouts (id, user_id, name, is_template, template_category) VALUES
   ('tpl-fullscreen',  NULL, 'Fullscreen',           1, 'basic'),
   ('tpl-split-h',     NULL, 'Split Horizontal',     1, 'split'),
   ('tpl-split-v',     NULL, 'Split Vertical',       1, 'split'),
@@ -180,7 +355,7 @@ INSERT OR IGNORE INTO layouts (id, user_id, name, is_template, template_category
   ('tpl-thirds',      NULL, 'Three Column',         1, 'grid'),
   ('tpl-quad',        NULL, 'Four Quadrants',       1, 'grid');
 
-INSERT OR IGNORE INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent, z_index, sort_order) VALUES
+INSERT IGNORE INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent, z_index, sort_order) VALUES
   ('z-fs-1',    'tpl-fullscreen', 'Main',           0, 0, 100, 100, 0, 0),
   ('z-sh-1',    'tpl-split-h',   'Left',            0, 0, 50, 100, 0, 0),
   ('z-sh-2',    'tpl-split-h',   'Right',           50, 0, 50, 100, 0, 1),
@@ -202,180 +377,233 @@ INSERT OR IGNORE INTO layout_zones (id, layout_id, name, x_percent, y_percent, w
 -- ===================== WIDGETS =====================
 
 CREATE TABLE IF NOT EXISTS widgets (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT REFERENCES users(id),
-    team_id         TEXT,
-    widget_type     TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    config          TEXT NOT NULL DEFAULT '{}',
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64),
+    workspace_id    VARCHAR(64),
+    team_id         VARCHAR(64),
+    widget_type     VARCHAR(50) NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    config          TEXT NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ===================== SCHEDULES =====================
 
 CREATE TABLE IF NOT EXISTS schedules (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    device_id       TEXT REFERENCES devices(id) ON DELETE CASCADE,
-    group_id        TEXT REFERENCES device_groups(id) ON DELETE SET NULL,
-    zone_id         TEXT REFERENCES layout_zones(id) ON DELETE CASCADE,
-    content_id      TEXT REFERENCES content(id) ON DELETE CASCADE,
-    widget_id       TEXT REFERENCES widgets(id) ON DELETE CASCADE,
-    layout_id       TEXT REFERENCES layouts(id) ON DELETE SET NULL,
-    playlist_id     TEXT REFERENCES playlists(id) ON DELETE SET NULL,
-    title           TEXT NOT NULL DEFAULT '',
-    start_time      TEXT NOT NULL,
-    end_time        TEXT NOT NULL,
-    timezone        TEXT NOT NULL DEFAULT 'UTC',
-    recurrence      TEXT,
-    recurrence_end  TEXT,
-    priority        INTEGER NOT NULL DEFAULT 0,
-    enabled         INTEGER NOT NULL DEFAULT 1,
-    color           TEXT DEFAULT '#3B82F6',
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    CHECK ((device_id IS NOT NULL AND group_id IS NULL) OR (device_id IS NULL AND group_id IS NOT NULL))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    device_id       VARCHAR(64),
+    group_id        VARCHAR(64),
+    zone_id         VARCHAR(64),
+    content_id      VARCHAR(64),
+    widget_id       VARCHAR(64),
+    layout_id       VARCHAR(64),
+    playlist_id     VARCHAR(64),
+    title           VARCHAR(255) NOT NULL DEFAULT '',
+    start_time      VARCHAR(20) NOT NULL,
+    end_time        VARCHAR(20) NOT NULL,
+    timezone        VARCHAR(100) NOT NULL DEFAULT 'UTC',
+    recurrence      VARCHAR(255),
+    recurrence_end  VARCHAR(20),
+    priority        INT NOT NULL DEFAULT 0,
+    enabled         TINYINT(1) NOT NULL DEFAULT 1,
+    color           VARCHAR(20) DEFAULT '#3B82F6',
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    CHECK ((device_id IS NOT NULL AND group_id IS NULL) OR (device_id IS NULL AND group_id IS NOT NULL)),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    -- SET NULL is impossible here: MySQL forbids an ON DELETE SET NULL action on a
+    -- column that's also part of a CHECK constraint (nulling group_id while device_id
+    -- stays NULL would violate the CHECK below). The app already deletes a group's
+    -- schedules before deleting the group itself (routes/device-groups.js), so this
+    -- CASCADE never actually differs from that in practice - it just makes the
+    -- invariant DB-enforced instead of relying on delete-ordering.
+    FOREIGN KEY (group_id) REFERENCES device_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (zone_id) REFERENCES layout_zones(id) ON DELETE CASCADE,
+    FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE,
+    FOREIGN KEY (widget_id) REFERENCES widgets(id) ON DELETE CASCADE,
+    FOREIGN KEY (layout_id) REFERENCES layouts(id) ON DELETE SET NULL,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE INDEX IF NOT EXISTS idx_schedules_device ON schedules(device_id, enabled);
--- Note: idx_schedules_group is created by the phase4 migration which rebuilds the table
+CREATE INDEX idx_schedules_device ON schedules(device_id, enabled);
+CREATE INDEX idx_schedules_group ON schedules(group_id, enabled);
+CREATE INDEX idx_schedules_workspace ON schedules(workspace_id);
 
 -- ===================== VIDEO WALLS =====================
 
 CREATE TABLE IF NOT EXISTS video_walls (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    team_id         TEXT,
-    name            TEXT NOT NULL,
-    grid_cols       INTEGER NOT NULL DEFAULT 2,
-    grid_rows       INTEGER NOT NULL DEFAULT 2,
-    bezel_h_mm      REAL NOT NULL DEFAULT 0,
-    bezel_v_mm      REAL NOT NULL DEFAULT 0,
-    screen_w_mm     REAL NOT NULL DEFAULT 400,
-    screen_h_mm     REAL NOT NULL DEFAULT 225,
-    sync_mode       TEXT NOT NULL DEFAULT 'leader',
-    leader_device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-    content_id      TEXT REFERENCES content(id) ON DELETE SET NULL,
-    playlist_id     TEXT REFERENCES playlists(id) ON DELETE SET NULL,
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    team_id         VARCHAR(64),
+    name            VARCHAR(255) NOT NULL,
+    grid_cols       INT NOT NULL DEFAULT 2,
+    grid_rows       INT NOT NULL DEFAULT 2,
+    bezel_h_mm      DOUBLE NOT NULL DEFAULT 0,
+    bezel_v_mm      DOUBLE NOT NULL DEFAULT 0,
+    screen_w_mm     DOUBLE NOT NULL DEFAULT 400,
+    screen_h_mm     DOUBLE NOT NULL DEFAULT 225,
+    sync_mode       VARCHAR(50) NOT NULL DEFAULT 'leader',
+    leader_device_id VARCHAR(64),
+    content_id      VARCHAR(64),
+    playlist_id     VARCHAR(64),
     -- Free-form player rect on the wall canvas (NULL = use bounding box of screens)
-    player_x        REAL,
-    player_y        REAL,
-    player_width    REAL,
-    player_height   REAL,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    player_x        DOUBLE,
+    player_y        DOUBLE,
+    player_width    DOUBLE,
+    player_height   DOUBLE,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (leader_device_id) REFERENCES devices(id) ON DELETE SET NULL,
+    FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE SET NULL,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_video_walls_workspace ON video_walls(workspace_id);
 
 CREATE TABLE IF NOT EXISTS video_wall_devices (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    wall_id         TEXT NOT NULL REFERENCES video_walls(id) ON DELETE CASCADE,
-    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    grid_col        INTEGER NOT NULL,
-    grid_row        INTEGER NOT NULL,
-    rotation        INTEGER NOT NULL DEFAULT 0,
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    wall_id         VARCHAR(64) NOT NULL,
+    device_id       VARCHAR(64) NOT NULL,
+    grid_col        INT NOT NULL,
+    grid_row        INT NOT NULL,
+    rotation        INT NOT NULL DEFAULT 0,
     -- Free-form canvas rect (NULL = derive from grid_col/row + bezel as a fallback)
-    canvas_x        REAL,
-    canvas_y        REAL,
-    canvas_width    REAL,
-    canvas_height   REAL,
+    canvas_x        DOUBLE,
+    canvas_y        DOUBLE,
+    canvas_width    DOUBLE,
+    canvas_height   DOUBLE,
     UNIQUE(wall_id, device_id),
-    UNIQUE(wall_id, grid_col, grid_row)
-);
+    UNIQUE(wall_id, grid_col, grid_row),
+    FOREIGN KEY (wall_id) REFERENCES video_walls(id) ON DELETE CASCADE,
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- ===================== TEAMS =====================
+-- ===================== TEAMS (legacy, pre-multitenancy) =====================
 
 CREATE TABLE IF NOT EXISTS teams (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    owner_id        TEXT NOT NULL REFERENCES users(id),
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    name            VARCHAR(255) NOT NULL,
+    owner_id        VARCHAR(64) NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS team_members (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_id         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role            TEXT NOT NULL DEFAULT 'viewer',
-    invited_by      TEXT REFERENCES users(id),
-    joined_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    UNIQUE(team_id, user_id)
-);
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    team_id         VARCHAR(64) NOT NULL,
+    user_id         VARCHAR(64) NOT NULL,
+    role            VARCHAR(50) NOT NULL DEFAULT 'viewer',
+    invited_by      VARCHAR(64),
+    joined_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    UNIQUE(team_id, user_id),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (invited_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS team_invites (
-    id              TEXT PRIMARY KEY,
-    team_id         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    email           TEXT NOT NULL,
-    role            TEXT NOT NULL DEFAULT 'viewer',
-    invited_by      TEXT NOT NULL REFERENCES users(id),
-    expires_at      INTEGER NOT NULL,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    team_id         VARCHAR(64) NOT NULL,
+    email           VARCHAR(255) NOT NULL,
+    role            VARCHAR(50) NOT NULL DEFAULT 'viewer',
+    invited_by      VARCHAR(64) NOT NULL,
+    expires_at      BIGINT NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY (invited_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ===================== PROOF-OF-PLAY =====================
 
 CREATE TABLE IF NOT EXISTS play_logs (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    content_id      TEXT REFERENCES content(id) ON DELETE SET NULL,
-    widget_id       TEXT REFERENCES widgets(id) ON DELETE SET NULL,
-    zone_id         TEXT,
-    content_name    TEXT NOT NULL DEFAULT '',
-    started_at      INTEGER NOT NULL,
-    ended_at        INTEGER,
-    duration_sec    INTEGER,
-    completed       INTEGER NOT NULL DEFAULT 0,
-    trigger_type    TEXT DEFAULT 'playlist',
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id       VARCHAR(64) NOT NULL,
+    content_id      VARCHAR(64),
+    widget_id       VARCHAR(64),
+    zone_id         VARCHAR(64),
+    content_name    VARCHAR(500) NOT NULL DEFAULT '',
+    started_at      BIGINT NOT NULL,
+    ended_at        BIGINT,
+    duration_sec    INT,
+    completed       TINYINT(1) NOT NULL DEFAULT 0,
+    trigger_type    VARCHAR(50) DEFAULT 'playlist',
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE SET NULL,
+    FOREIGN KEY (widget_id) REFERENCES widgets(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE INDEX IF NOT EXISTS idx_play_logs_device ON play_logs(device_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_play_logs_content ON play_logs(content_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_play_logs_time ON play_logs(started_at, ended_at);
+CREATE INDEX idx_play_logs_device ON play_logs(device_id, started_at DESC);
+CREATE INDEX idx_play_logs_content ON play_logs(content_id, started_at DESC);
+CREATE INDEX idx_play_logs_time ON play_logs(started_at, ended_at);
 
 -- ===================== DEVICE GROUPS =====================
 
 CREATE TABLE IF NOT EXISTS device_groups (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    name            TEXT NOT NULL,
-    color           TEXT DEFAULT '#3B82F6',
-    playlist_id     TEXT REFERENCES playlists(id) ON DELETE SET NULL,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    name            VARCHAR(255) NOT NULL,
+    color           VARCHAR(20) DEFAULT '#3B82F6',
+    playlist_id     VARCHAR(64),
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_device_groups_workspace ON device_groups(workspace_id);
 
 CREATE TABLE IF NOT EXISTS device_group_members (
-    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    group_id        TEXT NOT NULL REFERENCES device_groups(id) ON DELETE CASCADE,
-    PRIMARY KEY (device_id, group_id)
-);
+    device_id       VARCHAR(64) NOT NULL,
+    group_id        VARCHAR(64) NOT NULL,
+    PRIMARY KEY (device_id, group_id),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES device_groups(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ===================== PLAYLISTS =====================
 
 CREATE TABLE IF NOT EXISTS playlists (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    name            TEXT NOT NULL,
-    description     TEXT DEFAULT '',
-    is_auto_generated INTEGER NOT NULL DEFAULT 0,
-    status          TEXT NOT NULL DEFAULT 'draft',
-    published_snapshot TEXT,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    name            VARCHAR(255) NOT NULL,
+    description     TEXT,
+    is_auto_generated TINYINT(1) NOT NULL DEFAULT 0,
+    status          VARCHAR(50) NOT NULL DEFAULT 'draft',
+    published_snapshot MEDIUMTEXT,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_playlists_workspace ON playlists(workspace_id);
 
 CREATE TABLE IF NOT EXISTS playlist_items (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    playlist_id     TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-    content_id      TEXT REFERENCES content(id) ON DELETE CASCADE,
-    widget_id       TEXT REFERENCES widgets(id) ON DELETE CASCADE,
-    zone_id         TEXT REFERENCES layout_zones(id) ON DELETE SET NULL,
-    sort_order      INTEGER NOT NULL DEFAULT 0,
-    duration_sec    INTEGER NOT NULL DEFAULT 10,
-    muted           INTEGER NOT NULL DEFAULT 0,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    playlist_id     VARCHAR(64) NOT NULL,
+    content_id      VARCHAR(64),
+    widget_id       VARCHAR(64),
+    zone_id         VARCHAR(64),
+    sort_order      INT NOT NULL DEFAULT 0,
+    duration_sec    INT NOT NULL DEFAULT 10,
+    muted           TINYINT(1) NOT NULL DEFAULT 0,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+    FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE,
+    FOREIGN KEY (widget_id) REFERENCES widgets(id) ON DELETE CASCADE,
+    FOREIGN KEY (zone_id) REFERENCES layout_zones(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Per-playlist-item schedule blocks (#74 dayparting + #75 expiry). 1-to-many:
 -- an item with ZERO rows here is always on; otherwise it shows when device-local
@@ -384,53 +612,81 @@ CREATE TABLE IF NOT EXISTS playlist_items (
 -- Pure child of playlist_items: cascade-deleted, and tenant isolation flows
 -- through the parent item/playlist, so no workspace_id is needed here.
 CREATE TABLE IF NOT EXISTS playlist_item_schedules (
-    id               TEXT PRIMARY KEY,
-    playlist_item_id INTEGER NOT NULL REFERENCES playlist_items(id) ON DELETE CASCADE,
-    active_days      TEXT NOT NULL DEFAULT '0,1,2,3,4,5,6',  -- comma-separated 0(Sun)-6(Sat)
-    start_time       TEXT NOT NULL DEFAULT '00:00',          -- local HH:MM
-    end_time         TEXT NOT NULL DEFAULT '24:00',          -- local HH:MM ("24:00" = end of day)
-    start_date       TEXT,                                   -- local YYYY-MM-DD, nullable = no lower bound
-    end_date         TEXT,                                   -- local YYYY-MM-DD, nullable = no upper bound
-    sort_order       INTEGER NOT NULL DEFAULT 0,
-    created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
-CREATE INDEX IF NOT EXISTS idx_playlist_item_schedules_item ON playlist_item_schedules(playlist_item_id);
+    id               VARCHAR(64) PRIMARY KEY,
+    playlist_item_id INT NOT NULL,
+    active_days      VARCHAR(20) NOT NULL DEFAULT '0,1,2,3,4,5,6',  -- comma-separated 0(Sun)-6(Sat)
+    start_time       VARCHAR(10) NOT NULL DEFAULT '00:00',          -- local HH:MM
+    end_time         VARCHAR(10) NOT NULL DEFAULT '24:00',          -- local HH:MM ("24:00" = end of day)
+    start_date       VARCHAR(10),                                   -- local YYYY-MM-DD, nullable = no lower bound
+    end_date         VARCHAR(10),                                   -- local YYYY-MM-DD, nullable = no upper bound
+    sort_order       INT NOT NULL DEFAULT 0,
+    created_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (playlist_item_id) REFERENCES playlist_items(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_playlist_item_schedules_item ON playlist_item_schedules(playlist_item_id);
+
+-- ===================== CONTENT FOLDERS =====================
+-- Hierarchical content folders (per-user). Originally added by an inline
+-- migration in server/db/database.js, not by the base SQLite schema.sql.
+
+CREATE TABLE IF NOT EXISTS content_folders (
+    id          VARCHAR(64) PRIMARY KEY,
+    user_id     VARCHAR(64) NOT NULL,
+    workspace_id VARCHAR(64),
+    parent_id   VARCHAR(64),
+    name        VARCHAR(255) NOT NULL,
+    created_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_id) REFERENCES content_folders(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_content_folders_user ON content_folders(user_id, parent_id);
+CREATE INDEX idx_content_folders_workspace ON content_folders(workspace_id);
 
 -- ===================== ACTIVITY LOG =====================
 
 CREATE TABLE IF NOT EXISTS activity_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         TEXT REFERENCES users(id),
-    device_id       TEXT,
-    action          TEXT NOT NULL,
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id         VARCHAR(64),
+    device_id       VARCHAR(64),
+    workspace_id    VARCHAR(64),
+    organization_id VARCHAR(64),
+    acting_user_id  VARCHAR(64),
+    was_acting_as   TINYINT(1) DEFAULT 0,
+    action          VARCHAR(255) NOT NULL,
     details         TEXT,
-    ip_address      TEXT,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    ip_address      VARCHAR(45),
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL,
+    FOREIGN KEY (acting_user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE INDEX IF NOT EXISTS idx_activity_log_time ON activity_log(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_activity_log_user ON activity_log(user_id, created_at DESC);
-
--- ===================== EMAIL ALERTS =====================
+CREATE INDEX idx_activity_log_time ON activity_log(created_at DESC);
+CREATE INDEX idx_activity_log_user ON activity_log(user_id, created_at DESC);
 
 -- ===================== WHITE LABEL =====================
 
 CREATE TABLE IF NOT EXISTS white_labels (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    brand_name      TEXT NOT NULL DEFAULT 'ScreenTinker',
-    logo_url        TEXT,
-    favicon_url     TEXT,
-    primary_color   TEXT DEFAULT '#3B82F6',
-    secondary_color TEXT DEFAULT '#1E293B',
-    bg_color        TEXT DEFAULT '#111827',
-    custom_domain   TEXT,
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    brand_name      VARCHAR(255) NOT NULL DEFAULT 'ScreenTinker',
+    logo_url        VARCHAR(500),
+    favicon_url     VARCHAR(500),
+    primary_color   VARCHAR(20) DEFAULT '#3B82F6',
+    secondary_color VARCHAR(20) DEFAULT '#1E293B',
+    bg_color        VARCHAR(20) DEFAULT '#111827',
+    custom_domain   VARCHAR(255),
     custom_css      TEXT,
-    hide_branding   INTEGER DEFAULT 0,
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    hide_branding   TINYINT(1) DEFAULT 0,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ===================== AI (BYOK) SETTINGS =====================
 -- #41: per-workspace AI design generation. Bring-your-own OpenAI-COMPATIBLE
@@ -438,41 +694,47 @@ CREATE TABLE IF NOT EXISTS white_labels (
 -- AUTOMATIC1111 etc. for images), so the operator bears no AI cost. api_key_enc
 -- is AES-256-GCM encrypted (lib/secretbox.js); it is never returned to clients.
 CREATE TABLE IF NOT EXISTS ai_settings (
-    workspace_id    TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
-    base_url        TEXT,
+    workspace_id    VARCHAR(64) PRIMARY KEY,
+    base_url        VARCHAR(500),
     api_key_enc     TEXT,
-    model           TEXT,
-    image_base_url  TEXT,
-    image_model     TEXT,
-    image_provider  TEXT,
+    model           VARCHAR(255),
+    image_base_url  VARCHAR(500),
+    image_model     VARCHAR(255),
+    image_provider  VARCHAR(50),
     image_api_key_enc TEXT,
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ===================== KIOSK PAGES =====================
 
 CREATE TABLE IF NOT EXISTS kiosk_pages (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    name            TEXT NOT NULL,
-    config          TEXT NOT NULL DEFAULT '{}',
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    name            VARCHAR(255) NOT NULL,
+    config          TEXT NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ===================== DEVICE STATUS LOG =====================
 
 CREATE TABLE IF NOT EXISTS device_status_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id       TEXT NOT NULL,
-    status          TEXT NOT NULL,
-    timestamp       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id       VARCHAR(64) NOT NULL,
+    status          VARCHAR(50) NOT NULL,
+    timestamp       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 -- #142: index the per-device + time-window access pattern. Both the dashboard
 -- uptime query (WHERE device_id=? AND timestamp>?) and the retention prune
 -- (WHERE device_id=? AND timestamp<?) were full table scans; at 1M+ rows that
--- was the dashboard-degradation cause in the outage report.
-CREATE INDEX IF NOT EXISTS idx_device_status_log_device_ts ON device_status_log(device_id, timestamp);
+-- was the dashboard-degradation cause in the outage report. No FK to devices
+-- here (matches the original SQLite schema) - rows must survive device deletion
+-- for audit purposes, and the retention sweep prunes it independently.
+CREATE INDEX idx_device_status_log_device_ts ON device_status_log(device_id, timestamp);
 
 -- ===================== EVENT LOOP LAG (#142) =====================
 -- Event-loop delay telemetry from perf_hooks.monitorEventLoopDelay(). Bounded
@@ -480,42 +742,49 @@ CREATE INDEX IF NOT EXISTS idx_device_status_log_device_ts ON device_status_log(
 -- services/loop-lag.js, LAG_TELEMETRY_RETENTION_DAYS) so it can never become a
 -- second unbounded-growth table.
 CREATE TABLE IF NOT EXISTS event_loop_lag (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    sampled_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    mean_ms     REAL NOT NULL,
-    p50_ms      REAL NOT NULL,
-    p99_ms      REAL NOT NULL,
-    max_ms      REAL NOT NULL,
-    band        TEXT NOT NULL DEFAULT 'normal'
-);
-CREATE INDEX IF NOT EXISTS idx_event_loop_lag_sampled ON event_loop_lag(sampled_at);
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    sampled_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    mean_ms     DOUBLE NOT NULL,
+    p50_ms      DOUBLE NOT NULL,
+    p99_ms      DOUBLE NOT NULL,
+    max_ms      DOUBLE NOT NULL,
+    band        VARCHAR(50) NOT NULL DEFAULT 'normal'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_event_loop_lag_sampled ON event_loop_lag(sampled_at);
 
 -- ===================== DEVICE FINGERPRINTS =====================
 
 CREATE TABLE IF NOT EXISTS device_fingerprints (
-    fingerprint     TEXT NOT NULL,
-    device_id       TEXT REFERENCES devices(id) ON DELETE SET NULL,
-    user_id         TEXT REFERENCES users(id),
-    first_seen      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    last_seen       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    PRIMARY KEY (fingerprint)
-);
+    fingerprint     VARCHAR(255) NOT NULL,
+    device_id       VARCHAR(64),
+    user_id         VARCHAR(64),
+    first_seen      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    last_seen       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (fingerprint),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE SET NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS alert_configs (
-    id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    alert_type      TEXT NOT NULL,
-    enabled         INTEGER NOT NULL DEFAULT 1,
-    config          TEXT NOT NULL DEFAULT '{}',
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    alert_type      VARCHAR(50) NOT NULL,
+    enabled         TINYINT(1) NOT NULL DEFAULT 1,
+    config          TEXT NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ===================== PLAYER DEBUG LOGS =====================
 -- Smart TVs (Tizen, WebOS, Fire TV, etc.) have no accessible devtools. The
 -- player captures errors into window.__debugLog client-side and POSTs them
 -- to /api/player-debug. This table stores those reports. Submitter is
 -- unauthenticated by design - the player may not have paired yet when an
--- error fires. device_id is nullable for unpaired players.
+-- error fires. device_id is nullable for unpaired players (and intentionally
+-- has no FK here, matching the original SQLite schema, since reports must
+-- survive a device being deleted/re-paired).
 --
 -- Capped at 10,000 rows with FIFO eviction on insert (route-side, no sweep).
 -- error_fingerprint is a client-computed hash of (error message + first stack
@@ -523,19 +792,19 @@ CREATE TABLE IF NOT EXISTS alert_configs (
 -- without a schema change.
 
 CREATE TABLE IF NOT EXISTS player_debug_logs (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id         TEXT,
-    ip                TEXT,
-    user_agent        TEXT,
-    url               TEXT,
-    error_fingerprint TEXT,
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id         VARCHAR(64),
+    ip                VARCHAR(45),
+    user_agent        VARCHAR(500),
+    url               VARCHAR(500),
+    error_fingerprint VARCHAR(255),
     error_data        TEXT,
     context           TEXT,
-    created_at        INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    created_at        BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE INDEX IF NOT EXISTS idx_player_debug_fingerprint ON player_debug_logs(error_fingerprint);
-CREATE INDEX IF NOT EXISTS idx_player_debug_created_at ON player_debug_logs(created_at);
+CREATE INDEX idx_player_debug_fingerprint ON player_debug_logs(error_fingerprint);
+CREATE INDEX idx_player_debug_created_at ON player_debug_logs(created_at);
 
 -- ===================== API TOKENS (public API, Phase 1) =====================
 -- Scoped personal access tokens for the public API. The full token (st_...) is
@@ -544,19 +813,22 @@ CREATE INDEX IF NOT EXISTS idx_player_debug_created_at ON player_debug_logs(crea
 -- with the owner's workspace role - never platform/cross-org powers (apiTokenAuth
 -- forces the effective platform role to 'user').
 CREATE TABLE IF NOT EXISTS api_tokens (
-    id              TEXT PRIMARY KEY,
-    token_hash      TEXT NOT NULL UNIQUE,                     -- SHA-256 hex of the full token
-    prefix          TEXT NOT NULL,                            -- e.g. 'st_a1b2c3d4' (display only)
-    name            TEXT NOT NULL,                            -- user-given label
-    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    scope           TEXT NOT NULL DEFAULT 'read',             -- 'read' | 'write' | 'full' | 'agency' | 'billing:read'
-    auto_publish    INTEGER NOT NULL DEFAULT 0,                -- #73: agency only. 0 = items land DRAFT (default, fail-safe); 1 = admin opted this agency out of approval
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    last_used_at    INTEGER,
-    revoked_at      INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+    id              VARCHAR(64) PRIMARY KEY,
+    token_hash      VARCHAR(64) NOT NULL UNIQUE,              -- SHA-256 hex of the full token
+    prefix          VARCHAR(50) NOT NULL,                     -- e.g. 'st_a1b2c3d4' (display only)
+    name            VARCHAR(255) NOT NULL,                    -- user-given label
+    user_id         VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64) NOT NULL,
+    scope           VARCHAR(50) NOT NULL DEFAULT 'read',      -- 'read' | 'write' | 'full' | 'agency' | 'billing:read'
+    auto_publish    TINYINT(1) NOT NULL DEFAULT 0,             -- #73: agency only. 0 = items land DRAFT (default, fail-safe); 1 = admin opted this agency out of approval
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    last_used_at    BIGINT,
+    revoked_at      BIGINT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_api_tokens_hash ON api_tokens(token_hash);
+CREATE INDEX idx_api_tokens_user ON api_tokens(user_id);
 
 -- #73: target allowlist for capability-restricted ('agency') tokens. An agency token
 -- (scope='agency', OFF the read/write/full ladder so tokenScopeGate rejects it on every
@@ -564,31 +836,58 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 -- agencyGate seam. FK cascade both ways: revoke the token or delete the playlist and the
 -- grant disappears.
 CREATE TABLE IF NOT EXISTS api_token_targets (
-    token_id    TEXT NOT NULL REFERENCES api_tokens(id) ON DELETE CASCADE,
-    playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    PRIMARY KEY (token_id, playlist_id)
-);
-CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+    token_id    VARCHAR(64) NOT NULL,
+    playlist_id VARCHAR(64) NOT NULL,
+    created_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (token_id, playlist_id),
+    FOREIGN KEY (token_id) REFERENCES api_tokens(id) ON DELETE CASCADE,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- #73: agency-upload notification queue. The agency endpoint enqueues one row per item added
 -- (only when email is configured); a 15-min flush job groups per token+playlist+action and
 -- sends one digest per group, stamping sent_at ONLY after a successful send (failed -> retry).
 CREATE TABLE IF NOT EXISTS agency_notifications (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    workspace_id TEXT NOT NULL,
-    token_id     TEXT NOT NULL,
-    playlist_id  TEXT NOT NULL,
-    action       TEXT NOT NULL,                            -- 'draft' | 'published'
-    content_id   TEXT,
-    created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    sent_at      INTEGER                                   -- NULL = unsent
-);
-CREATE INDEX IF NOT EXISTS idx_agency_notifications_unsent ON agency_notifications(sent_at);
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    workspace_id VARCHAR(64) NOT NULL,
+    token_id     VARCHAR(64) NOT NULL,
+    playlist_id  VARCHAR(64) NOT NULL,
+    action       VARCHAR(50) NOT NULL,                        -- 'draft' | 'published'
+    content_id   VARCHAR(64),
+    created_at   BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    sent_at      BIGINT                                       -- NULL = unsent
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_agency_notifications_unsent ON agency_notifications(sent_at);
+
+-- ===================== APP SETTINGS =====================
+-- #146: minimal global key/value settings for admin-toggleable runtime flags (none
+-- existed - ai_settings is per-workspace, white_labels is branding). Originally added
+-- by an inline migration in server/db/database.js, not by the base SQLite schema.sql.
+CREATE TABLE IF NOT EXISTS app_settings (
+    `key`       VARCHAR(255) PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ===================== BILLING USAGE ROLLUP =====================
+-- #146 BILLING: durable daily usage rollup (contractual system-of-record). One tiny row
+-- per device per calendar day; accumulated incrementally off the heartbeat tick (NOT
+-- reconstructed from status_log, which is 3-day retention). Retained ~400 days, pruned
+-- chunked. day is UTC 'YYYY-MM-DD'; the index serves month-range queries. Originally
+-- added by an inline migration in server/db/database.js, not by the base SQLite schema.sql.
+CREATE TABLE IF NOT EXISTS device_usage_daily (
+    device_id       VARCHAR(64) NOT NULL,
+    day             VARCHAR(10) NOT NULL,
+    online_seconds  INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, day)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_usage_daily_day ON device_usage_daily(day);
 
 -- ===================== SCHEMA MIGRATIONS =====================
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
-    id              TEXT PRIMARY KEY,
-    ran_at          INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-);
+    id              VARCHAR(255) PRIMARY KEY,
+    ran_at          BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+SET FOREIGN_KEY_CHECKS = 1;
