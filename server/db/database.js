@@ -21,20 +21,20 @@ db.pragma("foreign_keys = ON");
 const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
 db.exec(schema);
 
-// BeamOS: force every plan tier to be unlimited on every boot, regardless of
-// what's already in the database (covers existing installs where the old
-// limited rows were inserted before this was added, and any future ones too).
-db.prepare(
-  `
-  UPDATE plans SET max_devices = -1, max_storage_mb = -1,
-    remote_control = 1, remote_url = 1, priority_support = 1
-`,
-).run();
+// // BeamOS: force every plan tier to be unlimited on every boot, regardless of
+// // what's already in the database (covers existing installs where the old
+// // limited rows were inserted before this was added, and any future ones too).
+// db.prepare(
+//   `
+//   UPDATE plans SET max_devices = -1, max_storage_mb = -1,
+//     remote_control = 1, remote_url = 1, priority_support = 1
+// `,
+// ).run();
 
-// BeamOS: clear any trial timer on every account, every boot - permanently
-// prevents the (now-disabled) auto-downgrade logic from ever mattering, and
-// cleans up any account that already had a real trial_started timestamp.
-db.prepare(`UPDATE users SET trial_started = NULL`).run();
+// // BeamOS: clear any trial timer on every account, every boot - permanently
+// // prevents the (now-disabled) auto-downgrade logic from ever mattering, and
+// // cleans up any account that already had a real trial_started timestamp.
+// db.prepare(`UPDATE users SET trial_started = NULL`).run();
 
 // Auto-apply Phase 1 multi-tenancy migration if not yet applied. Without this
 // a self-hoster who pulls latest and restarts hits a crash in
@@ -638,6 +638,14 @@ migrateGroupSchedules();
 // exist on resource tables - the Phase 1 backfill loop reads team_id and
 // updates workspace_id.
 ensureMultitenancyMigration();
+
+db.prepare(
+  `
+  UPDATE plans SET max_devices = -1, max_storage_mb = -1,
+    remote_control = 1, remote_url = 1, priority_support = 1
+`,
+).run();
+db.prepare(`UPDATE users SET trial_started = NULL`).run();
 
 // Phase 2.2c migration: backfill content_folders.workspace_id from owner's
 // default workspace. The ALTER lives in the migrations array above; this
