@@ -8,9 +8,13 @@
 // the MySQL migration (mysql2 is promise-based, unlike the old synchronous
 // better-sqlite3 calls these replaced) so a thrown/rejected error is routed to
 // next(err) - Express's normal error-handling path - instead of escaping.
+// Forwards ALL arguments (not just req/res/next) so this also works for
+// router.param(name, (req, res, next, value) => ...) handlers, which Express
+// calls with a 4th `value` argument.
 function asyncHandler(fn) {
-  return function (req, res, next) {
-    Promise.resolve(fn(req, res, next)).catch(next);
+  return function (...args) {
+    const next = args[2];
+    Promise.resolve(fn(...args)).catch(next);
   };
 }
 

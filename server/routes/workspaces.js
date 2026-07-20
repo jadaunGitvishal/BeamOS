@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { db } = require('../db/database');
 const { canAdminWorkspace, canAccessWorkspace } = require('../lib/permissions');
 const { sendEmail } = require('../services/email');
+const { asyncHandler } = require('../lib/async-handler');
 
 // Workspace management routes. Operates on a target workspace specified by
 // URL param, NOT the caller's currently active workspace - so this router
@@ -34,10 +35,10 @@ const INVITE_EXPIRY_DAYS = (() => {
 
 // Rename a workspace. MVP scope: name + slug only. Permission: platform_admin,
 // org_owner/admin of the parent org, or workspace_admin of the target ws.
-router.patch('/:id', (req, res) => {
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id);
+router.patch('/:id', asyncHandler(async (req, res) => {
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id);
   if (!ws) return res.status(404).json({ error: 'Workspace not found' });
-  if (!canAdminWorkspace(db, req.user, ws)) {
+  if (!await canAdminWorkspace(db, req.user, ws)) {
     return res.status(403).json({ error: 'Admin access required' });
   }
 
@@ -78,21 +79,22 @@ router.patch('/:id', (req, res) => {
     return res.status(400).json({ error: 'No fields to update' });
   }
 
-  updates.push("updated_at = strftime('%s','now')");
+  updates.push("updated_at = UNIX_TIMESTAMP()");
   values.push(req.params.id);
 
   try {
-    db.prepare(`UPDATE workspaces SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await db.prepare(`UPDATE workspaces SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   } catch (e) {
-    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE' || /UNIQUE/i.test(e.message)) {
+    // MySQL's duplicate-key error code (ER_DUP_ENTRY), replacing SQLite's SQLITE_CONSTRAINT_UNIQUE.
+    if (e.code === 'ER_DUP_ENTRY' || /Duplicate entry/i.test(e.message)) {
       return res.status(409).json({ error: 'Slug already used in this organization' });
     }
     throw e;
   }
 
-  const updated = db.prepare('SELECT id, name, slug, organization_id FROM workspaces WHERE id = ?').get(req.params.id);
+  const updated = await db.prepare('SELECT id, name, slug, organization_id FROM workspaces WHERE id = ?').get(req.params.id);
   res.json(updated);
-});
+}));
 
 // ==================== Members / invites ====================
 
@@ -101,15 +103,15 @@ router.patch('/:id', (req, res) => {
 // appropriate response and returns null - caller bails on null. Also stamps
 // req.workspaceId so the activityLogger middleware captures the right
 // tenant attribution (mirrors the rename pattern).
-function loadWorkspace(req, res, requireAdmin) {
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id);
+async function loadWorkspace(req, res, requireAdmin) {
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id);
   if (!ws) {
     res.status(404).json({ error: 'Workspace not found' });
     return null;
   }
   const allowed = requireAdmin
-    ? canAdminWorkspace(db, req.user, ws)
-    : canAccessWorkspace(db, req.user, ws);
+    ? await canAdminWorkspace(db, req.user, ws)
+    : await canAccessWorkspace(db, req.user, ws);
   if (!allowed) {
     res.status(403).json({ error: requireAdmin ? 'Admin access required' : 'Workspace access required' });
     return null;
@@ -118,10 +120,10 @@ function loadWorkspace(req, res, requireAdmin) {
   return ws;
 }
 
-function countWorkspaceAdmins(workspaceId) {
-  return db.prepare(
+async function countWorkspaceAdmins(workspaceId) {
+  return (await db.prepare(
     "SELECT COUNT(*) AS c FROM workspace_members WHERE workspace_id = ? AND role = 'workspace_admin'"
-  ).get(workspaceId).c;
+  ).get(workspaceId)).c;
 }
 
 // Members listing: direct workspace_members + the org_owner/admin users who
@@ -134,8 +136,8 @@ function countWorkspaceAdmins(workspaceId) {
 // affordances (no role select, no remove button). The role field on a
 // via_org entry reflects their ORG role (org_owner / org_admin), not a
 // workspace role - it's display-only.
-function listMembers(workspaceId, organizationId) {
-  const direct = db.prepare(`
+async function listMembers(workspaceId, organizationId) {
+  const direct = await db.prepare(`
     SELECT u.id AS user_id, u.email, u.name, wm.role, wm.joined_at
     FROM workspace_members wm
     JOIN users u ON u.id = wm.user_id
@@ -144,7 +146,7 @@ function listMembers(workspaceId, organizationId) {
   `).all(workspaceId);
   const directIds = new Set(direct.map(r => r.user_id));
 
-  const viaOrg = db.prepare(`
+  const viaOrg = await db.prepare(`
     SELECT u.id AS user_id, u.email, u.name, om.role, om.joined_at
     FROM organization_members om
     JOIN users u ON u.id = om.user_id
@@ -175,34 +177,34 @@ function buildInviteEmail({ workspaceName, organizationName, inviterName, role, 
 }
 
 // GET /:id/members - any member (or org-level/platform admin) of the workspace
-router.get('/:id/members', (req, res) => {
-  const ws = loadWorkspace(req, res, false);
+router.get('/:id/members', asyncHandler(async (req, res) => {
+  const ws = await loadWorkspace(req, res, false);
   if (!ws) return;
-  res.json(listMembers(ws.id, ws.organization_id));
-});
+  res.json(await listMembers(ws.id, ws.organization_id));
+}));
 
 // GET /:id/invites - admin only. Pending (non-expired) rows.
-router.get('/:id/invites', (req, res) => {
-  const ws = loadWorkspace(req, res, true);
+router.get('/:id/invites', asyncHandler(async (req, res) => {
+  const ws = await loadWorkspace(req, res, true);
   if (!ws) return;
-  const invites = db.prepare(`
+  const invites = await db.prepare(`
     SELECT i.id, i.email, i.role, i.expires_at, i.created_at,
            inv.email AS invited_by_email
     FROM workspace_invites i
     LEFT JOIN users inv ON inv.id = i.invited_by
-    WHERE i.workspace_id = ? AND i.expires_at > strftime('%s','now')
+    WHERE i.workspace_id = ? AND i.expires_at > UNIX_TIMESTAMP()
     ORDER BY i.created_at DESC
   `).all(ws.id);
   res.json(invites);
-});
+}));
 
 // POST /:id/invites - admin only. Rate-limited (per-user, per-workspace,
 // hour window). Idempotent against in-flight duplicate invites via a
 // transaction-bounded collision check (workspace_invites has no UNIQUE
 // constraint on (workspace_id, email), so the txn is what prevents the
 // TOCTOU race between two simultaneous POSTs).
-router.post('/:id/invites', async (req, res) => {
-  const ws = loadWorkspace(req, res, true);
+router.post('/:id/invites', asyncHandler(async (req, res) => {
+  const ws = await loadWorkspace(req, res, true);
   if (!ws) return;
 
   const email = String(req.body?.email || '').trim().toLowerCase();
@@ -217,7 +219,7 @@ router.post('/:id/invites', async (req, res) => {
   // Block invite to existing direct member of this workspace. (Org-level
   // members are not "members" of this specific workspace via workspace_members,
   // so they're allowed to also be invited as direct members if desired.)
-  const existingMember = db.prepare(`
+  const existingMember = await db.prepare(`
     SELECT 1 FROM workspace_members wm
     JOIN users u ON u.id = wm.user_id
     WHERE wm.workspace_id = ? AND lower(u.email) = ?
@@ -229,32 +231,34 @@ router.post('/:id/invites', async (req, res) => {
   // Rate limit: per-(inviter, workspace), hour window, counts rows actually
   // created. Generic 429 message - don't echo the configured limit value
   // (info leak about deployment policy).
-  const recentCount = db.prepare(`
+  const recentCount = (await db.prepare(`
     SELECT COUNT(*) AS c FROM workspace_invites
     WHERE invited_by = ? AND workspace_id = ?
-      AND created_at > strftime('%s','now') - 3600
-  `).get(req.user.id, ws.id).c;
+      AND created_at > UNIX_TIMESTAMP() - 3600
+  `).get(req.user.id, ws.id)).c;
   if (recentCount >= INVITE_RATE_LIMIT_PER_HOUR) {
     return res.status(429).json({ error: 'Invite rate limit reached - try again later' });
   }
 
   // Transaction-bounded collision-check-then-insert. Closes the race where
-  // two simultaneous POSTs both pass the SELECT and both INSERT.
+  // two simultaneous POSTs both pass the SELECT and both INSERT. db.transaction()'s
+  // callback gets a transaction-scoped handle (tx) - statements must be prepared
+  // from it, not the outer db, to actually participate in the transaction.
   const inviteId = crypto.randomUUID();
   const expiresAt = Math.floor(Date.now() / 1000) + (INVITE_EXPIRY_DAYS * 86400);
-  const txn = db.transaction(() => {
-    const dupe = db.prepare(`
+  const txn = db.transaction(async (tx) => {
+    const dupe = await tx.prepare(`
       SELECT id FROM workspace_invites
-      WHERE workspace_id = ? AND lower(email) = ? AND expires_at > strftime('%s','now')
+      WHERE workspace_id = ? AND lower(email) = ? AND expires_at > UNIX_TIMESTAMP()
     `).get(ws.id, email);
     if (dupe) return { collision: true };
-    db.prepare(`
+    await tx.prepare(`
       INSERT INTO workspace_invites (id, workspace_id, email, role, invited_by, expires_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(inviteId, ws.id, email, role, req.user.id, expiresAt);
     return { collision: false };
   });
-  const txnResult = txn();
+  const txnResult = await txn();
   if (txnResult.collision) {
     return res.status(409).json({ error: 'An invite for this email is already pending' });
   }
@@ -272,7 +276,7 @@ router.post('/:id/invites', async (req, res) => {
   // redirect in prod). /app is explicit.
   const publicBase = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
   const acceptUrl = `${publicBase}/app#/accept-invite/${inviteId}`;
-  const org = db.prepare('SELECT name FROM organizations WHERE id = ?').get(ws.organization_id);
+  const org = await db.prepare('SELECT name FROM organizations WHERE id = ?').get(ws.organization_id);
   const { subject, text } = buildInviteEmail({
     workspaceName: ws.name,
     organizationName: org?.name || '',
@@ -288,67 +292,67 @@ router.post('/:id/invites', async (req, res) => {
   // non-sends - keep the row, count against the rate limit, allow local
   // accept-invite testing to proceed.
   if (sendResult.reason === 'graph_error') {
-    db.prepare('DELETE FROM workspace_invites WHERE id = ?').run(inviteId);
+    await db.prepare('DELETE FROM workspace_invites WHERE id = ?').run(inviteId);
     return res.status(502).json({ error: 'Email send failed - invite not created' });
   }
 
   res.status(201).json({ id: inviteId, email, role, expires_at: expiresAt });
-});
+}));
 
 // DELETE /:id/invites/:inviteId - admin only. Cancels a pending invite.
-router.delete('/:id/invites/:inviteId', (req, res) => {
-  const ws = loadWorkspace(req, res, true);
+router.delete('/:id/invites/:inviteId', asyncHandler(async (req, res) => {
+  const ws = await loadWorkspace(req, res, true);
   if (!ws) return;
-  const invite = db.prepare('SELECT id FROM workspace_invites WHERE id = ? AND workspace_id = ?')
+  const invite = await db.prepare('SELECT id FROM workspace_invites WHERE id = ? AND workspace_id = ?')
     .get(req.params.inviteId, ws.id);
   if (!invite) return res.status(404).json({ error: 'Invite not found' });
-  db.prepare('DELETE FROM workspace_invites WHERE id = ?').run(invite.id);
+  await db.prepare('DELETE FROM workspace_invites WHERE id = ?').run(invite.id);
   res.json({ success: true });
-});
+}));
 
 // PUT /:id/members/:userId - admin only. Change role.
-router.put('/:id/members/:userId', (req, res) => {
-  const ws = loadWorkspace(req, res, true);
+router.put('/:id/members/:userId', asyncHandler(async (req, res) => {
+  const ws = await loadWorkspace(req, res, true);
   if (!ws) return;
   const newRole = String(req.body?.role || '').trim();
   if (!WORKSPACE_ROLES.includes(newRole)) {
     return res.status(400).json({ error: 'Role must be workspace_admin, workspace_editor, or workspace_viewer' });
   }
-  const member = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+  const member = await db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(ws.id, req.params.userId);
   if (!member) return res.status(404).json({ error: 'Member not found' });
   if (member.role === 'workspace_admin' && newRole !== 'workspace_admin') {
-    if (countWorkspaceAdmins(ws.id) <= 1) {
+    if (await countWorkspaceAdmins(ws.id) <= 1) {
       return res.status(409).json({ error: 'Cannot demote the last admin' });
     }
   }
-  db.prepare('UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?')
+  await db.prepare('UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?')
     .run(newRole, ws.id, req.params.userId);
   res.json({ user_id: req.params.userId, role: newRole });
-});
+}));
 
 // DELETE /:id/members/:userId - admin only. Removes the workspace_members
 // row. Blocks (a) removing the parent-org's org_owner via the workspace path,
 // since their access comes from org_members anyway, and (b) removing the
 // last workspace_admin which would leave the workspace headless.
-router.delete('/:id/members/:userId', (req, res) => {
-  const ws = loadWorkspace(req, res, true);
+router.delete('/:id/members/:userId', asyncHandler(async (req, res) => {
+  const ws = await loadWorkspace(req, res, true);
   if (!ws) return;
-  const member = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+  const member = await db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(ws.id, req.params.userId);
   if (!member) return res.status(404).json({ error: 'Member not found' });
-  const orgOwner = db.prepare(
+  const orgOwner = await db.prepare(
     "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ? AND role = 'org_owner'"
   ).get(ws.organization_id, req.params.userId);
   if (orgOwner) {
     return res.status(403).json({ error: 'Cannot remove the organization owner' });
   }
-  if (member.role === 'workspace_admin' && countWorkspaceAdmins(ws.id) <= 1) {
+  if (member.role === 'workspace_admin' && await countWorkspaceAdmins(ws.id) <= 1) {
     return res.status(409).json({ error: 'Cannot remove the last admin' });
   }
-  db.prepare('DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+  await db.prepare('DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .run(ws.id, req.params.userId);
   res.json({ success: true });
-});
+}));
 
 module.exports = router;
