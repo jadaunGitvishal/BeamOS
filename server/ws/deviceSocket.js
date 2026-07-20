@@ -58,8 +58,8 @@ const { getUserPlan, getUserDeviceCount } = require('../middleware/subscription'
 // dashboardNs.emit can be scoped instead of broadcast platform-wide.
 const { deviceRoom, emitToWorkspace } = require('../lib/socket-rooms');
 
-function emitToDeviceWorkspace(dashboardNs, deviceId, event, payload) {
-  emitToWorkspace(dashboardNs, deviceRoom(deviceId), event, payload);
+async function emitToDeviceWorkspace(dashboardNs, deviceId, event, payload) {
+  emitToWorkspace(dashboardNs, await deviceRoom(deviceId), event, payload);
 }
 
 // In-memory store for latest screenshot per device (avoids disk writes during streaming)
@@ -71,9 +71,9 @@ function generateDeviceToken() {
 }
 
 // Validate device_id + device_token pair. Returns true if valid.
-function validateDeviceToken(deviceId, token) {
+async function validateDeviceToken(deviceId, token) {
   if (!deviceId || !token) return false;
-  const row = db.prepare('SELECT device_token FROM devices WHERE id = ?').get(deviceId);
+  const row = await db.prepare('SELECT device_token FROM devices WHERE id = ?').get(deviceId);
   if (!row || !row.device_token) return false;
   // Constant-time comparison to prevent timing attacks
   try {
@@ -102,12 +102,12 @@ function logDeviceStatus(deviceId, status) {
 
 // Build playlist payload with layout and zones
 // Reads from published_snapshot (Phase 3) so draft edits don't affect live devices
-function buildPlaylistPayload(deviceId) {
-  const device = db.prepare('SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
+async function buildPlaylistPayload(deviceId) {
+  const device = await db.prepare('SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
 
   let assignments = [];
   if (device?.playlist_id) {
-    const playlist = db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(device.playlist_id);
+    const playlist = await db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(device.playlist_id);
     if (playlist?.published_snapshot) {
       try { assignments = JSON.parse(playlist.published_snapshot); } catch (e) { assignments = []; }
     }
@@ -115,9 +115,9 @@ function buildPlaylistPayload(deviceId) {
 
   let layout = null;
   if (device?.layout_id) {
-    layout = db.prepare('SELECT * FROM layouts WHERE id = ?').get(device.layout_id);
+    layout = await db.prepare('SELECT * FROM layouts WHERE id = ?').get(device.layout_id);
     if (layout) {
-      layout.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layout.id);
+      layout.zones = await db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layout.id);
     }
   }
 
@@ -127,8 +127,8 @@ function buildPlaylistPayload(deviceId) {
   // drives playback; followers track via wall:sync.
   let wall_config = null;
   if (device?.wall_id) {
-    const wall = db.prepare('SELECT * FROM video_walls WHERE id = ?').get(device.wall_id);
-    const pos = db.prepare('SELECT * FROM video_wall_devices WHERE wall_id = ? AND device_id = ?').get(device.wall_id, deviceId);
+    const wall = await db.prepare('SELECT * FROM video_walls WHERE id = ?').get(device.wall_id);
+    const pos = await db.prepare('SELECT * FROM video_wall_devices WHERE wall_id = ? AND device_id = ?').get(device.wall_id, deviceId);
     if (wall && pos) {
       const baseW = 320, baseH = 180;
       const bezelH = wall.bezel_h_mm || 0;
@@ -150,7 +150,7 @@ function buildPlaylistPayload(deviceId) {
       if (wall.player_x !== null && wall.player_x !== undefined) {
         playerRect = { x: wall.player_x, y: wall.player_y, w: wall.player_width, h: wall.player_height };
       } else {
-        const all = db.prepare('SELECT * FROM video_wall_devices WHERE wall_id = ?').all(wall.id);
+        const all = await db.prepare('SELECT * FROM video_wall_devices WHERE wall_id = ?').all(wall.id);
         let x = Infinity, y = Infinity, x2 = -Infinity, y2 = -Infinity;
         for (const p of all) {
           const px = p.canvas_x ?? (p.grid_col * (baseW + bezelH));
@@ -211,18 +211,18 @@ function assemblePayload({ assignments, layout, orientation, wall_config, timezo
 }
 
 // Check if a device should show trial expired screen
-function checkDeviceAccess(deviceId) {
-  const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId);
+async function checkDeviceAccess(deviceId) {
+  const device = await db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId);
   if (!device || !device.user_id) return { allowed: true };
 
-  const plan = getUserPlan(device.user_id);
+  const plan = await getUserPlan(device.user_id);
   if (!plan) return { allowed: true };
 
   // Check if trial expired and over free limit
   if (plan.trial_started && !plan.trial_active && plan.plan_name === 'free') {
-    const deviceCount = getUserDeviceCount(device.user_id);
+    const deviceCount = await getUserDeviceCount(device.user_id);
     // Get this device's position (ordered by created_at)
-    const userDevices = db.prepare('SELECT id FROM devices WHERE user_id = ? ORDER BY created_at ASC').all(device.user_id);
+    const userDevices = await db.prepare('SELECT id FROM devices WHERE user_id = ? ORDER BY created_at ASC').all(device.user_id);
     const deviceIndex = userDevices.findIndex(d => d.id === deviceId);
 
     // Only the first device (within free limit) is allowed
@@ -238,7 +238,7 @@ function checkDeviceAccess(deviceId) {
 
   // Check if over plan device limit (non-trial)
   if (!plan.trial_started && plan.max_devices > 0) {
-    const userDevices = db.prepare('SELECT id FROM devices WHERE user_id = ? ORDER BY created_at ASC').all(device.user_id);
+    const userDevices = await db.prepare('SELECT id FROM devices WHERE user_id = ? ORDER BY created_at ASC').all(device.user_id);
     const deviceIndex = userDevices.findIndex(d => d.id === deviceId);
     if (deviceIndex >= plan.max_devices) {
       return {
@@ -289,12 +289,12 @@ module.exports = function setupDeviceSocket(io) {
     protectSocket(socket, () => currentDeviceId);
 
     // Device registers with a pairing code (first time) or device_id + device_token (reconnect)
-    socket.on('device:register', (data) => {
+    socket.on('device:register', async (data) => {
       const { pairing_code, device_id, device_token, device_info, fingerprint } = data;
 
       // #146: resolve identity ONCE via the SNAT-safe chain (device_id -> fingerprint
       // -> token -> global anon), used by BOTH the operator block and the flap limiter.
-      const ident = resolveIdentity({ device_id, fingerprint, device_token });
+      const ident = await resolveIdentity({ device_id, fingerprint, device_token });
 
       // #143 operator KILL SWITCH — the FIRST gate, before the fingerprint block, the
       // throttle, any DB writes, or playlist build. #146: resolve the effective
@@ -308,7 +308,7 @@ module.exports = function setupDeviceSocket(io) {
       // `blocked` is an explicit, enforceable lever. Also settable via the dashboard
       // (routes/devices.js POST /:id/block) — same DB write, same next-register effect.
       if (ident.deviceId) {
-        const blk = db.prepare('SELECT blocked FROM devices WHERE id = ?').get(ident.deviceId);
+        const blk = await db.prepare('SELECT blocked FROM devices WHERE id = ?').get(ident.deviceId);
         if (blk && blk.blocked) {
           console.warn(`[blocked] refused device ${ident.deviceId} (operator block, via ${ident.kind})`);
           socket.emit('device:auth-error', { error: 'Device blocked' });
@@ -327,7 +327,7 @@ module.exports = function setupDeviceSocket(io) {
         // QUARANTINE (not from the soft cooldown). validateDeviceToken confirms device_id +
         // a matching STORED token (false for missing/mismatch), so a spoofed device_id can't
         // claim the exemption — an attacker without the real token is still quarantinable.
-        const paired = !!device_id && validateDeviceToken(device_id, device_token);
+        const paired = !!device_id && await validateDeviceToken(device_id, device_token);
         const fv = flapLimiter.check(ident.key, Date.now(), { paired });
         if (!fv.allow) {
           // #146 P0: auto-quarantine is IN-MEMORY + TIME-LIMITED (lib/flap-limiter),
@@ -348,14 +348,14 @@ module.exports = function setupDeviceSocket(io) {
       // Track device fingerprint to prevent reinstall abuse
       if (fingerprint) {
         try {
-          const existing = db.prepare('SELECT * FROM device_fingerprints WHERE fingerprint = ?').get(fingerprint);
+          const existing = await db.prepare('SELECT * FROM device_fingerprints WHERE fingerprint = ?').get(fingerprint);
           if (existing) {
-            db.prepare("UPDATE device_fingerprints SET last_seen = strftime('%s','now'), device_id = ? WHERE fingerprint = ?")
+            await db.prepare("UPDATE device_fingerprints SET last_seen = UNIX_TIMESTAMP(), device_id = ? WHERE fingerprint = ?")
               .run(device_id || existing.device_id, fingerprint);
             // If this fingerprint was previously registered to a different device, block the new registration
             if (!device_id && existing.device_id && pairing_code) {
               // Someone reinstalled - link them back to existing device
-              const oldDevice = db.prepare('SELECT * FROM devices WHERE id = ?').get(existing.device_id);
+              const oldDevice = await db.prepare('SELECT * FROM devices WHERE id = ?').get(existing.device_id);
               if (oldDevice) {
                 // Fingerprint reclaim guard: a leaked/duplicated fingerprint shouldn't be enough
                 // to take over a LIVE device. #143: decide "still alive" from RUNTIME signals —
@@ -387,7 +387,7 @@ module.exports = function setupDeviceSocket(io) {
                 // Fingerprint matched — this is a reinstalled app reconnecting to its old device.
                 // Issue a fresh token so the app can authenticate going forward.
                 const newToken = generateDeviceToken();
-                db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(newToken, existing.device_id);
+                await db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(newToken, existing.device_id);
                 console.log(`Fingerprint match: linking reinstalled app to existing device ${existing.device_id} (new token issued)`);
                 authenticated = true;
                 // Cancel any pending offline timer - device is back in the grace window
@@ -396,7 +396,7 @@ module.exports = function setupDeviceSocket(io) {
                   pendingOfflines.delete(existing.device_id);
                 }
                 evictPriorSocket(existing.device_id, socket.id);
-                db.prepare("UPDATE devices SET status = 'online', last_heartbeat = strftime('%s','now'), ip_address = ?, updated_at = strftime('%s','now') WHERE id = ?")
+                await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP(), ip_address = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
                   .run(getClientIp(socket), existing.device_id);
                 socket.emit('device:registered', { device_id: existing.device_id, device_token: newToken, status: 'online' });
                 // If device was already claimed by a user, tell the player it's paired
@@ -407,26 +407,28 @@ module.exports = function setupDeviceSocket(io) {
                 heartbeat.registerConnection(existing.device_id, socket.id);
                 socket.join(existing.device_id);
                 logDeviceStatus(existing.device_id, 'online');
-                emitToDeviceWorkspace(dashboardNs, existing.device_id, 'dashboard:device-status', { device_id: existing.device_id, status: 'online' });
+                await emitToDeviceWorkspace(dashboardNs, existing.device_id, 'dashboard:device-status', { device_id: existing.device_id, status: 'online' });
                 // Flush any commands/playlist-updates queued while this device was offline.
-                commandQueue.flushQueue(deviceNs, existing.device_id, buildPlaylistPayload);
+                await commandQueue.flushQueue(deviceNs, existing.device_id, buildPlaylistPayload);
                 // Send playlist
-                const access = checkDeviceAccess(existing.device_id);
+                const access = await checkDeviceAccess(existing.device_id);
                 if (!access.allowed) {
                   socket.emit('device:playlist-update', { assignments: [], suspended: true, message: access.message, detail: access.detail });
                 } else {
-                  socket.emit('device:playlist-update', buildPlaylistPayload(existing.device_id));
+                  socket.emit('device:playlist-update', await buildPlaylistPayload(existing.device_id));
                 }
                 return;
               }
             }
           } else if (device_id || pairing_code) {
             // device_id can be stale (e.g. a reconnect after the device row was
-            // deleted). device_fingerprints.device_id has an FK to devices(id), and
-            // INSERT OR IGNORE does NOT suppress FK violations - so null out an
-            // unknown id instead of letting it throw (was a caught, noisy error).
-            const fpDeviceId = (device_id && db.prepare('SELECT 1 FROM devices WHERE id = ?').get(device_id)) ? device_id : null;
-            db.prepare("INSERT OR IGNORE INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)")
+            // deleted). device_fingerprints.device_id has an FK to devices(id) - null
+            // out an unknown id instead of letting the insert throw (was a caught,
+            // noisy error). Kept even though MySQL's INSERT IGNORE (unlike SQLite's
+            // INSERT OR IGNORE) generally does suppress FK violations too - this stays
+            // the explicit, intentional guard rather than relying on that engine detail.
+            const fpDeviceId = (device_id && await db.prepare('SELECT 1 FROM devices WHERE id = ?').get(device_id)) ? device_id : null;
+            await db.prepare("INSERT IGNORE INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)")
               .run(fingerprint, fpDeviceId);
           }
         } catch (e) {
@@ -436,7 +438,7 @@ module.exports = function setupDeviceSocket(io) {
 
       if (device_id) {
         // Reconnecting known device — require valid token
-        const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(device_id);
+        const device = await db.prepare('SELECT * FROM devices WHERE id = ?').get(device_id);
         if (device) {
           // A re-register on the SAME socket is a playlist REFRESH, not a reconnect: the
           // player re-emits device:register every ~45-60s (requestPlaylistRefresh) to pull a
@@ -454,7 +456,7 @@ module.exports = function setupDeviceSocket(io) {
           // fresh token minted) instead of locking it out (Bold #143 / 75c2a08a).
           // validateDeviceToken already returns false for null-stored/missing/mismatch.
           // First pairing is the pairing_code path below (no device_id) — unaffected.
-          if (!validateDeviceToken(device_id, device_token)) {
+          if (!await validateDeviceToken(device_id, device_token)) {
             console.warn(`Invalid/missing device token for ${device_id} from ${getClientIp(socket)} — received_len=${(device_token || '').length}, has_stored_token=${!!device.device_token}`);
             socket.emit('device:auth-error', { error: 'Invalid device token' });
             return;
@@ -504,7 +506,7 @@ module.exports = function setupDeviceSocket(io) {
           }
           evictPriorSocket(device_id, socket.id);
           sessionSettle.accepted(device_id);   // #148 patch2: (re)arm the settle window on an accepted connection
-          db.prepare("UPDATE devices SET status = 'online', last_heartbeat = strftime('%s','now'), ip_address = ?, updated_at = strftime('%s','now') WHERE id = ?")
+          await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP(), ip_address = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
             .run(getClientIp(socket), device_id);
 
           // #143: past the validateDeviceToken gate above the stored token is
@@ -513,8 +515,8 @@ module.exports = function setupDeviceSocket(io) {
           const tokenToSend = device.device_token;
 
           if (device_info) {
-            db.prepare(`UPDATE devices SET android_version = ?, app_version = ?, screen_width = ?, screen_height = ?, render_width = ?, render_height = ?,
-              ota_status = ?, ota_target_version = ?, ota_attempts = ?, ota_updated_at = strftime('%s','now') WHERE id = ?`)
+            await db.prepare(`UPDATE devices SET android_version = ?, app_version = ?, screen_width = ?, screen_height = ?, render_width = ?, render_height = ?,
+              ota_status = ?, ota_target_version = ?, ota_attempts = ?, ota_updated_at = UNIX_TIMESTAMP() WHERE id = ?`)
               .run(device_info.android_version, device_info.app_version, device_info.screen_width, device_info.screen_height, device_info.render_width ?? null, device_info.render_height ?? null,
                 // #139 Phase 2: older APKs don't send these — default to a clean 'none' state.
                 device_info.ota_status ?? 'none', device_info.ota_target_version ?? null, device_info.ota_attempts ?? 0,
@@ -536,7 +538,7 @@ module.exports = function setupDeviceSocket(io) {
           }
           logDeviceStatus(device_id, 'online');
           // Flush any commands/playlist-updates queued while this device was offline.
-          commandQueue.flushQueue(deviceNs, device_id, buildPlaylistPayload);
+          await commandQueue.flushQueue(deviceNs, device_id, buildPlaylistPayload);
 
           // If this device is part of a wall, re-evaluate leadership.
           // Preferred leader = online member with smallest (canvas_x +
@@ -544,9 +546,9 @@ module.exports = function setupDeviceSocket(io) {
           // (top-left tile) is back, they reclaim the role and peers re-sync.
           if (device.wall_id) {
             try {
-              const wall = db.prepare('SELECT * FROM video_walls WHERE id = ?').get(device.wall_id);
+              const wall = await db.prepare('SELECT * FROM video_walls WHERE id = ?').get(device.wall_id);
               if (wall) {
-                const candidates = db.prepare(`
+                const candidates = await db.prepare(`
                   SELECT vwd.device_id, vwd.canvas_x, vwd.canvas_y, vwd.grid_col, vwd.grid_row
                   FROM video_wall_devices vwd
                   JOIN devices d ON d.id = vwd.device_id
@@ -557,13 +559,13 @@ module.exports = function setupDeviceSocket(io) {
                   candidates.sort((a, b) => score(a) - score(b));
                   const preferredLeader = candidates[0].device_id;
                   if (wall.leader_device_id !== preferredLeader) {
-                    db.prepare('UPDATE video_walls SET leader_device_id = ? WHERE id = ?').run(preferredLeader, wall.id);
+                    await db.prepare('UPDATE video_walls SET leader_device_id = ? WHERE id = ?').run(preferredLeader, wall.id);
                     console.log(`Wall ${wall.id} leader reassigned to ${preferredLeader} on reconnect`);
                     // Re-push payload to every member so role flags refresh.
-                    const members = db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(wall.id);
+                    const members = await db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(wall.id);
                     for (const m of members) {
                       if (m.device_id !== device_id) {
-                        commandQueue.queueOrEmitPlaylistUpdate(deviceNs, m.device_id, buildPlaylistPayload);
+                        await commandQueue.queueOrEmitPlaylistUpdate(deviceNs, m.device_id, buildPlaylistPayload);
                       }
                     }
                   }
@@ -573,14 +575,14 @@ module.exports = function setupDeviceSocket(io) {
           }
 
           // Check subscription/trial status before sending playlist
-          const access = checkDeviceAccess(device_id);
+          const access = await checkDeviceAccess(device_id);
           if (!access.allowed) {
             socket.emit('device:playlist-update', { assignments: [], suspended: true, message: access.message, detail: access.detail });
           } else {
-            socket.emit('device:playlist-update', buildPlaylistPayload(device_id));
+            socket.emit('device:playlist-update', await buildPlaylistPayload(device_id));
           }
 
-          emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:device-status', { device_id, status: 'online' });
+          await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:device-status', { device_id, status: 'online' });
           // Only log a genuine reconnect (new socket). Same-socket periodic refreshes stay
           // quiet so the log reflects real connection events, not the 45s refresh cadence.
           if (!isPlaylistRefresh) logCoalescer.record('device-reconnected', `Device reconnected: ${device_id}`);
@@ -608,9 +610,9 @@ module.exports = function setupDeviceSocket(io) {
         // tell just this device to retry. currentDeviceId/authenticated are set only
         // AFTER the row exists, so a failed insert leaves no half-authenticated socket.
         try {
-          db.prepare(`
+          await db.prepare(`
             INSERT INTO devices (id, pairing_code, device_token, status, ip_address, android_version, app_version, screen_width, screen_height, render_width, render_height, last_heartbeat)
-            VALUES (?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+            VALUES (?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())
           `).run(
             id, pairing_code, newToken, getClientIp(socket),
             device_info?.android_version || null,
@@ -637,7 +639,7 @@ module.exports = function setupDeviceSocket(io) {
         // workspace; that's safer than the previous platform-wide broadcast.
         // Dashboards refresh /api/devices/unassigned on poll for the
         // platform_admin pairing view.
-        emitToDeviceWorkspace(dashboardNs, id, 'dashboard:device-added', db.prepare('SELECT * FROM devices WHERE id = ?').get(id));
+        await emitToDeviceWorkspace(dashboardNs, id, 'dashboard:device-added', await db.prepare('SELECT * FROM devices WHERE id = ?').get(id));
         console.log(`New device registered: ${id} with pairing code: ${pairing_code}`);
       }
     });
@@ -652,7 +654,7 @@ module.exports = function setupDeviceSocket(io) {
     }
 
     // Heartbeat with telemetry
-    socket.on('device:heartbeat', (data) => {
+    socket.on('device:heartbeat', async (data) => {
       if (!requireDeviceAuth()) return;
       const { device_id, telemetry } = data;
       if (!device_id || device_id !== currentDeviceId) return;
@@ -660,11 +662,11 @@ module.exports = function setupDeviceSocket(io) {
       currentDeviceId = device_id;
       heartbeat.updateHeartbeat(device_id);
 
-      db.prepare("UPDATE devices SET status = 'online', last_heartbeat = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?")
+      await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP(), updated_at = UNIX_TIMESTAMP() WHERE id = ?")
         .run(device_id);
 
       if (telemetry) {
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO device_telemetry (device_id, battery_level, battery_charging, storage_free_mb, storage_total_mb,
             ram_free_mb, ram_total_mb, cpu_usage, wifi_ssid, wifi_rssi, uptime_seconds)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -681,16 +683,16 @@ module.exports = function setupDeviceSocket(io) {
           telemetry.wifi_rssi ?? null,
           telemetry.uptime_seconds ?? null
         );
-        pruneTelemetry(device_id);
+        await pruneTelemetry(device_id);
 
         // #74/#75: capture the player's reported clock (OS IANA zone + its UTC time)
         // for effective-timezone resolution and the dashboard clock-skew indicator.
         if (telemetry.timezone || telemetry.device_utc != null) {
-          db.prepare("UPDATE devices SET reported_timezone = COALESCE(?, reported_timezone), reported_utc = ?, reported_at = strftime('%s','now') WHERE id = ?")
+          await db.prepare("UPDATE devices SET reported_timezone = COALESCE(?, reported_timezone), reported_utc = ?, reported_at = UNIX_TIMESTAMP() WHERE id = ?")
             .run(telemetry.timezone || null, telemetry.device_utc ?? null, device_id);
         }
 
-        emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:device-status', {
+        await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:device-status', {
           device_id,
           status: 'online',
           telemetry
@@ -699,7 +701,7 @@ module.exports = function setupDeviceSocket(io) {
     });
 
     // Screenshot received from device - relay via WebSocket, keep latest in memory
-    socket.on('device:screenshot', (data) => {
+    socket.on('device:screenshot', async (data) => {
       if (!requireDeviceAuth()) return;
       const { device_id, image_b64 } = data;
       if (!device_id || device_id !== currentDeviceId || !image_b64) return;
@@ -712,7 +714,7 @@ module.exports = function setupDeviceSocket(io) {
 
       // Relay directly to dashboard - no disk write
       try {
-        emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:screenshot-ready', {
+        await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:screenshot-ready', {
           device_id,
           image_data: `data:image/jpeg;base64,${image_b64}`,
           timestamp: Date.now()
@@ -723,7 +725,7 @@ module.exports = function setupDeviceSocket(io) {
     });
 
     // Content download acknowledgement
-    socket.on('device:content-ack', (data) => {
+    socket.on('device:content-ack', async (data) => {
       if (!requireDeviceAuth()) return;
       const { device_id, content_id, status } = data;
       if (device_id !== currentDeviceId) return;
@@ -740,25 +742,25 @@ module.exports = function setupDeviceSocket(io) {
         return;
       }
       console.log(`Device ${device_id} content ${content_id}: ${status}`);
-      emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:content-ack', { device_id, content_id, status });
+      await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:content-ack', { device_id, content_id, status });
     });
 
     // Playback state update
-    socket.on('device:playback-state', (data) => {
+    socket.on('device:playback-state', async (data) => {
       if (!requireDeviceAuth()) return;
       // currentDeviceId is the authenticated device for this socket; use it
       // for the workspace lookup since data may not carry device_id consistently.
-      emitToDeviceWorkspace(dashboardNs, currentDeviceId, 'dashboard:playback-state', data);
+      await emitToDeviceWorkspace(dashboardNs, currentDeviceId, 'dashboard:playback-state', data);
     });
 
     // Live debug log line from the player (only sent when debug logging is toggled
     // on for this device). Relayed to the device's workspace dashboard room so the
     // open device-detail screen can stream it. Not persisted.
-    socket.on('device:log', (data) => {
+    socket.on('device:log', async (data) => {
       if (!requireDeviceAuth() || !currentDeviceId) return;
       const message = typeof data?.message === 'string' ? data.message.slice(0, 2000) : '';
       if (!message) return;
-      emitToDeviceWorkspace(dashboardNs, currentDeviceId, 'dashboard:device-log', {
+      await emitToDeviceWorkspace(dashboardNs, currentDeviceId, 'dashboard:device-log', {
         device_id: currentDeviceId,
         tag: typeof data?.tag === 'string' ? data.tag.slice(0, 64) : '',
         level: typeof data?.level === 'string' ? data.level.slice(0, 8) : 'd',
@@ -771,18 +773,18 @@ module.exports = function setupDeviceSocket(io) {
     // ('manual_update_required' on enter-backoff, 'none' on clear) so the dashboard badge updates
     // promptly without waiting for a reconnect. The register path still persists these fields too
     // (the reconnect backstop if a transition event is missed). Same columns + ?? defaults.
-    socket.on('device:ota-status', (data) => {
+    socket.on('device:ota-status', async (data) => {
       if (!requireDeviceAuth()) return;
       const { device_id, ota_status, ota_target_version, ota_attempts } = data || {};
       // Unknown / forged / mismatched id -> no-op. WHERE id = ? also makes an unregistered id a
       // 0-row update (never throws), so a stray event can't error the socket.
       if (!device_id || device_id !== currentDeviceId) return;
-      db.prepare("UPDATE devices SET ota_status = ?, ota_target_version = ?, ota_attempts = ?, ota_updated_at = strftime('%s','now') WHERE id = ?")
+      await db.prepare("UPDATE devices SET ota_status = ?, ota_target_version = ?, ota_attempts = ?, ota_updated_at = UNIX_TIMESTAMP() WHERE id = ?")
         .run(ota_status ?? 'none', ota_target_version ?? null, ota_attempts ?? 0, device_id);
     });
 
     // Play event logging (proof-of-play)
-    socket.on('device:play-event', (data) => {
+    socket.on('device:play-event', async (data) => {
       if (!requireDeviceAuth()) return;
       const { device_id, event, content_id, content_name, zone_id, completed, duration_sec } = data;
       if (device_id !== currentDeviceId) return;
@@ -795,14 +797,14 @@ module.exports = function setupDeviceSocket(io) {
           const lastMs = lastPlayLogAt.get(device_id) || 0;
           if (nowMs - lastMs >= PLAY_LOG_MIN_GAP_MS) {
             lastPlayLogAt.set(device_id, nowMs);
-            db.prepare(`
+            await db.prepare(`
               INSERT INTO play_logs (device_id, content_id, zone_id, content_name, started_at, trigger_type)
-              VALUES (?, ?, ?, ?, strftime('%s','now'), 'playlist')
+              VALUES (?, ?, ?, ?, UNIX_TIMESTAMP(), 'playlist')
             `).run(device_id, content_id || null, zone_id || null, content_name || 'Unknown');
           }
           // Forward to dashboard so it can render a per-device progress bar.
           // Server-side timestamp avoids clock-skew between player and dashboard.
-          emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:playback-progress', {
+          await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:playback-progress', {
             device_id,
             content_id: content_id || null,
             content_name: content_name || null,
@@ -810,13 +812,15 @@ module.exports = function setupDeviceSocket(io) {
             started_at: Date.now(),
           });
         } else if (event === 'play_end') {
-          db.prepare(`
-            UPDATE play_logs SET ended_at = strftime('%s','now'),
-              duration_sec = strftime('%s','now') - started_at,
+          await db.prepare(`
+            UPDATE play_logs SET ended_at = UNIX_TIMESTAMP(),
+              duration_sec = UNIX_TIMESTAMP() - started_at,
               completed = ?
             WHERE id = (
-              SELECT id FROM play_logs WHERE device_id = ? AND content_id = ? AND ended_at IS NULL
-              ORDER BY started_at DESC LIMIT 1
+              SELECT id FROM (
+                SELECT id FROM play_logs WHERE device_id = ? AND content_id = ? AND ended_at IS NULL
+                ORDER BY started_at DESC LIMIT 1
+              ) x
             )
           `).run(completed ? 1 : 0, device_id, content_id);
         }
@@ -829,14 +833,14 @@ module.exports = function setupDeviceSocket(io) {
     // otherwise an authenticated device could inject sync packets into a wall
     // it doesn't belong to (jitter/DoS that wall's playback). Exclusion uses
     // currentDeviceId, never the client-supplied data.device_id.
-    socket.on('wall:sync', (data) => {
+    socket.on('wall:sync', async (data) => {
       if (!requireDeviceAuth()) return;
       if (!data?.wall_id) return;
-      const isMember = db.prepare(
+      const isMember = await db.prepare(
         'SELECT 1 FROM video_wall_devices WHERE wall_id = ? AND device_id = ?'
       ).get(data.wall_id, currentDeviceId);
       if (!isMember) return;
-      const wallDevices = db.prepare(
+      const wallDevices = await db.prepare(
         'SELECT device_id FROM video_wall_devices WHERE wall_id = ? AND device_id != ?'
       ).all(data.wall_id, currentDeviceId);
       // Stamp device_id with the authenticated id so followers can trust it.
@@ -850,14 +854,14 @@ module.exports = function setupDeviceSocket(io) {
     // Used on (re)connect so the follower doesn't drift for ~1s waiting on
     // the next periodic wall:sync tick. Server forwards only to the leader,
     // and only when the requester is actually a member of the named wall.
-    socket.on('wall:sync-request', (data) => {
+    socket.on('wall:sync-request', async (data) => {
       if (!requireDeviceAuth()) return;
       if (!data?.wall_id) return;
-      const isMember = db.prepare(
+      const isMember = await db.prepare(
         'SELECT 1 FROM video_wall_devices WHERE wall_id = ? AND device_id = ?'
       ).get(data.wall_id, currentDeviceId);
       if (!isMember) return;
-      const wall = db.prepare('SELECT leader_device_id FROM video_walls WHERE id = ?').get(data.wall_id);
+      const wall = await db.prepare('SELECT leader_device_id FROM video_walls WHERE id = ?').get(data.wall_id);
       if (!wall?.leader_device_id || wall.leader_device_id === currentDeviceId) return;
       deviceNs.to(wall.leader_device_id).emit('wall:sync-request', {
         wall_id: data.wall_id,
@@ -894,7 +898,15 @@ module.exports = function setupDeviceSocket(io) {
       // sequence we want the second to refresh the window, not double up.
       if (pendingOfflines.has(deviceId)) clearTimeout(pendingOfflines.get(deviceId));
 
+      // The offline-transition callback is async; setTimeout doesn't await/catch it, so a
+      // rejection would otherwise become an unhandled rejection (server.js's crash handler
+      // treats that as fatal). Catch and log instead - matches protectSocket's per-connection
+      // fail-fast philosophy without taking the whole process down over a deferred callback.
       pendingOfflines.set(deviceId, setTimeout(() => {
+        offlineTransition(deviceId, closingSocketId).catch((e) => console.error(`[device:disconnect] offline transition failed for ${deviceId}:`, e.message));
+      }, OFFLINE_DEBOUNCE_MS));
+
+      async function offlineTransition(deviceId, closingSocketId) {
         pendingOfflines.delete(deviceId);
         // Re-check at fire time: did a DIFFERENT socket reclaim during the
         // grace window? If activeConn exists but it's still our (now-closed)
@@ -904,28 +916,28 @@ module.exports = function setupDeviceSocket(io) {
         const activeNow = heartbeat.getConnection(deviceId);
         if (activeNow && activeNow.socketId !== closingSocketId) return;
 
-        db.prepare("UPDATE devices SET status = 'offline', updated_at = strftime('%s','now') WHERE id = ?").run(deviceId);
+        await db.prepare("UPDATE devices SET status = 'offline', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(deviceId);
         heartbeat.removeConnection(deviceId);
         logDeviceStatus(deviceId, 'offline');
-        emitToDeviceWorkspace(dashboardNs, deviceId, 'dashboard:device-status', { device_id: deviceId, status: 'offline' });
+        await emitToDeviceWorkspace(dashboardNs, deviceId, 'dashboard:device-status', { device_id: deviceId, status: 'offline' });
 
         // If this device was leading a wall, reassign leadership to the next
         // online member so playback stays driven.
         try {
-          const wall = db.prepare('SELECT id FROM video_walls WHERE leader_device_id = ?').get(deviceId);
+          const wall = await db.prepare('SELECT id FROM video_walls WHERE leader_device_id = ?').get(deviceId);
           if (wall) {
-            const candidates = db.prepare(`
+            const candidates = await db.prepare(`
               SELECT vwd.device_id FROM video_wall_devices vwd
               JOIN devices d ON d.id = vwd.device_id
               WHERE vwd.wall_id = ? AND d.status = 'online' AND vwd.device_id != ?
               ORDER BY vwd.grid_row, vwd.grid_col LIMIT 1
             `).all(wall.id, deviceId);
             const newLeader = candidates[0]?.device_id || null;
-            db.prepare('UPDATE video_walls SET leader_device_id = ? WHERE id = ?').run(newLeader, wall.id);
-            const members = db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(wall.id);
+            await db.prepare('UPDATE video_walls SET leader_device_id = ? WHERE id = ?').run(newLeader, wall.id);
+            const members = await db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(wall.id);
             for (const m of members) {
               if (m.device_id !== deviceId) {
-                commandQueue.queueOrEmitPlaylistUpdate(deviceNs, m.device_id, buildPlaylistPayload);
+                await commandQueue.queueOrEmitPlaylistUpdate(deviceNs, m.device_id, buildPlaylistPayload);
               }
             }
           }
@@ -938,18 +950,18 @@ module.exports = function setupDeviceSocket(io) {
             const filename = `${deviceId}_latest.jpg`;
             const buffer = Buffer.from(lastB64, 'base64');
             fs.writeFileSync(path.join(config.screenshotsDir, filename), buffer);
-            const existing = db.prepare('SELECT id FROM screenshots WHERE device_id = ?').get(deviceId);
+            const existing = await db.prepare('SELECT id FROM screenshots WHERE device_id = ?').get(deviceId);
             if (existing) {
-              db.prepare('UPDATE screenshots SET filepath = ?, captured_at = strftime(\'%s\',\'now\') WHERE device_id = ?').run(filename, deviceId);
+              await db.prepare('UPDATE screenshots SET filepath = ?, captured_at = UNIX_TIMESTAMP() WHERE device_id = ?').run(filename, deviceId);
             } else {
-              db.prepare('INSERT INTO screenshots (device_id, filepath) VALUES (?, ?)').run(deviceId, filename);
+              await db.prepare('INSERT INTO screenshots (device_id, filepath) VALUES (?, ?)').run(deviceId, filename);
             }
           } catch (e) {
             console.error('Failed to save offline screenshot:', e.message);
           }
           delete lastScreenshots[deviceId];
         }
-      }, OFFLINE_DEBOUNCE_MS));
+      }
     });
   });
 
