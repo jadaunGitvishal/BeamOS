@@ -6,6 +6,7 @@ const { db } = require('../db/database');
 // full-trust (a `web` overlay renders an arbitrary page in the player), so — like the
 // group command route — it requires the 'full' token scope. No-op for JWT sessions.
 const { requireScope } = require('../middleware/apiToken');
+const { asyncHandler } = require('../lib/async-handler');
 
 // Reuse the existing 6-hex color contract (#RRGGBB). Overlay transparency is expressed
 // via the separate `opacity` field, so no alpha channel is accepted here.
@@ -39,14 +40,14 @@ function floatInRange(v, def, lo, hi) {
 // A device first, then a group; null if neither exists in this workspace (the handler
 // 404s). Scoping every query by req.workspaceId is the workspace-isolation guarantee:
 // a token bound to workspace A can never address a device/group in workspace B.
-function resolveTargets(req, id) {
+async function resolveTargets(req, id) {
   const wsId = req.workspaceId;
   if (!wsId || !id) return null;
-  const device = db.prepare('SELECT id, name, status FROM devices WHERE id = ? AND workspace_id = ?').get(id, wsId);
+  const device = await db.prepare('SELECT id, name, status FROM devices WHERE id = ? AND workspace_id = ?').get(id, wsId);
   if (device) return { kind: 'device', devices: [device] };
-  const group = db.prepare('SELECT id, name FROM device_groups WHERE id = ? AND workspace_id = ?').get(id, wsId);
+  const group = await db.prepare('SELECT id, name FROM device_groups WHERE id = ? AND workspace_id = ?').get(id, wsId);
   if (group) {
-    const devices = db.prepare(`
+    const devices = await db.prepare(`
       SELECT d.id, d.name, d.status FROM devices d
       JOIN device_group_members dgm ON d.id = dgm.device_id
       WHERE dgm.group_id = ? AND d.workspace_id = ?
@@ -82,7 +83,7 @@ function summarize(results) {
 }
 
 // POST /api/pip — show an overlay on a device or group.
-router.post('/', requireScope('full'), (req, res) => {
+router.post('/', requireScope('full'), asyncHandler(async (req, res) => {
   const b = req.body || {};
 
   if (!b.device_id) return res.status(400).json({ error: 'device_id required (device or group id)' });
@@ -117,7 +118,7 @@ router.post('/', requireScope('full'), (req, res) => {
     return res.status(400).json({ error: 'invalid background_color, use #RRGGBB' });
   }
 
-  const targets = resolveTargets(req, b.device_id);
+  const targets = await resolveTargets(req, b.device_id);
   if (!targets) return res.status(404).json({ error: 'device or group not found in this workspace' });
 
   const pip_id = uuidv4();
@@ -141,21 +142,21 @@ router.post('/', requireScope('full'), (req, res) => {
   const summary = summarize(results);
   console.log(`[pip] show ${pip_id} (${b.type}) -> ${targets.kind} ${b.device_id}: ${summary.sent} sent, ${summary.offline} offline`);
   res.json({ success: true, pip_id, target: targets.kind, ...summary });
-});
+}));
 
 // Clear an overlay. DELETE /api/pip and POST /api/pip/clear are equivalent; an omitted
 // pip_id clears whatever is showing.
-function handleClear(req, res) {
+const handleClear = asyncHandler(async (req, res) => {
   const b = req.body || {};
   if (!b.device_id) return res.status(400).json({ error: 'device_id required (device or group id)' });
-  const targets = resolveTargets(req, b.device_id);
+  const targets = await resolveTargets(req, b.device_id);
   if (!targets) return res.status(404).json({ error: 'device or group not found in this workspace' });
   const payload = b.pip_id ? { pip_id: String(b.pip_id) } : {};
   const results = emitToTargets(req, targets.devices, 'device:pip-clear', payload);
   const summary = summarize(results);
   console.log(`[pip] clear ${b.pip_id || '(all)'} -> ${targets.kind} ${b.device_id}: ${summary.sent} sent, ${summary.offline} offline`);
   res.json({ success: true, target: targets.kind, ...summary });
-}
+});
 
 router.post('/clear', requireScope('full'), handleClear);
 router.delete('/', requireScope('full'), handleClear);

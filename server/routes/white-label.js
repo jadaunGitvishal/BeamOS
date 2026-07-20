@@ -6,25 +6,26 @@ const { db } = require("../db/database");
 // per the design doc (branding is a workspace_admin power, not editor).
 const { requireWorkspaceAdmin } = require("../lib/permissions");
 const { resolveBranding, publicBranding } = require("../lib/branding");
+const { asyncHandler } = require("../lib/async-handler");
 
 // Get the current workspace's effective branding. #15: when the workspace has no
 // row of its own, fall through to the platform default (workspace_id IS NULL)
 // instead of the hardcoded ScreenTinker default, so unbranded/new workspaces
 // inherit the instance brand.
-router.get("/", (req, res) => {
-  res.json(resolveBranding(db, { workspaceId: req.workspaceId || null }));
-});
+router.get("/", asyncHandler(async (req, res) => {
+  res.json(await resolveBranding(db, { workspaceId: req.workspaceId || null }));
+}));
 
 // Get branding by custom domain. #15: domain match -> platform default ->
 // hardcoded. (Mounted behind requireAuth like the rest of this router; the
 // public/pre-login path is GET /api/branding, registered before auth.)
-router.get("/domain/:domain", (req, res) => {
-  res.json(publicBranding(resolveBranding(db, { domain: req.params.domain })));
-});
+router.get("/domain/:domain", asyncHandler(async (req, res) => {
+  res.json(publicBranding(await resolveBranding(db, { domain: req.params.domain })));
+}));
 
 // Create or update the current workspace's white-label config. Restricted to
 // workspace_admin / org_owner / org_admin / platform_admin.
-router.post("/", requireWorkspaceAdmin, (req, res) => {
+router.post("/", requireWorkspaceAdmin, asyncHandler(async (req, res) => {
   if (!req.workspaceId)
     return res
       .status(403)
@@ -65,7 +66,7 @@ router.post("/", requireWorkspaceAdmin, (req, res) => {
       });
   }
 
-  let wl = db
+  let wl = await db
     .prepare("SELECT * FROM white_labels WHERE workspace_id = ?")
     .get(req.workspaceId);
 
@@ -90,15 +91,15 @@ router.post("/", requireWorkspaceAdmin, (req, res) => {
       }
     });
     if (updates.length) {
-      updates.push("updated_at = strftime('%s','now')");
+      updates.push("updated_at = UNIX_TIMESTAMP()");
       values.push(req.workspaceId);
-      db.prepare(
+      await db.prepare(
         `UPDATE white_labels SET ${updates.join(", ")} WHERE workspace_id = ?`,
       ).run(...values);
     }
   } else {
     const id = uuidv4();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO white_labels (id, user_id, workspace_id, brand_name, logo_url, favicon_url, primary_color, secondary_color, bg_color, custom_domain, custom_css, hide_branding)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
@@ -118,10 +119,10 @@ router.post("/", requireWorkspaceAdmin, (req, res) => {
   }
 
   res.json(
-    db
+    await db
       .prepare("SELECT * FROM white_labels WHERE workspace_id = ?")
       .get(req.workspaceId),
   );
-});
+}));
 
 module.exports = router;

@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../db/database');
 const { requireAuth } = require('../middleware/auth');
 const config = require('../config');
+const { asyncHandler } = require('../lib/async-handler');
 
 const appUrl = process.env.APP_URL || '';
 
@@ -12,13 +13,13 @@ if (config.stripeSecretKey) {
 }
 
 // Create checkout session - user clicks "Upgrade" on a plan
-router.post('/checkout', requireAuth, async (req, res) => {
+router.post('/checkout', requireAuth, asyncHandler(async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
 
   const { plan_id, interval } = req.body; // interval: 'monthly' or 'yearly'
   if (!plan_id) return res.status(400).json({ error: 'plan_id required' });
 
-  const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(plan_id);
+  const plan = await db.prepare('SELECT * FROM plans WHERE id = ?').get(plan_id);
   if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
   const priceId = interval === 'yearly' ? plan.stripe_price_yearly : plan.stripe_price_monthly;
@@ -33,7 +34,7 @@ router.post('/checkout', requireAuth, async (req, res) => {
         metadata: { user_id: req.user.id, name: req.user.name || '' },
       });
       customerId = customer.id;
-      db.prepare('UPDATE users SET stripe_customer_id = ? WHERE id = ?').run(customerId, req.user.id);
+      await db.prepare('UPDATE users SET stripe_customer_id = ? WHERE id = ?').run(customerId, req.user.id);
     }
 
     // If user already has an active subscription, create a portal session to manage it
@@ -64,10 +65,10 @@ router.post('/checkout', requireAuth, async (req, res) => {
     console.error('Stripe checkout error:', err.message);
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
-});
+}));
 
 // Customer portal - manage existing subscription (change plan, cancel, update payment)
-router.post('/portal', requireAuth, async (req, res) => {
+router.post('/portal', requireAuth, asyncHandler(async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
 
   const customerId = req.user.stripe_customer_id;
@@ -83,10 +84,10 @@ router.post('/portal', requireAuth, async (req, res) => {
     console.error('Stripe portal error:', err.message);
     res.status(500).json({ error: 'Failed to create portal session' });
   }
-});
+}));
 
 // Stripe webhook - handles all subscription lifecycle events
-router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+router.post('/webhook', express.raw({ type: 'application/json' }), asyncHandler(async (req, res) => {
   if (!stripe) return res.status(404).json({ error: 'Stripe not configured' });
 
   let event;
@@ -110,7 +111,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const userId = session.metadata?.user_id;
         const planId = session.metadata?.plan_id;
         if (userId && session.subscription) {
-          db.prepare(`UPDATE users SET stripe_subscription_id = ?, plan_id = ?, subscription_status = 'active', updated_at = strftime('%s','now') WHERE id = ?`)
+          await db.prepare(`UPDATE users SET stripe_subscription_id = ?, plan_id = ?, subscription_status = 'active', updated_at = UNIX_TIMESTAMP() WHERE id = ?`)
             .run(session.subscription, planId || 'starter', userId);
           console.log(`User ${userId} subscribed to ${planId} (sub: ${session.subscription})`);
         }
@@ -126,14 +127,14 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const priceId = sub.items?.data?.[0]?.price?.id;
         let planId = sub.metadata?.plan_id;
         if (priceId && !planId) {
-          const plan = db.prepare('SELECT id FROM plans WHERE stripe_price_monthly = ? OR stripe_price_yearly = ?').get(priceId, priceId);
+          const plan = await db.prepare('SELECT id FROM plans WHERE stripe_price_monthly = ? OR stripe_price_yearly = ?').get(priceId, priceId);
           if (plan) planId = plan.id;
         }
 
         const status = sub.status === 'active' ? 'active' : sub.status === 'past_due' ? 'past_due' : sub.status;
         const ends = sub.current_period_end || null;
 
-        db.prepare(`UPDATE users SET plan_id = COALESCE(?, plan_id), subscription_status = ?, subscription_ends = ?, updated_at = strftime('%s','now') WHERE id = ?`)
+        await db.prepare(`UPDATE users SET plan_id = COALESCE(?, plan_id), subscription_status = ?, subscription_ends = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?`)
           .run(planId, status, ends, userId);
         console.log(`Subscription updated for ${userId}: ${planId} (${status})`);
         break;
@@ -143,7 +144,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const sub = event.data.object;
         const userId = sub.metadata?.user_id;
         if (userId) {
-          db.prepare(`UPDATE users SET plan_id = 'free', subscription_status = 'cancelled', stripe_subscription_id = NULL, updated_at = strftime('%s','now') WHERE id = ?`)
+          await db.prepare(`UPDATE users SET plan_id = 'free', subscription_status = 'cancelled', stripe_subscription_id = NULL, updated_at = UNIX_TIMESTAMP() WHERE id = ?`)
             .run(userId);
           console.log(`Subscription cancelled for ${userId}`);
         }
@@ -154,9 +155,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const invoice = event.data.object;
         const subId = invoice.subscription;
         if (subId) {
-          const user = db.prepare('SELECT id FROM users WHERE stripe_subscription_id = ?').get(subId);
+          const user = await db.prepare('SELECT id FROM users WHERE stripe_subscription_id = ?').get(subId);
           if (user) {
-            db.prepare("UPDATE users SET subscription_status = 'past_due', updated_at = strftime('%s','now') WHERE id = ?").run(user.id);
+            await db.prepare("UPDATE users SET subscription_status = 'past_due', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(user.id);
             console.log(`Payment failed for user ${user.id}`);
           }
         }
@@ -168,6 +169,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
   }
 
   res.json({ received: true });
-});
+}));
 
 module.exports = router;

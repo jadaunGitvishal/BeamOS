@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../db/database');
+const { asyncHandler } = require('../lib/async-handler');
 
 // Phase 2.2g: scope reports to the caller's current workspace.
 // No platform_admin bypass - cross-workspace reporting comes from
@@ -17,7 +18,7 @@ function getWorkspaceDeviceSubquery(req) {
 }
 
 // Query play logs
-router.get('/plays', (req, res) => {
+router.get('/plays', asyncHandler(async (req, res) => {
   const { device_id, content_id, start, end, limit: lim } = req.query;
   const scope = getWorkspaceDeviceFilter(req);
   let sql = `SELECT pl.*, d.name as device_name
@@ -34,11 +35,11 @@ router.get('/plays', (req, res) => {
   sql += ' ORDER BY pl.started_at DESC LIMIT ?';
   params.push(parseInt(lim) || 500);
 
-  res.json(db.prepare(sql).all(...params));
-});
+  res.json(await db.prepare(sql).all(...params));
+}));
 
 // Summary report
-router.get('/summary', (req, res) => {
+router.get('/summary', asyncHandler(async (req, res) => {
   const { device_id, start, end, group_by } = req.query;
   const startEpoch = start ? Math.floor(new Date(start).getTime() / 1000) : Math.floor(Date.now() / 1000) - 30 * 86400;
   const endEpoch = end ? Math.floor(new Date(end + 'T23:59:59').getTime() / 1000) : Math.floor(Date.now() / 1000);
@@ -50,7 +51,7 @@ router.get('/summary', (req, res) => {
   if (device_id) { deviceFilter += ' AND device_id = ?'; params.push(device_id); }
 
   // Overall stats
-  const overall = db.prepare(`
+  const overall = await db.prepare(`
     SELECT COUNT(*) as total_plays,
            COALESCE(SUM(duration_sec), 0) as total_duration_sec,
            COUNT(DISTINCT content_id) as unique_content,
@@ -61,7 +62,7 @@ router.get('/summary', (req, res) => {
   `).get(...params);
 
   // By content
-  const byContent = db.prepare(`
+  const byContent = await db.prepare(`
     SELECT content_id, content_name, COUNT(*) as plays,
            COALESCE(SUM(duration_sec), 0) as total_seconds,
            SUM(completed) as completed_plays
@@ -72,7 +73,7 @@ router.get('/summary', (req, res) => {
   `).all(...params);
 
   // By device
-  const byDevice = db.prepare(`
+  const byDevice = await db.prepare(`
     SELECT pl.device_id, d.name as device_name, COUNT(*) as plays,
            COALESCE(SUM(pl.duration_sec), 0) as total_seconds
     FROM play_logs pl
@@ -82,18 +83,24 @@ router.get('/summary', (req, res) => {
     ORDER BY plays DESC
   `).all(...params);
 
-  // By hour of day
-  const byHour = db.prepare(`
-    SELECT CAST(strftime('%H', started_at, 'unixepoch', 'localtime') AS INTEGER) as hour,
+  // By hour of day. MySQL equivalent of SQLite's strftime('%H', x, 'unixepoch', 'localtime'):
+  // FROM_UNIXTIME() already converts using the session/global time_zone (SYSTEM by default,
+  // i.e. the DB server's OS timezone) - the closest available match to SQLite's 'localtime'
+  // modifier (the server PROCESS's OS timezone). Not byte-identical if the app and DB
+  // processes ever run in different zones, but that was already implicitly assumed.
+  const byHour = await db.prepare(`
+    SELECT HOUR(FROM_UNIXTIME(started_at)) as hour,
            COUNT(*) as plays
     FROM play_logs
     WHERE started_at >= ? AND started_at <= ? ${deviceFilter}
     GROUP BY hour ORDER BY hour
   `).all(...params);
 
-  // By day
-  const byDay = db.prepare(`
-    SELECT date(started_at, 'unixepoch', 'localtime') as day, COUNT(*) as plays,
+  // By day. DATE_FORMAT (not DATE()) so `day` always comes back as a plain 'YYYY-MM-DD'
+  // string like the old SQLite date() did, rather than a native DATE value mysql2 might
+  // hand back as a JS Date object.
+  const byDay = await db.prepare(`
+    SELECT DATE_FORMAT(FROM_UNIXTIME(started_at), '%Y-%m-%d') as day, COUNT(*) as plays,
            COALESCE(SUM(duration_sec), 0) as total_seconds
     FROM play_logs
     WHERE started_at >= ? AND started_at <= ? ${deviceFilter}
@@ -114,12 +121,12 @@ router.get('/summary', (req, res) => {
     by_hour: byHour,
     by_day: byDay,
   });
-});
+}));
 
 // Export CSV. Phase 2.2g: workspace-scoped. Previously this route had no scope
 // filter at all - any authenticated user could export the entire platform's
 // play_logs. The added WHERE clause closes that pre-existing cross-tenant leak.
-router.get('/export', (req, res) => {
+router.get('/export', asyncHandler(async (req, res) => {
   const { device_id, start, end } = req.query;
   const startEpoch = start ? Math.floor(new Date(start).getTime() / 1000) : 0;
   const endEpoch = end ? Math.floor(new Date(end + 'T23:59:59').getTime() / 1000) : Math.floor(Date.now() / 1000);
@@ -130,7 +137,7 @@ router.get('/export', (req, res) => {
   if (device_id) { sql += ' AND pl.device_id = ?'; params.push(device_id); }
   sql += ' ORDER BY pl.started_at ASC';
 
-  const rows = db.prepare(sql).all(...params);
+  const rows = await db.prepare(sql).all(...params);
 
   const header = 'Device,Content,Started,Ended,Duration (sec),Completed\n';
   const csv = header + rows.map(r => {
@@ -142,13 +149,13 @@ router.get('/export', (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename=proof-of-play.csv');
   res.send(csv);
-});
+}));
 
 // Device uptime report. Phase 2.2g: workspace-scoped. Previously this route
 // had no scope filter at all - any authenticated user could see telemetry
 // summaries for every device on the platform. The added WHERE clause closes
 // that pre-existing cross-tenant leak.
-router.get('/uptime', (req, res) => {
+router.get('/uptime', asyncHandler(async (req, res) => {
   const { device_id, start, end } = req.query;
   const startEpoch = start ? Math.floor(new Date(start).getTime() / 1000) : Math.floor(Date.now() / 1000) - 30 * 86400;
   const endEpoch = end ? Math.floor(new Date(end + 'T23:59:59').getTime() / 1000) : Math.floor(Date.now() / 1000);
@@ -165,7 +172,7 @@ router.get('/uptime', (req, res) => {
   if (device_id) { sql += ' AND dt.device_id = ?'; params.push(device_id); }
   sql += ' GROUP BY dt.device_id ORDER BY d.name';
 
-  const uptimeData = db.prepare(sql).all(...params);
+  const uptimeData = await db.prepare(sql).all(...params);
 
   // Estimate uptime: heartbeats are every 15s, so heartbeat_count * 15 / total_period
   const totalPeriod = endEpoch - startEpoch;
@@ -174,6 +181,6 @@ router.get('/uptime', (req, res) => {
   });
 
   res.json(uptimeData);
-});
+}));
 
 module.exports = router;
