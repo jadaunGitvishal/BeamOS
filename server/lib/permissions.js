@@ -103,15 +103,15 @@ function requireOrgOwner(req, res, next) {
 // so it works for routes that operate on a target workspace specified by URL
 // param (rename, future settings/delete) rather than the caller's currently
 // active one. Does its own DB lookups against workspace_members + organization_members.
-function canAdminWorkspace(db, user, workspace) {
+async function canAdminWorkspace(db, user, workspace) {
   if (!user || !workspace) return false;
   // Owner only (isPlatformRole) - platform_operator is intentionally excluded,
   // so operators cannot manage workspace members, rename, or set branding (#13).
   if (isPlatformRole(user.role)) return true;
-  const om = db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
     .get(workspace.organization_id, user.id);
   if (om && (om.role === 'org_owner' || om.role === 'org_admin')) return true;
-  const wm = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+  const wm = await db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(workspace.id, user.id);
   return wm && wm.role === 'workspace_admin';
 }
@@ -120,16 +120,16 @@ function canAdminWorkspace(db, user, workspace) {
 // accepts any workspace_members role (admin/editor/viewer) in addition to the
 // org / platform paths. Used by GET endpoints on a URL-param target workspace
 // where resolveTenancy is not on the request (e.g. /api/workspaces/:id/members).
-function canAccessWorkspace(db, user, workspace) {
+async function canAccessWorkspace(db, user, workspace) {
   if (!user || !workspace) return false;
   // Read access: platform staff (admin OR operator) can view any workspace,
   // including its member list (#13, read-only - mutations stay owner-gated via
   // canAdminWorkspace).
   if (isPlatformStaff(user.role)) return true;
-  const om = db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
     .get(workspace.organization_id, user.id);
   if (om && (om.role === 'org_owner' || om.role === 'org_admin')) return true;
-  const wm = db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+  const wm = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(workspace.id, user.id);
   return !!wm;
 }

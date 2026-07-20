@@ -19,74 +19,82 @@ function startHeartbeatChecker(io) {
 
   const deviceNs = io.of('/device');
 
-  setInterval(() => {
-    const now = Date.now();
-    const dashboardNs = io.of('/dashboard');
+  // The interval callback is async (mysql2 is promise-based); setInterval doesn't await
+  // it, so a rejection would otherwise become an unhandled rejection (server.js's crash
+  // handler treats that as fatal). Wrap in try/catch, matching the old code's intent that
+  // no sweep/tick failure should ever kill the heartbeat loop.
+  setInterval(async () => {
+    try {
+      const now = Date.now();
+      const dashboardNs = io.of('/dashboard');
 
-    // #146 BILLING: credit currently-connected devices' usage for this interval.
-    // Fire-and-forget + never throws into the interval (billing must not perturb the
-    // heartbeat). Reads the same live presence map as the offline check below.
-    accrueUsage(now).catch(() => {});
+      // #146 BILLING: credit currently-connected devices' usage for this interval.
+      // Fire-and-forget + never throws into the interval (billing must not perturb the
+      // heartbeat). Reads the same live presence map as the offline check below.
+      accrueUsage(now).catch(() => {});
 
-    // Check database for devices that should be offline
-    const onlineDevices = db.prepare("SELECT id, last_heartbeat FROM devices WHERE status = 'online'").all();
+      // Check database for devices that should be offline
+      const onlineDevices = await db.prepare("SELECT id, last_heartbeat FROM devices WHERE status = 'online'").all();
 
-    for (const device of onlineDevices) {
-      const conn = deviceConnections.get(device.id);
+      for (const device of onlineDevices) {
+        const conn = deviceConnections.get(device.id);
 
-      // #146: a device with a live, still-connected socket is UP, even if its last
-      // heartbeat event is stuck behind a lagged event loop. Marking it offline on a
-      // stale in-memory lastHeartbeat was the second false-offline cause (the screen
-      // is online and playing, the CMS says offline). The socket still being in the
-      // /device namespace is the authoritative liveness signal — trust it over the
-      // (possibly queued) heartbeat clock. If the socket is genuinely gone, conn is
-      // either absent or points at a socket no longer in the namespace, and we fall
-      // through to the timeout below.
-      if (conn && deviceNs.sockets.has(conn.socketId)) continue;
+        // #146: a device with a live, still-connected socket is UP, even if its last
+        // heartbeat event is stuck behind a lagged event loop. Marking it offline on a
+        // stale in-memory lastHeartbeat was the second false-offline cause (the screen
+        // is online and playing, the CMS says offline). The socket still being in the
+        // /device namespace is the authoritative liveness signal — trust it over the
+        // (possibly queued) heartbeat clock. If the socket is genuinely gone, conn is
+        // either absent or points at a socket no longer in the namespace, and we fall
+        // through to the timeout below.
+        if (conn && deviceNs.sockets.has(conn.socketId)) continue;
 
-      const lastBeat = conn ? conn.lastHeartbeat : (device.last_heartbeat ? device.last_heartbeat * 1000 : 0);
+        const lastBeat = conn ? conn.lastHeartbeat : (device.last_heartbeat ? device.last_heartbeat * 1000 : 0);
 
-      if (now - lastBeat > config.heartbeatTimeout) {
-        // #148 Item 2: marking a device offline MUST also close any socket we still hold for
-        // it, so DB-offline can never diverge from socket-state into a silent half-open the
-        // client is never told about. The live-socket guard above already `continue`d for a
-        // genuinely-live socket, so this only reaps a stale/half-open one (Engine.IO's
-        // ping-timeout also reaps it, but this makes offline<=>closed explicit + immediate).
-        if (conn) {
-          const sock = deviceNs.sockets.get(conn.socketId);
-          if (sock) { try { sock.disconnect(true); } catch (_) { /* already gone */ } }
+        if (now - lastBeat > config.heartbeatTimeout) {
+          // #148 Item 2: marking a device offline MUST also close any socket we still hold for
+          // it, so DB-offline can never diverge from socket-state into a silent half-open the
+          // client is never told about. The live-socket guard above already `continue`d for a
+          // genuinely-live socket, so this only reaps a stale/half-open one (Engine.IO's
+          // ping-timeout also reaps it, but this makes offline<=>closed explicit + immediate).
+          if (conn) {
+            const sock = deviceNs.sockets.get(conn.socketId);
+            if (sock) { try { sock.disconnect(true); } catch (_) { /* already gone */ } }
+          }
+          await db.prepare("UPDATE devices SET status = 'offline', updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+            .run(device.id);
+          deviceConnections.delete(device.id);
+
+          // Notify dashboard (workspace-scoped via the device's room).
+          emitToWorkspace(dashboardNs, await deviceRoom(device.id), 'dashboard:device-status', {
+            device_id: device.id,
+            status: 'offline',
+            telemetry: null
+          });
+
+          console.log(`Device ${device.id} marked offline (heartbeat timeout)`);
+          // #146: batch through the coalescing writer (was an immediate INSERT here).
+          statusLogWriter.record(device.id, 'offline_timeout');
         }
-        db.prepare("UPDATE devices SET status = 'offline', updated_at = strftime('%s','now') WHERE id = ?")
-          .run(device.id);
-        deviceConnections.delete(device.id);
-
-        // Notify dashboard (workspace-scoped via the device's room).
-        emitToWorkspace(dashboardNs, deviceRoom(device.id), 'dashboard:device-status', {
-          device_id: device.id,
-          status: 'offline',
-          telemetry: null
-        });
-
-        console.log(`Device ${device.id} marked offline (heartbeat timeout)`);
-        // #146: batch through the coalescing writer (was an immediate INSERT here).
-        statusLogWriter.record(device.id, 'offline_timeout');
       }
+
+      // #146: all table-growth maintenance runs OFF the interval body — async, chunked,
+      // band-gated, re-entrancy-guarded — so a sweep can never block the loop or stack.
+      // The offline-marking above stays synchronous (it's the core heartbeat function).
+      runMaintenance();
+    } catch (e) {
+      console.error('[heartbeat] tick failed:', e.message);
     }
-
-    // #146: all table-growth maintenance runs OFF the interval body — async, chunked,
-    // band-gated, re-entrancy-guarded — so a sweep can never block the loop or stack.
-    // The offline-marking above stays synchronous (it's the core heartbeat function).
-    runMaintenance();
-
   }, config.heartbeatInterval);
 }
 
 // #146: batched play-log prune (idx_play_logs_time), chunked so a 90-day backlog
-// trims across many bounded DELETEs instead of one large statement.
-const _delPlayLogs = db.prepare('DELETE FROM play_logs WHERE rowid IN (SELECT rowid FROM play_logs WHERE started_at < ? LIMIT ?)');
+// trims across many bounded DELETEs instead of one large statement. MySQL supports
+// single-table DELETE ... LIMIT natively (no SQLite rowid needed).
+const _delPlayLogs = db.prepare('DELETE FROM play_logs WHERE started_at < ? LIMIT ?');
 async function prunePlayLogs() {
   const cutoff = Math.floor(Date.now() / 1000) - (90 * 86400);
-  return (await chunkedDelete((lim) => _delPlayLogs.run(cutoff, lim).changes, { batch: config.statusLogPruneBatch })).deleted;
+  return (await chunkedDelete(async (lim) => (await _delPlayLogs.run(cutoff, lim)).changes, { batch: config.statusLogPruneBatch })).deleted;
 }
 
 // #146 interval maintenance — band-gated (skip while loaded; runs next tick) and
@@ -103,8 +111,8 @@ async function runMaintenance() {
     await pruneStatusLog({ bandGate: true });   // per-device chunked; own re-entrancy
     await pruneUsageDaily();                     // #146 BILLING rollup retention (chunked)
     // Expiry sweeps on small tables — single cheap statements, bounded by table size.
-    db.prepare("DELETE FROM team_invites WHERE expires_at < strftime('%s','now')").run();
-    db.prepare("DELETE FROM workspace_invites WHERE expires_at < strftime('%s','now')").run();
+    await db.prepare("DELETE FROM team_invites WHERE expires_at < UNIX_TIMESTAMP()").run();
+    await db.prepare("DELETE FROM workspace_invites WHERE expires_at < UNIX_TIMESTAMP()").run();
   } catch (_) { /* maintenance must never crash the interval */ } finally { _maintRunning = false; }
 }
 
@@ -143,10 +151,12 @@ function getConnectedCount() {
 // per chunk, yielding between chunks. The per-accrual credit is CAPPED (accrualCapSeconds)
 // so a stalled loop or restart gap can't inject a bogus large credit; the DAILY total is
 // capped at 86400 in the UPSERT itself. Day is the UTC calendar day of the tick.
-const _usageUpsert = db.prepare(`
+// MySQL has no ON CONFLICT - INSERT ... ON DUPLICATE KEY UPDATE is the equivalent, and
+// LEAST(...) replaces SQLite's scalar-overloaded MIN(...) (MySQL's MIN is aggregate-only).
+const _usageUpsertSql = `
   INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)
-  ON CONFLICT(device_id, day) DO UPDATE SET online_seconds = MIN(86400, online_seconds + excluded.online_seconds)
-`);
+  ON DUPLICATE KEY UPDATE online_seconds = LEAST(86400, online_seconds + VALUES(online_seconds))
+`;
 let _lastAccrue = 0;
 let _accrualRunning = false;
 async function accrueUsage(now = Date.now()) {
@@ -160,10 +170,15 @@ async function accrueUsage(now = Date.now()) {
   const day = new Date(now).toISOString().slice(0, 10);
   _accrualRunning = true;
   try {
-    const upsertMany = db.transaction((slice) => { for (const id of slice) _usageUpsert.run(id, day, credit); });
+    // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements must
+    // be prepared from it, not the outer db, to actually participate in the transaction.
+    const upsertMany = db.transaction(async (tx, slice) => {
+      const stmt = tx.prepare(_usageUpsertSql);
+      for (const id of slice) await stmt.run(id, day, credit);
+    });
     const batch = config.billing.accrualBatch;
     for (let i = 0; i < ids.length; i += batch) {
-      upsertMany(ids.slice(i, i + batch));
+      await upsertMany(ids.slice(i, i + batch));
       if (i + batch < ids.length) await yieldTick();     // keep a huge fleet's accrual off the event loop
     }
   } finally { _accrualRunning = false; }
@@ -172,10 +187,13 @@ async function accrueUsage(now = Date.now()) {
 
 // #146 BILLING: prune the daily rollup beyond retention (chunked, so it can never
 // bloat-then-freeze). `day` is a sortable 'YYYY-MM-DD' string → lexical < is a date <.
-const _delUsage = db.prepare('DELETE FROM device_usage_daily WHERE rowid IN (SELECT rowid FROM device_usage_daily WHERE day < ? LIMIT ?)');
+// device_usage_daily has no surrogate id column (PRIMARY KEY is the composite
+// (device_id, day)), so - unlike the other prune queries here - there's no rowid
+// substitute to select through; MySQL's native DELETE ... LIMIT applies directly.
+const _delUsage = db.prepare('DELETE FROM device_usage_daily WHERE day < ? LIMIT ?');
 async function pruneUsageDaily() {
   const cutoff = new Date(Date.now() - config.billing.usageRetentionDays * 86400 * 1000).toISOString().slice(0, 10);
-  return (await chunkedDelete((lim) => _delUsage.run(cutoff, lim).changes, { batch: config.statusLogPruneBatch })).deleted;
+  return (await chunkedDelete(async (lim) => (await _delUsage.run(cutoff, lim)).changes, { batch: config.statusLogPruneBatch })).deleted;
 }
 
 // #142: sweep unclaimed provisioning devices older than 24h (imported devices keep a
@@ -183,15 +201,13 @@ async function pruneUsageDaily() {
 // so a provisioning-junk flood can't delete-cascade a huge batch in one synchronous
 // statement. Returns rows deleted. NOTE: async now — callers must await.
 const _delProvisioning = db.prepare(`
-  DELETE FROM devices WHERE rowid IN (
-    SELECT rowid FROM devices
-    WHERE status = 'provisioning' AND user_id IS NULL AND created_at < ?
-    LIMIT ?
-  )
+  DELETE FROM devices
+  WHERE status = 'provisioning' AND user_id IS NULL AND created_at < ?
+  LIMIT ?
 `);
 async function pruneProvisioningDevices() {
   const cutoff = Math.floor(Date.now() / 1000) - (24 * 3600);
-  return (await chunkedDelete((lim) => _delProvisioning.run(cutoff, lim).changes, { batch: config.statusLogPruneBatch })).deleted;
+  return (await chunkedDelete(async (lim) => (await _delProvisioning.run(cutoff, lim)).changes, { batch: config.statusLogPruneBatch })).deleted;
 }
 
 module.exports = {

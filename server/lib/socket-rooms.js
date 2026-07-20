@@ -11,15 +11,15 @@ function workspaceRoom(workspaceId) {
   return workspaceId ? ROOM_PREFIX + workspaceId : null;
 }
 
-function deviceRoom(deviceId) {
+async function deviceRoom(deviceId) {
   if (!deviceId) return null;
-  const d = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
+  const d = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
   return d?.workspace_id ? workspaceRoom(d.workspace_id) : null;
 }
 
-function wallRoom(wallId) {
+async function wallRoom(wallId) {
   if (!wallId) return null;
-  const w = db.prepare('SELECT workspace_id FROM video_walls WHERE id = ?').get(wallId);
+  const w = await db.prepare('SELECT workspace_id FROM video_walls WHERE id = ?').get(wallId);
   return w?.workspace_id ? workspaceRoom(w.workspace_id) : null;
 }
 

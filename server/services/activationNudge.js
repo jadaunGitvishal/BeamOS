@@ -92,8 +92,8 @@ function nudgeHtml(name) {
 // to (Option B, workspace-aware — avoids nudging engaged team members).
 const ELIGIBLE_SQL = `
   SELECT u.id, u.email, u.name FROM users u
-  WHERE u.created_at < strftime('%s','now') - (3 * 86400)
-    AND u.created_at > strftime('%s','now') - (14 * 86400)
+  WHERE u.created_at < UNIX_TIMESTAMP() - (3 * 86400)
+    AND u.created_at > UNIX_TIMESTAMP() - (14 * 86400)
     AND u.activation_nudge_sent_at IS NULL
     AND COALESCE(u.email_alerts, 1) = 1
     AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id)
@@ -111,7 +111,7 @@ function isHosted() {
 // without waiting for 15:00 UTC. Returns the number of nudges sent.
 async function runActivationNudgeSweep() {
   if (!isHosted()) return 0; // defense in depth (scheduler is also gated)
-  const users = db.prepare(ELIGIBLE_SQL).all();
+  const users = await db.prepare(ELIGIBLE_SQL).all();
   console.log(`[NUDGE] sweep: ${users.length} eligible user(s)`);
   let sent = 0;
   for (const u of users) {
@@ -127,8 +127,8 @@ async function runActivationNudgeSweep() {
     });
     console.log(`[NUDGE] nudge -> ${u.email}: ${JSON.stringify(r)}`);
     // Stamp after the send (no retry, same discipline as the welcome email).
-    db.prepare(
-      "UPDATE users SET activation_nudge_sent_at = strftime('%s','now') WHERE id = ?",
+    await db.prepare(
+      "UPDATE users SET activation_nudge_sent_at = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(u.id);
     sent++;
   }

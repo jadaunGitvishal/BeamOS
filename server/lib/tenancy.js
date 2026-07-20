@@ -28,25 +28,26 @@
 
 const { db } = require('../db/database');
 const { isPlatformRole, isPlatformStaff } = require('../middleware/auth');
+const { asyncHandler } = require('./async-handler');
 
-function membershipOf(userId, workspaceId) {
+async function membershipOf(userId, workspaceId) {
   return db.prepare(
     'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?'
   ).get(workspaceId, userId);
 }
 
-function orgMembershipOf(userId, organizationId) {
+async function orgMembershipOf(userId, organizationId) {
   return db.prepare(
     'SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?'
   ).get(organizationId, userId);
 }
 
-function loadWorkspace(workspaceId) {
+async function loadWorkspace(workspaceId) {
   if (!workspaceId) return null;
   return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId);
 }
 
-function firstAccessibleWorkspace(userId) {
+async function firstAccessibleWorkspace(userId) {
   return db.prepare(`
     SELECT w.* FROM workspaces w
     JOIN workspace_members wm ON wm.workspace_id = w.id
@@ -59,12 +60,12 @@ function firstAccessibleWorkspace(userId) {
 // Check whether userId can access workspace via any path (member, org admin,
 // or platform staff). Returns the access context: { workspaceRole, actingAs }
 // or null if no access.
-function accessContext(userId, role, workspace) {
-  const wsMembership = membershipOf(userId, workspace.id);
+async function accessContext(userId, role, workspace) {
+  const wsMembership = await membershipOf(userId, workspace.id);
   if (wsMembership) {
     return { workspaceRole: wsMembership.role, actingAs: false };
   }
-  const orgMembership = orgMembershipOf(userId, workspace.organization_id);
+  const orgMembership = await orgMembershipOf(userId, workspace.organization_id);
   if (orgMembership && (orgMembership.role === 'org_owner' || orgMembership.role === 'org_admin')) {
     return { workspaceRole: null, actingAs: true };
   }
@@ -80,7 +81,7 @@ function accessContext(userId, role, workspace) {
   return null;
 }
 
-function resolveTenancy(req, res, next) {
+const resolveTenancy = asyncHandler(async function resolveTenancy(req, res, next) {
   if (!req.user) {
     // Should not happen when chained after requireAuth, but tolerate optionalAuth flows.
     return next();
@@ -106,9 +107,9 @@ function resolveTenancy(req, res, next) {
   let workspace = null;
   let context = null;
   for (const wsId of candidates) {
-    const ws = loadWorkspace(wsId);
+    const ws = await loadWorkspace(wsId);
     if (!ws) continue;
-    const ctx = accessContext(req.user.id, req.user.role, ws);
+    const ctx = await accessContext(req.user.id, req.user.role, ws);
     if (!ctx) continue;
     workspace = ws;
     context = ctx;
@@ -117,17 +118,17 @@ function resolveTenancy(req, res, next) {
 
   if (!workspace) {
     // Fall back to the user's first workspace_members row.
-    const first = firstAccessibleWorkspace(req.user.id);
+    const first = await firstAccessibleWorkspace(req.user.id);
     if (first) {
       workspace = first;
-      const wm = membershipOf(req.user.id, first.id);
+      const wm = await membershipOf(req.user.id, first.id);
       context = { workspaceRole: wm.role, actingAs: false };
     } else if (isPlatformStaffUser) {
       // Platform staff (admin or operator) with no direct memberships: pick any
       // workspace (acting-as) so they land in a usable context. #13: operators
       // included here too - they have no memberships of their own but must be
       // able to act-as across orgs.
-      const any = db.prepare('SELECT * FROM workspaces LIMIT 1').get();
+      const any = await db.prepare('SELECT * FROM workspaces LIMIT 1').get();
       if (any) {
         workspace = any;
         context = { workspaceRole: null, actingAs: true };
@@ -141,7 +142,7 @@ function resolveTenancy(req, res, next) {
     req.organizationId = workspace.organization_id;
     req.workspaceRole = context.workspaceRole;
     req.actingAs = context.actingAs;
-    const orgMembership = orgMembershipOf(req.user.id, workspace.organization_id);
+    const orgMembership = await orgMembershipOf(req.user.id, workspace.organization_id);
     req.orgRole = orgMembership ? orgMembership.role : null;
   } else {
     req.workspaceId = null;
@@ -153,7 +154,7 @@ function resolveTenancy(req, res, next) {
   }
 
   next();
-}
+});
 
 // Enumerate every workspace_id the given user has any path into:
 //   - direct workspace_members rows
@@ -162,20 +163,20 @@ function resolveTenancy(req, res, next) {
 // Used by socket.io rooms (Phase 2.3) to scope outbound broadcasts. /me's
 // accessible_workspaces query mirrors this access logic but selects full rows
 // rather than reusing this helper (different shape needs).
-function accessibleWorkspaceIds(userId, role) {
+async function accessibleWorkspaceIds(userId, role) {
   if (!userId) return [];
   // #13: platform staff (admin OR operator) see every workspace - visibility,
   // not an owner power.
   if (isPlatformStaff(role)) {
-    return db.prepare('SELECT id FROM workspaces').all().map(r => r.id);
+    return (await db.prepare('SELECT id FROM workspaces').all()).map(r => r.id);
   }
-  return db.prepare(`
+  return (await db.prepare(`
     SELECT workspace_id AS id FROM workspace_members WHERE user_id = ?
     UNION
     SELECT w.id FROM workspaces w
     JOIN organization_members om ON om.organization_id = w.organization_id
     WHERE om.user_id = ? AND om.role IN ('org_owner', 'org_admin')
-  `).all(userId, userId).map(r => r.id);
+  `).all(userId, userId)).map(r => r.id);
 }
 
 module.exports = {

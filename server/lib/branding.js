@@ -32,30 +32,30 @@ const HARDCODED_BRANDING = {
 };
 
 // The single platform-default row (fixed id), or null if none has been set.
-function platformDefaultRow(db) {
+async function platformDefaultRow(db) {
   return (
-    db
+    (await db
       .prepare("SELECT * FROM white_labels WHERE id = ?")
-      .get(PLATFORM_DEFAULT_ID) || null
+      .get(PLATFORM_DEFAULT_ID)) || null
   );
 }
 
 // Resolve effective branding for a context. Pass whichever you have:
 //   { workspaceId } for the authed app, { domain } for the public/login path.
-function resolveBranding(db, { workspaceId = null, domain = null } = {}) {
+async function resolveBranding(db, { workspaceId = null, domain = null } = {}) {
   if (workspaceId) {
-    const wl = db
+    const wl = await db
       .prepare("SELECT * FROM white_labels WHERE workspace_id = ?")
       .get(workspaceId);
     if (wl) return wl;
   }
   if (domain) {
-    const wl = db
+    const wl = await db
       .prepare("SELECT * FROM white_labels WHERE custom_domain = ?")
       .get(domain);
     if (wl) return wl;
   }
-  return platformDefaultRow(db) || { ...HARDCODED_BRANDING };
+  return (await platformDefaultRow(db)) || { ...HARDCODED_BRANDING };
 }
 
 // Presentational fields only. The PUBLIC resolver (GET /api/branding) and the

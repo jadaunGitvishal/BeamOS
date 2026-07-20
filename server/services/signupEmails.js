@@ -146,12 +146,14 @@ User agent: ${userAgent || "unknown"}`;
 // Public entry point. `user` only needs `.id`; everything else is re-read from
 // the row so the caller's column selection doesn't matter. `req` supplies the
 // client IP (CF-aware), Cloudflare's free CF-IPCountry header, and user agent.
+// Fire-and-forget by design (callers never await this): the whole body runs inside an
+// async IIFE, including the DB reads, which can no longer be synchronous with mysql2.
 function sendSignupEmails(user, req) {
-  try {
-    // Hosted instance only.
-    if (config.selfHosted) return;
+  // Hosted instance only.
+  if (config.selfHosted) return;
 
-    const row = db
+  (async () => {
+    const row = await db
       .prepare(
         "SELECT email, name, created_at, welcome_email_sent_at FROM users WHERE id = ?",
       )
@@ -164,7 +166,7 @@ function sendSignupEmails(user, req) {
     const signupUnix = row.created_at || Math.floor(Date.now() / 1000);
 
     // Workspace name is always "Default" at signup, so use the org name instead.
-    const orgRow = db
+    const orgRow = await db
       .prepare(
         "SELECT name FROM organizations WHERE owner_user_id = ? ORDER BY created_at ASC LIMIT 1",
       )
@@ -177,8 +179,7 @@ function sendSignupEmails(user, req) {
     const userAgent =
       (req && req.headers && req.headers["user-agent"]) || "unknown";
 
-    (async () => {
-      const w = await sendEmail({
+    const w = await sendEmail({
         to: email,
         fromName: "Dan at BeamOS",
         rawSubject: true,
@@ -212,20 +213,17 @@ function sendSignupEmails(user, req) {
         );
       }
 
-      // Stamp after the send block regardless of per-email outcome (no retry):
-      // marks this user handled so we never double-send.
-      db.prepare(
-        "UPDATE users SET welcome_email_sent_at = strftime('%s','now') WHERE id = ?",
-      ).run(user.id);
-    })().catch((e) =>
-      console.error(
-        `[SIGNUP-EMAIL] unexpected failure for ${email}: ${e.message}`,
-      ),
-    );
-  } catch (e) {
+    // Stamp after the send block regardless of per-email outcome (no retry):
+    // marks this user handled so we never double-send.
+    await db.prepare(
+      "UPDATE users SET welcome_email_sent_at = UNIX_TIMESTAMP() WHERE id = ?",
+    ).run(user.id);
+  })().catch((e) =>
     // Never let signup-email bookkeeping affect the signup request itself.
-    console.error(`[SIGNUP-EMAIL] setup failed: ${e.message}`);
-  }
+    console.error(
+      `[SIGNUP-EMAIL] failure for user ${user.id}: ${e.message}`,
+    ),
+  );
 }
 
 module.exports = { sendSignupEmails };

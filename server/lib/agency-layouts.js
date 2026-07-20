@@ -7,10 +7,10 @@
 // Confined to THIS token's designated playlists (t.token_id) in its bound workspace.
 // Returns layout canvas size + ALL zones' geometry (no zone CONTENT) + which zones this
 // token feeds. Bite-tested in test/agency-layouts.test.js.
-function listLayoutGeometry(db, tokenId, workspaceId, playlistId = null) {
+async function listLayoutGeometry(db, tokenId, workspaceId, playlistId = null) {
   // Distinct layouts that this token's designated playlists feed (via their items' zones).
   // Optional playlistId narrows to ONE designated playlist (the per-playlist card).
-  const layouts = db.prepare(`
+  const layouts = await db.prepare(`
     SELECT DISTINCT l.id, l.name, l.width, l.height
     FROM api_token_targets t
     JOIN playlists p       ON p.id = t.playlist_id AND p.workspace_id = ?
@@ -36,14 +36,14 @@ function listLayoutGeometry(db, tokenId, workspaceId, playlistId = null) {
     WHERE t.token_id = ? AND lz.layout_id = ?
   `);
 
-  return layouts.map(l => ({
+  return Promise.all(layouts.map(async (l) => ({
     id: l.id,
     name: l.name,
     width: l.width,
     height: l.height,
-    zones: zonesStmt.all(l.id),
-    feeds_zone_ids: feedsStmt.all(tokenId, l.id).map(r => r.zone_id),
-  }));
+    zones: await zonesStmt.all(l.id),
+    feeds_zone_ids: (await feedsStmt.all(tokenId, l.id)).map(r => r.zone_id),
+  })));
 }
 
 module.exports = { listLayoutGeometry };

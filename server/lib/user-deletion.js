@@ -17,8 +17,15 @@
 //     the user (SET NULL where the column is nullable, or reassign the legacy
 //     creator user_id to the resource's org owner where it is NOT NULL).
 //
-// defer_foreign_keys=ON makes intra-transaction delete ORDER forgiving (FKs are
-// validated once at COMMIT); we still clear every reference so COMMIT is clean.
+// MySQL note: SQLite's defer_foreign_keys pragma (deferring FK validation to
+// COMMIT, so delete order within the transaction didn't matter) has no MySQL
+// equivalent - InnoDB always checks FK constraints immediately per statement.
+// The delete order below is therefore deliberately children-before-parents
+// (verified against server/db/schema.sql's FK graph: every WORKSPACE_SCOPED
+// table either has no other table pointing at it with a blocking/RESTRICT
+// action, or that pointing table is deleted earlier in this same order) - NOT
+// an incidental holdover from the SQLite version. Don't reorder without
+// re-checking the FK graph.
 // A table-existence guard keeps this resilient to partial/older schemas (and
 // makes it unit-testable without standing up all ~25 tables).
 
@@ -55,75 +62,74 @@ const REASSIGN_USER_TABLES = [
 ];
 
 const inClause = n => Array.from({ length: n }, () => '?').join(',');
-function tablesPresent(db) {
-  return new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name));
+async function tablesPresent(db) {
+  const rows = await db.prepare("SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()").all();
+  return new Set(rows.map(r => r.name));
 }
 
 // Delete the given workspaces and every tenant resource inside them. The
 // workspace-scoped tables are NO ACTION (won't cascade from the workspace), so
 // we delete them explicitly first; their CASCADE children (playlist_items,
 // telemetry, assignments, layout_zones, *_devices) and workspace_members/invites
-// clean themselves up. MUST run inside a transaction with defer_foreign_keys=ON.
+// clean themselves up. MUST run against a transaction-scoped `db` handle (tx).
 // `have` is the set of existing table names (tablesPresent()).
-function purgeWorkspaces(db, wsIds, have) {
+async function purgeWorkspaces(db, wsIds, have) {
   if (!wsIds.length) return;
   const wph = inClause(wsIds.length);
   if (have.has('devices')) {
-    const devIds = db.prepare(`SELECT id FROM devices WHERE workspace_id IN (${wph})`).all(...wsIds).map(r => r.id);
+    const devIds = (await db.prepare(`SELECT id FROM devices WHERE workspace_id IN (${wph})`).all(...wsIds)).map(r => r.id);
     if (devIds.length) {
       const dph = inClause(devIds.length);
-      for (const lt of DEVICE_LOG_TABLES) if (have.has(lt)) db.prepare(`DELETE FROM ${lt} WHERE device_id IN (${dph})`).run(...devIds);
+      for (const lt of DEVICE_LOG_TABLES) if (have.has(lt)) await db.prepare(`DELETE FROM ${lt} WHERE device_id IN (${dph})`).run(...devIds);
     }
   }
-  for (const t of WORKSPACE_SCOPED) if (have.has(t)) db.prepare(`DELETE FROM ${t} WHERE workspace_id IN (${wph})`).run(...wsIds);
-  if (have.has('activity_log')) db.prepare(`UPDATE activity_log SET workspace_id = NULL WHERE workspace_id IN (${wph})`).run(...wsIds);
-  db.prepare(`DELETE FROM workspaces WHERE id IN (${wph})`).run(...wsIds); // cascades workspace_members/invites
+  for (const t of WORKSPACE_SCOPED) if (have.has(t)) await db.prepare(`DELETE FROM ${t} WHERE workspace_id IN (${wph})`).run(...wsIds);
+  if (have.has('activity_log')) await db.prepare(`UPDATE activity_log SET workspace_id = NULL WHERE workspace_id IN (${wph})`).run(...wsIds);
+  await db.prepare(`DELETE FROM workspaces WHERE id IN (${wph})`).run(...wsIds); // cascades workspace_members/invites
 }
 
 // #36: cascade-delete a single workspace (and all its tenant resources). The
 // parent org is left intact. Platform-admin action; callers gate authorization.
-function deleteWorkspaceCascade(db, { workspaceId }) {
-  db.transaction(() => {
-    db.pragma('defer_foreign_keys = ON');
-    purgeWorkspaces(db, [workspaceId], tablesPresent(db));
+async function deleteWorkspaceCascade(db, { workspaceId }) {
+  await db.transaction(async (tx) => {
+    await purgeWorkspaces(tx, [workspaceId], await tablesPresent(tx));
   })();
 }
 
 // #36: cascade-delete an organization - all its workspaces + tenant resources,
 // then the org itself (cascades organization_members). Member USERS are NOT
 // deleted (they may belong to other orgs); they simply lose this membership.
-function deleteOrgCascade(db, { orgId }) {
-  db.transaction(() => {
-    db.pragma('defer_foreign_keys = ON');
-    const have = tablesPresent(db);
-    const wsIds = db.prepare('SELECT id FROM workspaces WHERE organization_id = ?').all(orgId).map(r => r.id);
-    purgeWorkspaces(db, wsIds, have);
-    if (have.has('activity_log')) db.prepare('UPDATE activity_log SET organization_id = NULL WHERE organization_id = ?').run(orgId);
-    db.prepare('DELETE FROM organizations WHERE id = ?').run(orgId); // cascades organization_members
+async function deleteOrgCascade(db, { orgId }) {
+  await db.transaction(async (tx) => {
+    const have = await tablesPresent(tx);
+    const wsIds = (await tx.prepare('SELECT id FROM workspaces WHERE organization_id = ?').all(orgId)).map(r => r.id);
+    await purgeWorkspaces(tx, wsIds, have);
+    if (have.has('activity_log')) await tx.prepare('UPDATE activity_log SET organization_id = NULL WHERE organization_id = ?').run(orgId);
+    await tx.prepare('DELETE FROM organizations WHERE id = ?').run(orgId); // cascades organization_members
   })();
 }
 
-function listOwnedOrgsWithSharing(db, userId) {
+async function listOwnedOrgsWithSharing(db, userId) {
   let orgs = [];
-  try { orgs = db.prepare('SELECT id FROM organizations WHERE owner_user_id = ?').all(userId); }
+  try { orgs = await db.prepare('SELECT id FROM organizations WHERE owner_user_id = ?').all(userId); }
   catch { return []; } // no organizations table (legacy) -> nothing owned
-  return orgs.map(o => {
-    const otherOrgMembers = db.prepare(
+  return Promise.all(orgs.map(async (o) => {
+    const otherOrgMembers = (await db.prepare(
       'SELECT COUNT(*) AS c FROM organization_members WHERE organization_id = ? AND user_id != ?'
-    ).get(o.id, userId).c;
-    const otherWsMembers = db.prepare(`
+    ).get(o.id, userId)).c;
+    const otherWsMembers = (await db.prepare(`
       SELECT COUNT(*) AS c FROM workspace_members wm
       JOIN workspaces w ON w.id = wm.workspace_id
       WHERE w.organization_id = ? AND wm.user_id != ?
-    `).get(o.id, userId).c;
+    `).get(o.id, userId)).c;
     return { id: o.id, shared: (otherOrgMembers + otherWsMembers) > 0 };
-  });
+  }));
 }
 
 // Throws OrgHasOtherMembersError if the user owns a shared org. Otherwise
 // deletes the user and resolves every reference in one transaction.
-function deleteUserCascade(db, { targetId, actingAdminId }) {
-  const owned = listOwnedOrgsWithSharing(db, targetId);
+async function deleteUserCascade(db, { targetId, actingAdminId }) {
+  const owned = await listOwnedOrgsWithSharing(db, targetId);
   const shared = owned.filter(o => o.shared);
   if (shared.length > 0) {
     throw new OrgHasOtherMembersError(
@@ -133,34 +139,30 @@ function deleteUserCascade(db, { targetId, actingAdminId }) {
   }
   const soloOrgIds = owned.map(o => o.id);
 
-  const have = tablesPresent(db);
-
-  const run = db.transaction(() => {
-    // FK checks deferred to COMMIT: order of our deletes no longer matters, only
-    // that no dangling reference remains at the end.
-    db.pragma('defer_foreign_keys = ON');
+  const run = db.transaction(async (tx) => {
+    const have = await tablesPresent(tx);
 
     // 1) Hard-delete the orgs the user solely owns (and everything inside).
     if (soloOrgIds.length) {
-      const wsIds = db.prepare(
+      const wsIds = (await tx.prepare(
         `SELECT id FROM workspaces WHERE organization_id IN (${inClause(soloOrgIds.length)})`
-      ).all(...soloOrgIds).map(r => r.id);
-      purgeWorkspaces(db, wsIds, have);
+      ).all(...soloOrgIds)).map(r => r.id);
+      await purgeWorkspaces(tx, wsIds, have);
 
       const oph = inClause(soloOrgIds.length);
-      if (have.has('activity_log')) db.prepare(`UPDATE activity_log SET organization_id = NULL WHERE organization_id IN (${oph})`).run(...soloOrgIds);
-      db.prepare(`DELETE FROM organizations WHERE id IN (${oph})`).run(...soloOrgIds); // cascades organization_members
+      if (have.has('activity_log')) await tx.prepare(`UPDATE activity_log SET organization_id = NULL WHERE organization_id IN (${oph})`).run(...soloOrgIds);
+      await tx.prepare(`DELETE FROM organizations WHERE id IN (${oph})`).run(...soloOrgIds); // cascades organization_members
     }
 
     // 2) Unlink the user's footprint in orgs they DON'T own (rows still present).
     // 2a) nullable creator/inviter columns -> SET NULL.
-    for (const [t, c] of NULLABLE_USER_REFS) if (have.has(t)) db.prepare(`UPDATE ${t} SET ${c} = NULL WHERE ${c} = ?`).run(targetId);
+    for (const [t, c] of NULLABLE_USER_REFS) if (have.has(t)) await tx.prepare(`UPDATE ${t} SET ${c} = NULL WHERE ${c} = ?`).run(targetId);
 
     // 2b) NOT NULL legacy creator columns -> reassign to the resource's org owner
     //     (fallback acting admin), preserving the resource under a valid owner.
     for (const t of REASSIGN_USER_TABLES) {
       if (!have.has(t)) continue;
-      db.prepare(`
+      await tx.prepare(`
         UPDATE ${t} SET user_id = COALESCE(
           (SELECT o.owner_user_id FROM workspaces w JOIN organizations o ON o.id = w.organization_id WHERE w.id = ${t}.workspace_id),
           ?
@@ -169,16 +171,16 @@ function deleteUserCascade(db, { targetId, actingAdminId }) {
     }
 
     // 2c) Legacy teams + NOT NULL invite rows the user owns / sent.
-    if (have.has('teams')) db.prepare('DELETE FROM teams WHERE owner_id = ?').run(targetId); // cascades team_members/invites
-    if (have.has('team_invites')) db.prepare('DELETE FROM team_invites WHERE invited_by = ?').run(targetId);
-    if (have.has('workspace_invites')) db.prepare('DELETE FROM workspace_invites WHERE invited_by = ?').run(targetId);
+    if (have.has('teams')) await tx.prepare('DELETE FROM teams WHERE owner_id = ?').run(targetId); // cascades team_members/invites
+    if (have.has('team_invites')) await tx.prepare('DELETE FROM team_invites WHERE invited_by = ?').run(targetId);
+    if (have.has('workspace_invites')) await tx.prepare('DELETE FROM workspace_invites WHERE invited_by = ?').run(targetId);
 
     // 3) Finally the user. Their own memberships (organization_members,
     //    workspace_members, team_members, content_folders) CASCADE on this delete.
-    db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
+    await tx.prepare('DELETE FROM users WHERE id = ?').run(targetId);
   });
 
-  run();
+  await run();
 }
 
 module.exports = {

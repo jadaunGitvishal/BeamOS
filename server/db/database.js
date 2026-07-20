@@ -232,6 +232,13 @@ async function initDb() {
   const { verifyAndRepairSchema } = require("../lib/schema-check");
   await verifyAndRepairSchema(db);
 
+  // Warm the app_settings in-memory cache (lib/app-settings.js) so its get()/getBool()
+  // reads - called synchronously inline in the /api/status hot path - never race an
+  // empty cache. Required lazily (not at module top) to avoid a require cycle:
+  // app-settings.js itself requires this module for `db`.
+  const appSettings = require("../lib/app-settings");
+  await appSettings.__reload();
+
   _initialized = true;
   console.log(`[db] MySQL ready (${config.mysqlHost}:${config.mysqlPort}/${config.mysqlDatabase})`);
   return db;

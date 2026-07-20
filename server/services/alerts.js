@@ -17,7 +17,9 @@ function shouldSendAlert(alertType, targetId, windowMs = DEFAULT_DEDUP_WINDOW_MS
 }
 
 function startAlertService(io) {
-  setInterval(() => checkOfflineDevices(io), 60000);
+  // checkOfflineDevices is async; setInterval doesn't await it, so .catch() prevents a
+  // rejection from becoming an unhandled rejection (server.js's crash handler is fatal).
+  setInterval(() => { checkOfflineDevices(io).catch((e) => console.error('[alerts] tick failed:', e.message)); }, 60000);
   console.log('Alert service started');
 }
 
@@ -25,7 +27,7 @@ async function checkOfflineDevices(io) {
   const now = Math.floor(Date.now() / 1000);
   const threshold = 300; // 5 minutes offline
 
-  const offlineDevices = db.prepare(`
+  const offlineDevices = await db.prepare(`
     SELECT d.id, d.name, d.user_id, d.workspace_id, d.last_heartbeat, d.status,
            u.email as owner_email, u.name as owner_name, u.email_alerts
     FROM devices d
@@ -68,7 +70,7 @@ async function checkOfflineDevices(io) {
       // Log activity. Phase 2.2 writer-leak fix: stamp workspace_id from the
       // device so the row is tenant-queryable.
       try {
-        db.prepare(
+        await db.prepare(
           'INSERT INTO activity_log (user_id, device_id, action, details, workspace_id) VALUES (?, ?, ?, ?, ?)'
         ).run(device.user_id, device.id, 'alert:device_offline', `${device.name} offline for ${offlineMinutes}m`, device.workspace_id || null);
       } catch {}
@@ -76,7 +78,7 @@ async function checkOfflineDevices(io) {
   }
 
   // Clear notifications for devices that came back online
-  const onlineDevices = db.prepare("SELECT id FROM devices WHERE status = 'online'").all();
+  const onlineDevices = await db.prepare("SELECT id FROM devices WHERE status = 'online'").all();
   for (const device of onlineDevices) {
     alertLastSent.delete(`device_offline:${device.id}`);
   }

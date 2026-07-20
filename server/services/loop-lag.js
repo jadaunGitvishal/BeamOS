@@ -98,22 +98,28 @@ function sample() {
 }
 
 // #146 Item E: flush buffered telemetry rows in ONE batched transaction.
-const _insLag = db.prepare('INSERT INTO event_loop_lag (sampled_at, mean_ms, p50_ms, p99_ms, max_ms, band) VALUES (?, ?, ?, ?, ?, ?)');
-function flushLag() {
+const _insLagSql = 'INSERT INTO event_loop_lag (sampled_at, mean_ms, p50_ms, p99_ms, max_ms, band) VALUES (?, ?, ?, ?, ?, ?)';
+async function flushLag() {
   if (!lagBuffer.length) return;
   const rows = lagBuffer.splice(0);
   try {
-    db.transaction((rs) => { for (const r of rs) _insLag.run(r.sampled_at, r.mean_ms, r.p50_ms, r.p99_ms, r.max_ms, r.band); })(rows);
+    // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements must
+    // be prepared from it, not the outer db, to actually participate in the transaction.
+    await db.transaction(async (tx, rs) => {
+      const stmt = tx.prepare(_insLagSql);
+      for (const r of rs) await stmt.run(r.sampled_at, r.mean_ms, r.p50_ms, r.p99_ms, r.max_ms, r.band);
+    })(rows);
   } catch (_) { /* table may not exist on a partially-migrated DB — drop the batch */ }
 }
 
 // #146 Item E: chunked prune (rides idx_event_loop_lag_sampled) so this table can never
-// repeat the status_log bloat-then-freeze. Async; callers fire-and-forget.
-const _delLag = db.prepare('DELETE FROM event_loop_lag WHERE rowid IN (SELECT rowid FROM event_loop_lag WHERE sampled_at < ? LIMIT ?)');
+// repeat the status_log bloat-then-freeze. Async; callers fire-and-forget. MySQL supports
+// single-table DELETE ... LIMIT natively (no SQLite rowid needed).
+const _delLag = db.prepare('DELETE FROM event_loop_lag WHERE sampled_at < ? LIMIT ?');
 async function pruneLag() {
   try {
     const cutoff = Math.floor(Date.now() / 1000) - Math.round(config.lagTelemetryRetentionDays * 86400);
-    const { deleted } = await chunkedDelete((lim) => _delLag.run(cutoff, lim).changes, { batch: config.statusLogPruneBatch });
+    const { deleted } = await chunkedDelete(async (lim) => (await _delLag.run(cutoff, lim)).changes, { batch: config.statusLogPruneBatch });
     if (deleted > 0) console.log(`[loop-lag] pruned ${deleted} sample(s) older than ${config.lagTelemetryRetentionDays}d`);
   } catch (_) { /* ignore */ }
 }
@@ -124,7 +130,9 @@ function startLoopLagMonitor() {
   histogram.enable();
   logCoalescer.start(config.logCoalesceFlushMs);           // #146 Item E: start the coalesced-log flusher
   const t1 = setInterval(sample, config.lagSampleIntervalMs);
-  const t3 = setInterval(flushLag, config.lagFlushMs);      // #146 Item E: batch-insert buffered telemetry
+  // flushLag/pruneLag are async; setInterval doesn't await, so .catch() prevents a
+  // rejection from becoming an unhandled rejection (server.js's crash handler is fatal).
+  const t3 = setInterval(() => { flushLag().catch(() => {}); }, config.lagFlushMs);      // #146 Item E: batch-insert buffered telemetry
   pruneLag().catch(() => {});                               // sweep stale rows on boot (chunked, async)
   const t2 = setInterval(() => pruneLag().catch(() => {}), config.lagPruneIntervalMs);
   // Don't keep the process alive on these timers (matters for tests / clean exit).
