@@ -1,8 +1,12 @@
-const Database = require('better-sqlite3');
-const fs = require('fs');
-const path = require('path');
-const config = require('../config');
-const { chunkedDelete, yieldTick, currentBand } = require('../lib/chunked-prune'); // #146 non-blocking sweeps
+const Database = require("better-sqlite3");
+const fs = require("fs");
+const path = require("path");
+const config = require("../config");
+const {
+  chunkedDelete,
+  yieldTick,
+  currentBand,
+} = require("../lib/chunked-prune"); // #146 non-blocking sweeps
 
 const dbDir = path.dirname(config.dbPath);
 if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
@@ -10,12 +14,27 @@ if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 const db = new Database(config.dbPath);
 
 // Enable WAL mode and foreign keys
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
 // Run schema
-const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
 db.exec(schema);
+
+// BeamOS: force every plan tier to be unlimited on every boot, regardless of
+// what's already in the database (covers existing installs where the old
+// limited rows were inserted before this was added, and any future ones too).
+db.prepare(
+  `
+  UPDATE plans SET max_devices = -1, max_storage_mb = -1,
+    remote_control = 1, remote_url = 1, priority_support = 1
+`,
+).run();
+
+// BeamOS: clear any trial timer on every account, every boot - permanently
+// prevents the (now-disabled) auto-downgrade logic from ever mattering, and
+// cleans up any account that already had a real trial_started timestamp.
+db.prepare(`UPDATE users SET trial_started = NULL`).run();
 
 // Auto-apply Phase 1 multi-tenancy migration if not yet applied. Without this
 // a self-hoster who pulls latest and restarts hits a crash in
@@ -26,17 +45,26 @@ db.exec(schema);
 function ensureMultitenancyMigration() {
   let applied = false;
   try {
-    applied = !!db.prepare(
-      "SELECT 1 FROM schema_migrations WHERE id = 'phase5_multitenancy_backfill'"
-    ).get();
-  } catch { /* schema_migrations may not exist yet; treat as not applied */ }
+    applied = !!db
+      .prepare(
+        "SELECT 1 FROM schema_migrations WHERE id = 'phase5_multitenancy_backfill'",
+      )
+      .get();
+  } catch {
+    /* schema_migrations may not exist yet; treat as not applied */
+  }
   if (applied) return;
 
-  console.warn('[boot] Multi-tenancy schema not present - applying migration...');
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const snapshotPath = path.join(dbDir, `remote_display.pre-migration-${ts}.db`);
+  console.warn(
+    "[boot] Multi-tenancy schema not present - applying migration...",
+  );
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const snapshotPath = path.join(
+    dbDir,
+    `remote_display.pre-migration-${ts}.db`,
+  );
   try {
-    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.pragma("wal_checkpoint(TRUNCATE)");
     fs.copyFileSync(config.dbPath, snapshotPath);
     console.warn(`[boot] Pre-migration snapshot: ${snapshotPath}`);
   } catch (e) {
@@ -45,9 +73,9 @@ function ensureMultitenancyMigration() {
   }
 
   try {
-    const { runMigration } = require('../../scripts/migrate-multitenancy');
+    const { runMigration } = require("../../scripts/migrate-multitenancy");
     runMigration({ db });
-    console.warn('[boot] Migration complete, continuing startup');
+    console.warn("[boot] Migration complete, continuing startup");
   } catch (e) {
     console.error(`[boot] Migration FAILED: ${e.message}`);
     console.error(`[boot] Restore with: cp ${snapshotPath} ${config.dbPath}`);
@@ -63,38 +91,38 @@ function ensureMultitenancyMigration() {
 
 // Migrations for existing databases
 const migrations = [
-  'ALTER TABLE content ADD COLUMN remote_url TEXT',
-  'ALTER TABLE devices ADD COLUMN user_id TEXT REFERENCES users(id)',
-  'ALTER TABLE content ADD COLUMN user_id TEXT REFERENCES users(id)',
+  "ALTER TABLE content ADD COLUMN remote_url TEXT",
+  "ALTER TABLE devices ADD COLUMN user_id TEXT REFERENCES users(id)",
+  "ALTER TABLE content ADD COLUMN user_id TEXT REFERENCES users(id)",
   "ALTER TABLE users ADD COLUMN plan_id TEXT DEFAULT 'free'",
-  'ALTER TABLE users ADD COLUMN stripe_customer_id TEXT',
-  'ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT',
+  "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT",
+  "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT",
   "ALTER TABLE users ADD COLUMN subscription_status TEXT DEFAULT 'active'",
-  'ALTER TABLE users ADD COLUMN subscription_ends INTEGER',
+  "ALTER TABLE users ADD COLUMN subscription_ends INTEGER",
   // Layout & zone support on devices and assignments
-  'ALTER TABLE devices ADD COLUMN layout_id TEXT',
-  'ALTER TABLE devices ADD COLUMN timezone TEXT DEFAULT \'UTC\'',
+  "ALTER TABLE devices ADD COLUMN layout_id TEXT",
+  "ALTER TABLE devices ADD COLUMN timezone TEXT DEFAULT 'UTC'",
   // #74/#75: player-reported clock, for effective-timezone resolution + the
   // dashboard clock-skew indicator. reported_timezone = player OS IANA zone;
   // reported_utc = device's claimed UTC (ms); reported_at = server receipt (s).
-  'ALTER TABLE devices ADD COLUMN reported_timezone TEXT',
-  'ALTER TABLE devices ADD COLUMN reported_utc INTEGER',
-  'ALTER TABLE devices ADD COLUMN reported_at INTEGER',
-  'ALTER TABLE devices ADD COLUMN wall_id TEXT',
-  'ALTER TABLE devices ADD COLUMN team_id TEXT',
-  'ALTER TABLE assignments ADD COLUMN zone_id TEXT',
-  'ALTER TABLE assignments ADD COLUMN widget_id TEXT',
+  "ALTER TABLE devices ADD COLUMN reported_timezone TEXT",
+  "ALTER TABLE devices ADD COLUMN reported_utc INTEGER",
+  "ALTER TABLE devices ADD COLUMN reported_at INTEGER",
+  "ALTER TABLE devices ADD COLUMN wall_id TEXT",
+  "ALTER TABLE devices ADD COLUMN team_id TEXT",
+  "ALTER TABLE assignments ADD COLUMN zone_id TEXT",
+  "ALTER TABLE assignments ADD COLUMN widget_id TEXT",
   // Team support on content
-  'ALTER TABLE content ADD COLUMN team_id TEXT',
+  "ALTER TABLE content ADD COLUMN team_id TEXT",
   // Device notes
-  'ALTER TABLE devices ADD COLUMN notes TEXT',
+  "ALTER TABLE devices ADD COLUMN notes TEXT",
   // Email settings on users
   "ALTER TABLE users ADD COLUMN email_alerts INTEGER DEFAULT 1",
   // Content folders
-  'ALTER TABLE content ADD COLUMN folder TEXT',
+  "ALTER TABLE content ADD COLUMN folder TEXT",
   // Device orientation and default content
   "ALTER TABLE devices ADD COLUMN orientation TEXT DEFAULT 'landscape'",
-  'ALTER TABLE devices ADD COLUMN default_content_id TEXT',
+  "ALTER TABLE devices ADD COLUMN default_content_id TEXT",
   // Audio control per assignment
   "ALTER TABLE assignments ADD COLUMN muted INTEGER DEFAULT 0",
   // Trial tracking
@@ -273,22 +301,35 @@ for (const sql of migrations) {
     }
   }
 }
-if (_migApplied > 0) console.log(`[migrate] applied ${_migApplied} new column migration(s)`);
+if (_migApplied > 0)
+  console.log(`[migrate] applied ${_migApplied} new column migration(s)`);
 
 // #74/#75 per-item schedules: the playlist_item_schedules table is created
 // idempotently by schema.sql (CREATE TABLE IF NOT EXISTS, run every boot, so it
 // self-applies on upgrade). Record it in schema_migrations for observability.
-try { db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES ('phase7_playlist_item_schedules')").run(); } catch { /* schema_migrations not ready yet */ }
+try {
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (id) VALUES ('phase7_playlist_item_schedules')",
+  ).run();
+} catch {
+  /* schema_migrations not ready yet */
+}
 
 // Public API tokens: api_tokens table is created idempotently by schema.sql.
-try { db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES ('phase8_api_tokens')").run(); } catch { /* schema_migrations not ready yet */ }
+try {
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_migrations (id) VALUES ('phase8_api_tokens')",
+  ).run();
+} catch {
+  /* schema_migrations not ready yet */
+}
 
 // Fix assignments table: make content_id nullable (SQLite requires table rebuild)
 try {
   const colInfo = db.prepare("PRAGMA table_info(assignments)").all();
-  const contentCol = colInfo.find(c => c.name === 'content_id');
+  const contentCol = colInfo.find((c) => c.name === "content_id");
   if (contentCol && contentCol.notnull === 1) {
-    console.log('Migrating assignments table: making content_id nullable...');
+    console.log("Migrating assignments table: making content_id nullable...");
     db.exec(`
       CREATE TABLE assignments_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -309,51 +350,70 @@ try {
       DROP TABLE assignments;
       ALTER TABLE assignments_new RENAME TO assignments;
     `);
-    console.log('Assignments table migrated successfully.');
+    console.log("Assignments table migrated successfully.");
   }
 } catch (e) {
-  console.error('Assignments migration error:', e.message);
+  console.error("Assignments migration error:", e.message);
 }
 
 // Phase 2 migration: convert existing assignments into per-device playlists
-const MIGRATION_ID = 'phase2_playlist_migration';
+const MIGRATION_ID = "phase2_playlist_migration";
 
 async function migrateAssignmentsToPlaylists() {
   // Skip if already ran (tracked in schema_migrations table)
-  const already = db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(MIGRATION_ID);
+  const already = db
+    .prepare("SELECT 1 FROM schema_migrations WHERE id = ?")
+    .get(MIGRATION_ID);
   if (already) return;
 
-  const { v4: uuidv4 } = require('uuid');
-  const { execFile } = require('child_process');
+  const { v4: uuidv4 } = require("uuid");
+  const { execFile } = require("child_process");
 
   // Find devices that have at least one assignment
-  const devicesWithAssignments = db.prepare(`
+  const devicesWithAssignments = db
+    .prepare(
+      `
     SELECT DISTINCT d.id, d.name, d.user_id
     FROM devices d
     INNER JOIN assignments a ON a.device_id = d.id
     WHERE d.user_id IS NOT NULL
-  `).all();
+  `,
+    )
+    .all();
 
   if (devicesWithAssignments.length === 0) return;
 
-  console.log(`Migrating ${devicesWithAssignments.length} device(s) from assignments to playlists...`);
+  console.log(
+    `Migrating ${devicesWithAssignments.length} device(s) from assignments to playlists...`,
+  );
 
   // Async ffprobe — matches the pattern in playlists.js probeAndUpdateDuration
   async function probeVideoDuration(content) {
-    if (!content || !content.mime_type || !content.mime_type.startsWith('video/')) return null;
+    if (
+      !content ||
+      !content.mime_type ||
+      !content.mime_type.startsWith("video/")
+    )
+      return null;
     if (content.duration_sec) return Math.ceil(content.duration_sec);
     if (!content.filepath) return null;
     try {
       const fullPath = path.join(config.contentDir, content.filepath);
       const stdout = await new Promise((resolve, reject) => {
-        execFile('ffprobe', [
-          '-v', 'quiet', '-print_format', 'json', '-show_format', fullPath
-        ], { timeout: 15000 }, (err, out) => err ? reject(err) : resolve(out));
+        execFile(
+          "ffprobe",
+          ["-v", "quiet", "-print_format", "json", "-show_format", fullPath],
+          { timeout: 15000 },
+          (err, out) => (err ? reject(err) : resolve(out)),
+        );
       });
       const info = JSON.parse(stdout);
       if (info.format?.duration) {
         const dur = parseFloat(info.format.duration);
-        db.prepare('UPDATE content SET duration_sec = ? WHERE id = ?').run(dur, content.id);
+        db.prepare("UPDATE content SET duration_sec = ? WHERE id = ?").run(
+          dur,
+          content.id,
+        );
         return Math.ceil(dur);
       }
     } catch (e) {
@@ -381,26 +441,56 @@ async function migrateAssignmentsToPlaylists() {
     const items = [];
     for (const a of assignments) {
       let duration = a.duration_sec;
-      if (a.content_id && a.mime_type?.startsWith('video/')) {
-        const probed = await probeVideoDuration({ id: a.content_id, mime_type: a.mime_type, filepath: a.filepath, duration_sec: a.content_duration });
-        if (probed) { duration = probed; videosProbed++; }
+      if (a.content_id && a.mime_type?.startsWith("video/")) {
+        const probed = await probeVideoDuration({
+          id: a.content_id,
+          mime_type: a.mime_type,
+          filepath: a.filepath,
+          duration_sec: a.content_duration,
+        });
+        if (probed) {
+          duration = probed;
+          videosProbed++;
+        }
       }
-      items.push({ content_id: a.content_id, widget_id: a.widget_id, sort_order: a.sort_order, duration_sec: duration });
+      items.push({
+        content_id: a.content_id,
+        widget_id: a.widget_id,
+        sort_order: a.sort_order,
+        duration_sec: duration,
+      });
       totalItems++;
     }
     devicePlaylists.push({ device, playlistId, items });
   }
 
   // Insert everything in a single transaction
-  const insertPlaylist = db.prepare(`INSERT INTO playlists (id, user_id, name, description, is_auto_generated) VALUES (?, ?, ?, ?, 1)`);
-  const insertItem = db.prepare(`INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)`);
-  const setDevicePlaylist = db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?');
+  const insertPlaylist = db.prepare(
+    `INSERT INTO playlists (id, user_id, name, description, is_auto_generated) VALUES (?, ?, ?, ?, 1)`,
+  );
+  const insertItem = db.prepare(
+    `INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)`,
+  );
+  const setDevicePlaylist = db.prepare(
+    "UPDATE devices SET playlist_id = ? WHERE id = ?",
+  );
 
   const migrate = db.transaction(() => {
     for (const { device, playlistId, items } of devicePlaylists) {
-      insertPlaylist.run(playlistId, device.user_id, `${device.name} (migrated)`, 'Auto-generated from previous assignments');
+      insertPlaylist.run(
+        playlistId,
+        device.user_id,
+        `${device.name} (migrated)`,
+        "Auto-generated from previous assignments",
+      );
       for (const item of items) {
-        insertItem.run(playlistId, item.content_id || null, item.widget_id || null, item.sort_order, item.duration_sec);
+        insertItem.run(
+          playlistId,
+          item.content_id || null,
+          item.widget_id || null,
+          item.sort_order,
+          item.duration_sec,
+        );
       }
       setDevicePlaylist.run(playlistId, device.id);
     }
@@ -408,28 +498,42 @@ async function migrateAssignmentsToPlaylists() {
   migrate();
 
   // Record that this migration has run
-  db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(MIGRATION_ID);
+  db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+    MIGRATION_ID,
+  );
 
-  const scheduleCount = db.prepare('SELECT COUNT(*) as count FROM schedules').get().count;
-  console.log(`Migration complete: ${devicesWithAssignments.length} device(s), ${totalItems} playlist item(s), ${videosProbed} video(s) probed, ${scheduleCount} schedule(s).`);
+  const scheduleCount = db
+    .prepare("SELECT COUNT(*) as count FROM schedules")
+    .get().count;
+  console.log(
+    `Migration complete: ${devicesWithAssignments.length} device(s), ${totalItems} playlist item(s), ${videosProbed} video(s) probed, ${scheduleCount} schedule(s).`,
+  );
 }
 
-migrateAssignmentsToPlaylists().catch(e => console.error('Migration error:', e));
+migrateAssignmentsToPlaylists().catch((e) =>
+  console.error("Migration error:", e),
+);
 
 // Phase 3 migration: snapshot existing playlist items into published_snapshot
-const PHASE3_MIGRATION_ID = 'phase3_publish_snapshot';
+const PHASE3_MIGRATION_ID = "phase3_publish_snapshot";
 
 function migratePublishSnapshots() {
-  const already = db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(PHASE3_MIGRATION_ID);
+  const already = db
+    .prepare("SELECT 1 FROM schema_migrations WHERE id = ?")
+    .get(PHASE3_MIGRATION_ID);
   if (already) return;
 
-  const playlists = db.prepare('SELECT id FROM playlists').all();
+  const playlists = db.prepare("SELECT id FROM playlists").all();
   if (playlists.length === 0) {
-    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(PHASE3_MIGRATION_ID);
+    db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+      PHASE3_MIGRATION_ID,
+    );
     return;
   }
 
-  console.log(`Phase 3 migration: snapshotting ${playlists.length} playlist(s) as published...`);
+  console.log(
+    `Phase 3 migration: snapshotting ${playlists.length} playlist(s) as published...`,
+  );
 
   const getItems = db.prepare(`
     SELECT pi.content_id, pi.widget_id, pi.sort_order, pi.duration_sec,
@@ -442,7 +546,9 @@ function migratePublishSnapshots() {
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `);
-  const updatePlaylist = db.prepare("UPDATE playlists SET status = 'published', published_snapshot = ? WHERE id = ?");
+  const updatePlaylist = db.prepare(
+    "UPDATE playlists SET status = 'published', published_snapshot = ? WHERE id = ?",
+  );
 
   const migrate = db.transaction(() => {
     let snapshotted = 0;
@@ -451,8 +557,12 @@ function migratePublishSnapshots() {
       updatePlaylist.run(JSON.stringify(items), playlist.id);
       snapshotted++;
     }
-    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(PHASE3_MIGRATION_ID);
-    console.log(`Phase 3 migration complete: ${snapshotted} playlist(s) snapshotted as published.`);
+    db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+      PHASE3_MIGRATION_ID,
+    );
+    console.log(
+      `Phase 3 migration complete: ${snapshotted} playlist(s) snapshotted as published.`,
+    );
   });
   migrate();
 }
@@ -460,13 +570,17 @@ function migratePublishSnapshots() {
 migratePublishSnapshots();
 
 // Phase 4 migration: add group_id to schedules, make device_id nullable, add CHECK constraint
-const PHASE4_MIGRATION_ID = 'phase4_group_schedules';
+const PHASE4_MIGRATION_ID = "phase4_group_schedules";
 
 function migrateGroupSchedules() {
-  const already = db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(PHASE4_MIGRATION_ID);
+  const already = db
+    .prepare("SELECT 1 FROM schema_migrations WHERE id = ?")
+    .get(PHASE4_MIGRATION_ID);
   if (already) return;
 
-  console.log('Phase 4 migration: adding group_id to schedules, making device_id nullable...');
+  console.log(
+    "Phase 4 migration: adding group_id to schedules, making device_id nullable...",
+  );
 
   const migrate = db.transaction(() => {
     db.exec(`
@@ -507,8 +621,12 @@ function migrateGroupSchedules() {
       CREATE INDEX idx_schedules_group ON schedules(group_id, enabled);
     `);
 
-    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(PHASE4_MIGRATION_ID);
-    console.log('Phase 4 migration complete: schedules table rebuilt with group_id support.');
+    db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+      PHASE4_MIGRATION_ID,
+    );
+    console.log(
+      "Phase 4 migration complete: schedules table rebuilt with group_id support.",
+    );
   });
   migrate();
 }
@@ -524,19 +642,25 @@ ensureMultitenancyMigration();
 // Phase 2.2c migration: backfill content_folders.workspace_id from owner's
 // default workspace. The ALTER lives in the migrations array above; this
 // one-shot populates the column for any rows that pre-date it.
-const PHASE6_MIGRATION_ID = 'phase6_content_folders_workspace';
+const PHASE6_MIGRATION_ID = "phase6_content_folders_workspace";
 
 function migrateFolderWorkspaceIds() {
-  const already = db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(PHASE6_MIGRATION_ID);
+  const already = db
+    .prepare("SELECT 1 FROM schema_migrations WHERE id = ?")
+    .get(PHASE6_MIGRATION_ID);
   if (already) return;
 
   // Belt-and-suspenders: if multi-tenancy tables aren't present (auto-runner
   // somehow skipped), skip cleanly instead of crashing on the JOIN below.
-  const hasWorkspaces = db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces'"
-  ).get();
+  const hasWorkspaces = db
+    .prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces'",
+    )
+    .get();
   if (!hasWorkspaces) {
-    console.warn('migrateFolderWorkspaceIds: workspaces table missing, skipping');
+    console.warn(
+      "migrateFolderWorkspaceIds: workspaces table missing, skipping",
+    );
     return;
   }
 
@@ -545,8 +669,10 @@ function migrateFolderWorkspaceIds() {
   // ALTER above adds it, and we proceed; but if anything went sideways we
   // skip rather than throw.)
   const cols = db.prepare("PRAGMA table_info(content_folders)").all();
-  if (!cols.some(c => c.name === 'workspace_id')) {
-    console.warn('Phase 2.2c migration: content_folders.workspace_id column missing, skipping backfill');
+  if (!cols.some((c) => c.name === "workspace_id")) {
+    console.warn(
+      "Phase 2.2c migration: content_folders.workspace_id column missing, skipping backfill",
+    );
     return;
   }
 
@@ -562,16 +688,21 @@ function migrateFolderWorkspaceIds() {
 
   const tx = db.transaction(() => {
     const result = stmt.run();
-    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(PHASE6_MIGRATION_ID);
+    db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+      PHASE6_MIGRATION_ID,
+    );
     return result.changes;
   });
   const changes = tx();
-  if (changes > 0) console.log(`Phase 2.2c migration: backfilled workspace_id on ${changes} content_folders row(s).`);
+  if (changes > 0)
+    console.log(
+      `Phase 2.2c migration: backfilled workspace_id on ${changes} content_folders row(s).`,
+    );
 }
 
 migrateFolderWorkspaceIds();
 
-const PHASE_2_2_ACTIVITY_STOP_ID = 'phase_2_2_activity_log_stop_bleeding';
+const PHASE_2_2_ACTIVITY_STOP_ID = "phase_2_2_activity_log_stop_bleeding";
 
 // One-time backfill of activity_log rows that were written between the
 // Phase 1 schema migration and the writer-leak fix in this commit. Strategy:
@@ -583,16 +714,22 @@ const PHASE_2_2_ACTIVITY_STOP_ID = 'phase_2_2_activity_log_stop_bleeding';
 // Rows with user_id IS NULL (auth:login_failed and similar pre-tenancy
 // system events) are left alone - they have no tenant context.
 function backfillActivityLogWorkspace() {
-  const already = db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(PHASE_2_2_ACTIVITY_STOP_ID);
+  const already = db
+    .prepare("SELECT 1 FROM schema_migrations WHERE id = ?")
+    .get(PHASE_2_2_ACTIVITY_STOP_ID);
   if (already) return;
 
   // Belt-and-suspenders: if multi-tenancy tables aren't present (auto-runner
   // somehow skipped), skip cleanly instead of crashing on workspace_members.
-  const hasMembers = db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_members'"
-  ).get();
+  const hasMembers = db
+    .prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_members'",
+    )
+    .get();
   if (!hasMembers) {
-    console.warn('backfillActivityLogWorkspace: workspace_members table missing, skipping');
+    console.warn(
+      "backfillActivityLogWorkspace: workspace_members table missing, skipping",
+    );
     return;
   }
 
@@ -617,11 +754,16 @@ function backfillActivityLogWorkspace() {
   const tx = db.transaction(() => {
     const d = viaDevice.run().changes;
     const m = viaMembers.run().changes;
-    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(PHASE_2_2_ACTIVITY_STOP_ID);
+    db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+      PHASE_2_2_ACTIVITY_STOP_ID,
+    );
     return { d, m };
   });
   const { d, m } = tx();
-  if (d + m > 0) console.log(`activity_log backfill: ${d} via device.workspace_id, ${m} via workspace_members lookup`);
+  if (d + m > 0)
+    console.log(
+      `activity_log backfill: ${d} via device.workspace_id, ${m} via workspace_members lookup`,
+    );
 }
 
 backfillActivityLogWorkspace();
@@ -640,15 +782,20 @@ backfillActivityLogWorkspace();
 // Pre-migration snapshot is a one-off for this migration only - the general
 // "every migration backs up first" framework is tracked as a separate
 // concern, not built here.
-const PHASE2_ZONE_ID_BACKFILL_ID = 'phase2_zone_id_backfill';
+const PHASE2_ZONE_ID_BACKFILL_ID = "phase2_zone_id_backfill";
 function backfillPlaylistItemsZoneId() {
-  const already = db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(PHASE2_ZONE_ID_BACKFILL_ID);
+  const already = db
+    .prepare("SELECT 1 FROM schema_migrations WHERE id = ?")
+    .get(PHASE2_ZONE_ID_BACKFILL_ID);
   if (already) return;
 
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const snapshotPath = path.join(dbDir, `remote_display.pre-zone-id-backfill-${ts}.db`);
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const snapshotPath = path.join(
+    dbDir,
+    `remote_display.pre-zone-id-backfill-${ts}.db`,
+  );
   try {
-    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.pragma("wal_checkpoint(TRUNCATE)");
     fs.copyFileSync(config.dbPath, snapshotPath);
     console.warn(`[zone-id backfill] Pre-migration snapshot: ${snapshotPath}`);
   } catch (e) {
@@ -663,7 +810,9 @@ function backfillPlaylistItemsZoneId() {
       // unlikely "same content assigned twice in different zones on one
       // device" edge case. Items with no matching legacy assignment, or
       // matches that themselves had zone_id NULL, are left as NULL.
-      const backfilled = db.prepare(`
+      const backfilled = db
+        .prepare(
+          `
         UPDATE playlist_items
         SET zone_id = (
           SELECT a.zone_id FROM assignments a
@@ -689,13 +838,17 @@ function backfillPlaylistItemsZoneId() {
                 (a.widget_id IS NOT NULL AND a.widget_id = playlist_items.widget_id)
               )
           )
-      `).run().changes;
+      `,
+        )
+        .run().changes;
 
       // Republish: regenerate published_snapshot for every published playlist
       // so the snapshot JSON carries zone_id. Mirrors buildSnapshotItems in
       // routes/playlists.js - kept inline here to avoid pulling routes/* in
       // at migration time (circular require).
-      const publishedPlaylists = db.prepare("SELECT id FROM playlists WHERE status = 'published'").all();
+      const publishedPlaylists = db
+        .prepare("SELECT id FROM playlists WHERE status = 'published'")
+        .all();
       const buildSnapshot = db.prepare(`
         SELECT pi.content_id, pi.widget_id, pi.zone_id, pi.sort_order, pi.duration_sec,
                COALESCE(c.filename, w.name) as filename, c.mime_type, c.filepath, c.file_size,
@@ -707,7 +860,9 @@ function backfillPlaylistItemsZoneId() {
         WHERE pi.playlist_id = ?
         ORDER BY pi.sort_order ASC
       `);
-      const updateSnap = db.prepare("UPDATE playlists SET published_snapshot = ?, updated_at = strftime('%s','now') WHERE id = ?");
+      const updateSnap = db.prepare(
+        "UPDATE playlists SET published_snapshot = ?, updated_at = strftime('%s','now') WHERE id = ?",
+      );
       let republished = 0;
       for (const pl of publishedPlaylists) {
         const items = buildSnapshot.all(pl.id);
@@ -715,14 +870,20 @@ function backfillPlaylistItemsZoneId() {
         republished++;
       }
 
-      db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(PHASE2_ZONE_ID_BACKFILL_ID);
+      db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+        PHASE2_ZONE_ID_BACKFILL_ID,
+      );
       return { backfilled, republished };
     });
     const { backfilled, republished } = tx();
-    console.log(`[zone-id backfill] ${backfilled} playlist_items recovered zone_id, ${republished} published_snapshots regenerated`);
+    console.log(
+      `[zone-id backfill] ${backfilled} playlist_items recovered zone_id, ${republished} published_snapshots regenerated`,
+    );
   } catch (e) {
     console.error(`[zone-id backfill] Migration FAILED: ${e.message}`);
-    console.error(`[zone-id backfill] Restore with: cp ${snapshotPath} ${config.dbPath}`);
+    console.error(
+      `[zone-id backfill] Restore with: cp ${snapshotPath} ${config.dbPath}`,
+    );
     process.exit(1);
   }
 }
@@ -733,18 +894,30 @@ backfillPlaylistItemsZoneId();
 // lib/tenant-cascade-migration.js (so they're unit-testable against an in-memory
 // DB). Here we own the boot concerns: a pre-migration snapshot for rollback and
 // process.exit on failure, matching the other heavy migrations above.
-const { applyTenantDeleteCascade } = require('../lib/tenant-cascade-migration');
+const { applyTenantDeleteCascade } = require("../lib/tenant-cascade-migration");
 (function migrateTenantDeleteCascadeAtBoot() {
   // Cheap guard so we don't snapshot on every boot once applied.
   try {
-    if (db.prepare("SELECT 1 FROM schema_migrations WHERE id = 'phase2_3_tenant_delete_cascade'").get()) return;
-  } catch { /* schema_migrations may not exist yet */ }
+    if (
+      db
+        .prepare(
+          "SELECT 1 FROM schema_migrations WHERE id = 'phase2_3_tenant_delete_cascade'",
+        )
+        .get()
+    )
+      return;
+  } catch {
+    /* schema_migrations may not exist yet */
+  }
 
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const snapshotPath = path.join(dbDir, `remote_display.pre-tenant-cascade-${ts}.db`);
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const snapshotPath = path.join(
+    dbDir,
+    `remote_display.pre-tenant-cascade-${ts}.db`,
+  );
   let snapped = false;
   try {
-    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.pragma("wal_checkpoint(TRUNCATE)");
     fs.copyFileSync(config.dbPath, snapshotPath);
     snapped = true;
   } catch (e) {
@@ -754,15 +927,23 @@ const { applyTenantDeleteCascade } = require('../lib/tenant-cascade-migration');
 
   try {
     const result = applyTenantDeleteCascade(db);
-    if (result.status === 'applied') {
-      console.warn(`[tenant-cascade] workspace/org deletion now cascades (${result.tables.length} tables rebuilt). Snapshot: ${snapshotPath}`);
+    if (result.status === "applied") {
+      console.warn(
+        `[tenant-cascade] workspace/org deletion now cascades (${result.tables.length} tables rebuilt). Snapshot: ${snapshotPath}`,
+      );
     } else if (snapped) {
       // Nothing to do (already applied / no tenancy tables) - drop the snapshot.
-      try { fs.unlinkSync(snapshotPath); } catch { /* ignore */ }
+      try {
+        fs.unlinkSync(snapshotPath);
+      } catch {
+        /* ignore */
+      }
     }
   } catch (e) {
     console.error(`[tenant-cascade] Migration FAILED: ${e.message}`);
-    console.error(`[tenant-cascade] Restore with: cp ${snapshotPath} ${config.dbPath}`);
+    console.error(
+      `[tenant-cascade] Restore with: cp ${snapshotPath} ${config.dbPath}`,
+    );
     process.exit(1);
   }
 })();
@@ -781,38 +962,81 @@ const { applyTenantDeleteCascade } = require('../lib/tenant-cascade-migration');
 //     table self-heals on next deploy without a restart.
 // Rides idx_device_status_log_device_ts(device_id, timestamp).
 let _statusPruneRunning = false;
-let _lastPrune = { deleted: 0, ms: 0, at: 0 };        // #146 P3.8: soak observability
-let _sweepsTotal = 0;                                 // #146: prune sweeps completed (confirm it's firing, not stalled)
-function getMaintenanceStats() { return { ..._lastPrune, running: _statusPruneRunning, sweepsTotal: _sweepsTotal }; }
+let _lastPrune = { deleted: 0, ms: 0, at: 0 }; // #146 P3.8: soak observability
+let _sweepsTotal = 0; // #146: prune sweeps completed (confirm it's firing, not stalled)
+function getMaintenanceStats() {
+  return {
+    ..._lastPrune,
+    running: _statusPruneRunning,
+    sweepsTotal: _sweepsTotal,
+  };
+}
 async function pruneStatusLog(opts = {}) {
-  if (_statusPruneRunning) return 0;                  // re-entrancy: work runs once
-  if (opts.bandGate && config.maintenanceBandGateEnabled && currentBand() !== 'normal') return 0;
+  if (_statusPruneRunning) return 0; // re-entrancy: work runs once
+  if (
+    opts.bandGate &&
+    config.maintenanceBandGateEnabled &&
+    currentBand() !== "normal"
+  )
+    return 0;
   _statusPruneRunning = true;
   const _t0 = Date.now();
   try {
     const batch = config.statusLogPruneBatch;
     const cap = config.statusLogMaxRowsPerDevice;
-    const cutoff = Math.floor(Date.now() / 1000) - Math.round(config.statusLogRetentionDays * 86400);
-    const nextDevice = db.prepare('SELECT device_id FROM device_status_log WHERE device_id > ? ORDER BY device_id LIMIT 1');
-    const delOld = db.prepare('DELETE FROM device_status_log WHERE rowid IN (SELECT rowid FROM device_status_log WHERE device_id = ? AND timestamp < ? LIMIT ?)');
-    const delCap = cap > 0 ? db.prepare('DELETE FROM device_status_log WHERE rowid IN (SELECT rowid FROM device_status_log WHERE device_id = ? ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?)') : null;
+    const cutoff =
+      Math.floor(Date.now() / 1000) -
+      Math.round(config.statusLogRetentionDays * 86400);
+    const nextDevice = db.prepare(
+      "SELECT device_id FROM device_status_log WHERE device_id > ? ORDER BY device_id LIMIT 1",
+    );
+    const delOld = db.prepare(
+      "DELETE FROM device_status_log WHERE rowid IN (SELECT rowid FROM device_status_log WHERE device_id = ? AND timestamp < ? LIMIT ?)",
+    );
+    const delCap =
+      cap > 0
+        ? db.prepare(
+            "DELETE FROM device_status_log WHERE rowid IN (SELECT rowid FROM device_status_log WHERE device_id = ? ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?)",
+          )
+        : null;
 
-    let total = 0, lastDev = '';
+    let total = 0,
+      lastDev = "";
     for (;;) {
-      const row = nextDevice.get(lastDev);            // O(log n) index seek to next distinct device_id
+      const row = nextDevice.get(lastDev); // O(log n) index seek to next distinct device_id
       if (!row) break;
       lastDev = row.device_id;
       // 1) retention — drop rows older than the window, in batches
-      total += (await chunkedDelete((lim) => delOld.run(lastDev, cutoff, lim).changes, { batch })).deleted;
+      total += (
+        await chunkedDelete((lim) => delOld.run(lastDev, cutoff, lim).changes, {
+          batch,
+        })
+      ).deleted;
       // 2) cap — drop rows beyond the newest `cap` (OFFSET cap skips the kept rows), in batches
-      if (delCap) total += (await chunkedDelete((lim) => delCap.run(lastDev, lim, cap).changes, { batch })).deleted;
-      await yieldTick();                              // breathe between devices
+      if (delCap)
+        total += (
+          await chunkedDelete((lim) => delCap.run(lastDev, lim, cap).changes, {
+            batch,
+          })
+        ).deleted;
+      await yieldTick(); // breathe between devices
     }
-    if (total > 0) console.log(`[status-log] pruned ${total} row(s) (per-device, newest ${cap}/device + ${config.statusLogRetentionDays}d retention, batches of ${batch})`);
-    _lastPrune = { deleted: total, ms: Date.now() - _t0, at: Math.floor(Date.now() / 1000) };
+    if (total > 0)
+      console.log(
+        `[status-log] pruned ${total} row(s) (per-device, newest ${cap}/device + ${config.statusLogRetentionDays}d retention, batches of ${batch})`,
+      );
+    _lastPrune = {
+      deleted: total,
+      ms: Date.now() - _t0,
+      at: Math.floor(Date.now() / 1000),
+    };
     _sweepsTotal += 1;
     return total;
-  } catch (_) { return 0; } finally { _statusPruneRunning = false; }
+  } catch (_) {
+    return 0;
+  } finally {
+    _statusPruneRunning = false;
+  }
 }
 
 // Prune old telemetry (keep last 24h worth at 15s intervals = ~5760, cap at 6000).
@@ -822,7 +1046,7 @@ async function pruneStatusLog(opts = {}) {
 // DELETE. Rides idx_telemetry_device(device_id, reported_at DESC). Stays synchronous —
 // it's a single index-bounded statement, well under the ~50ms invariant.
 const _delTelemetry = db.prepare(
-  'DELETE FROM device_telemetry WHERE rowid IN (SELECT rowid FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT ? OFFSET 6000)'
+  "DELETE FROM device_telemetry WHERE rowid IN (SELECT rowid FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT ? OFFSET 6000)",
 );
 function pruneTelemetry(deviceId) {
   _delTelemetry.run(deviceId, config.statusLogPruneBatch);
@@ -830,24 +1054,30 @@ function pruneTelemetry(deviceId) {
 
 // Prune old screenshots (keep only latest per device)
 function pruneScreenshots(deviceId) {
-  const old = db.prepare(`
+  const old = db
+    .prepare(
+      `
     SELECT filepath FROM screenshots
     WHERE device_id = ? AND id NOT IN (
       SELECT id FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1
     )
-  `).all(deviceId, deviceId);
+  `,
+    )
+    .all(deviceId, deviceId);
 
   for (const row of old) {
     const fullPath = path.join(config.screenshotsDir, row.filepath);
     if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
   }
 
-  db.prepare(`
+  db.prepare(
+    `
     DELETE FROM screenshots
     WHERE device_id = ? AND id NOT IN (
       SELECT id FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1
     )
-  `).run(deviceId, deviceId);
+  `,
+  ).run(deviceId, deviceId);
 }
 
 // De-duplicate built-in template zones. A prior layout-editor save regenerated
@@ -859,9 +1089,13 @@ function pruneScreenshots(deviceId) {
 // stays an idempotent no-op; tiebreak by earliest rowid. One-time; the atomic
 // id-preserving save prevents recurrence.
 try {
-  const DEDUPE_ID = 'dedupe_template_zones_v1';
-  if (!db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(DEDUPE_ID)) {
-    const removed = db.prepare(`
+  const DEDUPE_ID = "dedupe_template_zones_v1";
+  if (
+    !db.prepare("SELECT 1 FROM schema_migrations WHERE id = ?").get(DEDUPE_ID)
+  ) {
+    const removed = db
+      .prepare(
+        `
       DELETE FROM layout_zones WHERE id IN (
         SELECT z.id FROM layout_zones z
         JOIN layouts l ON l.id = z.layout_id
@@ -878,14 +1112,27 @@ try {
             )
         )
       )
-    `).run().changes;
-    if (removed > 0) console.log(`[migrate] removed ${removed} duplicate template zone(s)`);
-    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(DEDUPE_ID);
+    `,
+      )
+      .run().changes;
+    if (removed > 0)
+      console.log(`[migrate] removed ${removed} duplicate template zone(s)`);
+    db.prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)").run(
+      DEDUPE_ID,
+    );
   }
-} catch (e) { console.error('[migrate] template-zone dedupe failed:', e.message); }
+} catch (e) {
+  console.error("[migrate] template-zone dedupe failed:", e.message);
+}
 
 // #37: fail fast (loud) if migrations left the DB missing schema the code needs.
-const { verifyAndRepairSchema } = require('../lib/schema-check');
+const { verifyAndRepairSchema } = require("../lib/schema-check");
 verifyAndRepairSchema(db);
 
-module.exports = { db, pruneTelemetry, pruneScreenshots, pruneStatusLog, getMaintenanceStats };
+module.exports = {
+  db,
+  pruneTelemetry,
+  pruneScreenshots,
+  pruneStatusLog,
+  getMaintenanceStats,
+};

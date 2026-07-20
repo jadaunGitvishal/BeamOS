@@ -62,7 +62,8 @@ module.exports = {
   // #148 Item 4: TCP SO_KEEPALIVE idle delay — OS-level dead-peer probing independent of the
   // app ping, so a half-open TCP can't persist indefinitely.
   tcpKeepAliveMs: parseInt(process.env.TCP_KEEPALIVE_MS) || 20000,
-  maxFileSize: 500 * 1024 * 1024, // 500MB
+  // maxFileSize: 500 * 1024 * 1024, // 500MB
+  maxFileSize: Number.MAX_SAFE_INTEGER, // Effectively unlimited for BeamOS
   thumbnailWidth: 320,
   screenshotQuality: 70,
   // SSL: drop your Cloudflare Origin cert + key in certs/ folder
@@ -106,7 +107,8 @@ module.exports = {
   // us from accidentally emailing real prod users. UNSET on prod systemd unit.
   graphDevRestrictTo: process.env.GRAPH_DEV_RESTRICT_TO || "",
   // Self-hosted mode: if true, first user gets enterprise plan and no billing
-  selfHosted: process.env.SELF_HOSTED === "true",
+  // selfHosted: process.env.SELF_HOSTED === "true",
+  selfHosted: true, // Permanently hardcoded for BeamOS - not dependent on env var
   // #116: opt-in UI gate. When true, hides the Subscription nav item + billing view
   // and bounces #/billing to the dashboard. Default off, so existing deployments are
   // unchanged. UI-only — /api/subscription/* stays in place (internal usage reads).

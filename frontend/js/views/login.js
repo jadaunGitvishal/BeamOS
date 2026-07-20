@@ -62,8 +62,14 @@ export async function render(container) {
     loadLoginBranding(),
   ]);
   const isSetup = config.needsSetup;
-  // registration_enabled may be absent on older servers — treat as enabled for back-compat
-  const canRegister = config.registration_enabled !== false;
+  // // registration_enabled may be absent on older servers — treat as enabled for back-compat
+  // const canRegister = config.registration_enabled !== false;
+
+  // Registration is permanently disabled at the code level for BeamOS. This
+  // is intentionally hardcoded to false, ignoring whatever the server config
+  // says - so the "Create Account" option can never reappear even if
+  // DISABLE_REGISTRATION were ever accidentally unset.
+  const canRegister = false;
 
   applyLoginBrandingDoc(branding);
   const brandName = branding.brand_name || "BeamOS";

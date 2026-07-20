@@ -205,9 +205,9 @@ class UpdateChecker(private val context: Context) {
     private fun cleanupApks(keep: String?) {
         try {
             val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return
-            val keepName = keep?.let { "ScreenTinker-$it.apk" }
+            val keepName = keep?.let { "BeamOS-$it.apk" }
             dir.listFiles { f ->
-                f.name.startsWith("ScreenTinker-") && f.name.endsWith(".apk") && f.name != keepName
+                f.name.startsWith("BeamOS-") && f.name.endsWith(".apk") && f.name != keepName
             }?.forEach { it.delete() }
         } catch (e: Exception) {
             Log.w(TAG, "APK cleanup failed: ${e.message}")
@@ -220,7 +220,7 @@ class UpdateChecker(private val context: Context) {
     private fun downloadAndInstall(url: String, version: String): Boolean {
         try {
             val apkFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-                "ScreenTinker-$version.apk")
+                "BeamOS-$version.apk")
 
             // #139: reuse a previously-downloaded, verified APK for this version instead of
             // re-pulling ~8.7 MB every cycle. The file also stays on disk as the artifact for a
@@ -319,7 +319,7 @@ class UpdateChecker(private val context: Context) {
                 val session = installer.openSession(sessionId)
 
                 apkFile.inputStream().use { input ->
-                    session.openWrite("ScreenTinker", 0, apkFile.length()).use { output ->
+                    session.openWrite("BeamOS", 0, apkFile.length()).use { output ->
                         input.copyTo(output)
                         session.fsync(output)
                     }

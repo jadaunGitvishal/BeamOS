@@ -9,7 +9,7 @@ class RemoteDisplayApp : Application() {
 
     companion object {
         const val CHANNEL_ID = "remote_display_service"
-        const val CHANNEL_NAME = "ScreenTinker Service"
+        const val CHANNEL_NAME = "BeamOS Service"
         // Separate HIGH-importance channel for the boot full-screen-intent launch.
         // A full-screen intent is only honored from a high-importance channel.
         const val BOOT_CHANNEL_ID = "remote_display_boot"
@@ -25,12 +25,12 @@ class RemoteDisplayApp : Application() {
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "ScreenTinker background service"
+                    description = "BeamOS background service"
                     setShowBadge(false)
                 }
             )
             manager.createNotificationChannel(
-                NotificationChannel(BOOT_CHANNEL_ID, "ScreenTinker Startup", NotificationManager.IMPORTANCE_HIGH).apply {
+                NotificationChannel(BOOT_CHANNEL_ID, "BeamOS Startup", NotificationManager.IMPORTANCE_HIGH).apply {
                     description = "Launches the display on boot"
                     setShowBadge(false)
                 }

@@ -18,9 +18,13 @@ CREATE TABLE IF NOT EXISTS plans (
 -- Default plans
 INSERT OR IGNORE INTO plans (id, name, display_name, max_devices, max_storage_mb, remote_control, remote_url, priority_support, price_monthly, price_yearly, sort_order)
 VALUES
-  ('free',       'free',       'Free',       2,    500,   0, 0, 0, 0,     0,     0),
-  ('starter',    'starter',    'Starter',    8,    2048,  1, 0, 0, 9.99,  99,    1),
-  ('pro',        'pro',        'Pro',        25,   10240, 1, 1, 0, 24.99, 249,   2),
+--   ('free',       'free',       'Free',       2,    500,   0, 0, 0, 0,     0,     0),
+--   ('starter',    'starter',    'Starter',    8,    2048,  1, 0, 0, 9.99,  99,    1),
+--   ('pro',        'pro',        'Pro',        25,   10240, 1, 1, 0, 24.99, 249,   2),
+--   ('enterprise', 'enterprise', 'Enterprise', -1,   -1,    1, 1, 1, 49.99, 499,   3);
+('free',       'free',       'Free',       -1,   -1,    1, 1, 1, 0,     0,     0),
+  ('starter',    'starter',    'Starter',    -1,   -1,    1, 1, 1, 9.99,  99,    1),
+  ('pro',        'pro',        'Pro',        -1,   -1,    1, 1, 1, 24.99, 249,   2),
   ('enterprise', 'enterprise', 'Enterprise', -1,   -1,    1, 1, 1, 49.99, 499,   3);
 
 CREATE TABLE IF NOT EXISTS users (

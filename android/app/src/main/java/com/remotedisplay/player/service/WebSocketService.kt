@@ -693,7 +693,7 @@ class WebSocketService : Service() {
         )
 
         return NotificationCompat.Builder(this, RemoteDisplayApp.CHANNEL_ID)
-            .setContentTitle("ScreenTinker")
+            .setContentTitle("BeamOS")
             .setContentText("Display service is running")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(pendingIntent)

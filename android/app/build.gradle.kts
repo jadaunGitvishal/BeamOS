@@ -110,7 +110,7 @@ tasks.register<Exec>("resignReleaseV1") {
             ?.filter { it.isDirectory }?.maxByOrNull { it.name }
             ?: throw GradleException("#81 resign: no build-tools found under $sdkDir")
         commandLine(
-            File(buildTools, "apksigner").absolutePath, "sign",
+            File(buildTools, if (System.getProperty("os.name").lowercase().contains("win")) "apksigner.bat" else "apksigner").absolutePath, "sign",
             "--ks", file("../release-key.jks").absolutePath,
             "--ks-key-alias", (System.getenv("KEY_ALIAS") ?: "remotedisplay"),
             "--ks-pass", "pass:" + (System.getenv("KEYSTORE_PASSWORD") ?: ""),

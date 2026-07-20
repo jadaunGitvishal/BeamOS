@@ -56,19 +56,15 @@ router.post("/users", (req, res) => {
     return res.status(400).json({ error: "Valid email required" });
   }
   if (!WORKSPACE_ROLES.includes(role)) {
-    return res
-      .status(400)
-      .json({
-        error:
-          "Role must be workspace_admin, workspace_editor, or workspace_viewer",
-      });
+    return res.status(400).json({
+      error:
+        "Role must be workspace_admin, workspace_editor, or workspace_viewer",
+    });
   }
   if (password.length < MIN_PASSWORD_LENGTH) {
-    return res
-      .status(400)
-      .json({
-        error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
-      });
+    return res.status(400).json({
+      error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+    });
   }
   if (!workspaceId) {
     return res.status(400).json({ error: "workspaceId required" });
@@ -110,7 +106,7 @@ router.post("/users", (req, res) => {
       INSERT INTO users (
         id, email, name, password_hash, auth_provider, role, plan_id,
         must_change_password, welcome_email_sent_at, activation_nudge_sent_at
-      ) VALUES (?, ?, ?, ?, 'local', 'user', 'free', ?, strftime('%s','now'), strftime('%s','now'))
+      ) VALUES (?, ?, ?, ?, 'local', 'user', 'enterprise', ?, strftime('%s','now'), strftime('%s','now'))
     `,
     ).run(
       id,
@@ -176,7 +172,7 @@ router.post("/orgs", requirePlatformAdmin, (req, res) => {
   const ownerId = req.user.id;
   const txn = db.transaction(() => {
     db.prepare(
-      `INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'free', 'active')`,
+      `INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')`,
     ).run(orgId, name, ownerId);
     db.prepare(
       `INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')`,
@@ -199,15 +195,13 @@ router.post("/orgs", requirePlatformAdmin, (req, res) => {
     getClientIp(req),
     wsId,
   );
-  res
-    .status(201)
-    .json({
-      id: orgId,
-      name,
-      owner_user_id: ownerId,
-      workspace_id: wsId,
-      workspace_name: "Default",
-    });
+  res.status(201).json({
+    id: orgId,
+    name,
+    owner_user_id: ownerId,
+    workspace_id: wsId,
+    workspace_name: "Default",
+  });
 });
 
 // GET /api/admin/orgs - list every organization with owner + resource counts and
@@ -311,12 +305,10 @@ router.put("/users/:id/workspace", requirePlatformAdmin, (req, res) => {
     .prepare("SELECT workspace_id FROM workspace_members WHERE user_id = ?")
     .all(target.id);
   if (memberships.length > 1) {
-    return res
-      .status(400)
-      .json({
-        error:
-          "User belongs to multiple workspaces - manage in the workspace members view",
-      });
+    return res.status(400).json({
+      error:
+        "User belongs to multiple workspaces - manage in the workspace members view",
+    });
   }
 
   const ws = db
@@ -415,12 +407,10 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, (req, res) => {
   if (!workspaceId)
     return res.status(400).json({ error: "workspaceId required" });
   if (!WORKSPACE_ROLES.includes(role)) {
-    return res
-      .status(400)
-      .json({
-        error:
-          "Role must be workspace_admin, workspace_editor, or workspace_viewer",
-      });
+    return res.status(400).json({
+      error:
+        "Role must be workspace_admin, workspace_editor, or workspace_viewer",
+    });
   }
   const target = db
     .prepare("SELECT id, email FROM users WHERE id = ?")
@@ -457,14 +447,12 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, (req, res) => {
   const org = db
     .prepare("SELECT name FROM organizations WHERE id = ?")
     .get(ws.organization_id);
-  res
-    .status(existing ? 200 : 201)
-    .json({
-      workspace_id: ws.id,
-      workspace_name: ws.name,
-      organization_name: org?.name || null,
-      role,
-    });
+  res.status(existing ? 200 : 201).json({
+    workspace_id: ws.id,
+    workspace_name: ws.name,
+    organization_name: org?.name || null,
+    role,
+  });
 });
 
 // PUT - change the user's role in a specific workspace.
@@ -474,12 +462,10 @@ router.put(
   (req, res) => {
     const role = String(req.body?.role || "").trim();
     if (!WORKSPACE_ROLES.includes(role)) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Role must be workspace_admin, workspace_editor, or workspace_viewer",
-        });
+      return res.status(400).json({
+        error:
+          "Role must be workspace_admin, workspace_editor, or workspace_viewer",
+      });
     }
     const member = db
       .prepare(

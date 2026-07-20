@@ -2,6 +2,6 @@
 <!-- Hindi: same as English by design (matches web hi.js skeleton).
      Replace with native-reviewed translations before publicizing. -->
 <resources>
-    <string name="app_name">RemoteDisplay</string>
+    <string name="app_name">BeamOS</string>
     <string name="accessibility_description">RemoteDisplay uses accessibility to enable remote power controls and system navigation.</string>
 </resources>

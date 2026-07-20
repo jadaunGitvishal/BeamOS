@@ -12,7 +12,7 @@ class BootReceiver : BroadcastReceiver() {
             action == "android.intent.action.QUICKBOOT_POWERON" ||
             action == "com.htc.intent.action.QUICKBOOT_POWERON") {
 
-            Log.i("BootReceiver", "Boot completed (action=$action), launching ScreenTinker")
+            Log.i("BootReceiver", "Boot completed (action=$action), launching BeamOS")
             // #96: boot + post-update relaunch share one cascade (overlay-direct -> FSI/
             // tap-to-resume). See Relauncher.
             Relauncher.relaunch(context, Relauncher.BOOT)
