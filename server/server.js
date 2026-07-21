@@ -7,27 +7,36 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const VERSION = require('./version');
+const { asyncHandler } = require('./lib/async-handler');
 
-// #114: last-resort crash safety net. better-sqlite3 is SYNCHRONOUS, so a constraint
-// violation (e.g. a FK write) inside a socket.io handler with no local try/catch
-// propagates to uncaughtException; Node's default then prints a bare message and exits
-// with NO stack — which is exactly why #114's "FOREIGN KEY constraint failed" couldn't
-// be root-caused. This handler logs the FULL STACK (the file:line of the offending
-// write) then exits(1) so systemd restarts a fresh process. It is NOT catch-and-
-// continue: after an uncaught throw the process state is undefined, so we never keep
-// serving. Registered before everything else so it's in place during startup too.
-// (Verified: uncaughtException does catch a synchronous socket.io-handler throw.)
-function logFatalAndExit(kind, err) {
+// #114: last-resort crash safety net. A constraint violation (e.g. an FK write) inside
+// a socket.io handler with no local try/catch propagates to uncaughtException; Node's
+// default then prints a bare message and exits with NO stack — which is exactly why
+// #114's "FOREIGN KEY constraint failed" couldn't be root-caused. This handler logs the
+// FULL STACK (the file:line of the offending write) then exits(1) so systemd restarts a
+// fresh process. It is NOT catch-and-continue: after an uncaught throw the process state
+// is undefined, so we never keep serving. Registered before everything else so it's in
+// place during startup too. (Verified: uncaughtException does catch a synchronous
+// socket.io-handler throw.)
+//
+// status-log-writer.flush() and db.close() are async (mysql2/promise) - unlike the old
+// synchronous better-sqlite3 close, we have to actually await them or they never run
+// before process.exit(). A short timeout guard caps how long a hung MySQL connection can
+// delay the exit, so the crash-restart path can't itself hang.
+async function logFatalAndExit(kind, err) {
   try {
     const e = err instanceof Error ? err : new Error('Non-error thrown: ' + require('util').inspect(err));
     process.stderr.write(`\n[FATAL ${kind}] ${new Date().toISOString()}\n${e.stack || e.message}\n`);
   } catch (_) { /* the death handler must never throw */ }
-  try { require('./lib/status-log-writer').flush(); } catch (_) { /* #146 best-effort: drain buffered audit rows before close */ }
-  try { require('./db/database').db.close(); } catch (_) { /* best-effort WAL flush */ }
+  const cleanup = (async () => {
+    try { await require('./lib/status-log-writer').flush(); } catch (_) { /* #146 best-effort: drain buffered audit rows before close */ }
+    try { await require('./db/database').db.close(); } catch (_) { /* best-effort pool drain */ }
+  })();
+  try { await Promise.race([cleanup, new Promise((r) => setTimeout(r, 3000))]); } catch (_) {}
   process.exit(1);
 }
-process.on('uncaughtException', (err) => logFatalAndExit('uncaughtException', err));
-process.on('unhandledRejection', (reason) => logFatalAndExit('unhandledRejection', reason));
+process.on('uncaughtException', (err) => { logFatalAndExit('uncaughtException', err); });
+process.on('unhandledRejection', (reason) => { logFatalAndExit('unhandledRejection', reason); });
 
 // Ensure upload directories exist
 [config.contentDir, config.screenshotsDir].forEach(dir => {
@@ -184,12 +193,12 @@ app.get('/', (req, res) => {
 // per-workspace brand is not cached yet - no ScreenTinker flash on a never-visited
 // org. CSP blocks inline <script>, so the brand rides in a <meta> that brand-prime
 // reads. Falls back to a plain send of the shell if anything goes wrong.
-app.get('/app', (req, res) => {
+app.get('/app', asyncHandler(async (req, res) => {
   const file = path.join(config.frontendDir, 'index.html');
   try {
     const { db } = require('./db/database');
     const { resolveBranding, publicBranding } = require('./lib/branding');
-    const brand = publicBranding(resolveBranding(db, { domain: (req.hostname || '').toString() }));
+    const brand = publicBranding(await resolveBranding(db, { domain: (req.hostname || '').toString() }));
     const attr = JSON.stringify(brand)
       .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const html = fs.readFileSync(file, 'utf8')
@@ -198,7 +207,7 @@ app.get('/app', (req, res) => {
   } catch (e) {
     res.sendFile(file);
   }
-});
+}));
 
 // Sitemap and robots — served explicitly so the Content-Type is guaranteed
 // and these endpoints are immune to any future static-middleware reshuffle.
@@ -371,14 +380,14 @@ app.use('/api/player-debug', require('./routes/player-debug'));
 // page especially) need branding without a token. Resolves custom-domain match
 // -> platform default -> hardcoded ScreenTinker. Domain comes from ?domain= or
 // the request hostname (trust-proxy resolves the forwarded Host behind CF/Nginx).
-app.get('/api/branding', (req, res) => {
+app.get('/api/branding', asyncHandler(async (req, res) => {
   const { db } = require('./db/database');
   const { resolveBranding, publicBranding } = require('./lib/branding');
   const domain = (req.query.domain || req.hostname || '').toString();
   // publicBranding strips internal columns (id/user_id/workspace_id/custom_domain
   // /timestamps) so this unauthenticated endpoint only exposes presentational fields.
-  res.json(publicBranding(resolveBranding(db, { domain })));
-});
+  res.json(publicBranding(await resolveBranding(db, { domain })));
+}));
 
 // Stripe billing routes (checkout, portal)
 app.use('/api/stripe', stripeRouter);
@@ -386,7 +395,7 @@ app.use('/api/stripe', stripeRouter);
 
 // Screenshot route (before protected routes - needs custom auth for img tags)
 const { verifyToken } = require('./middleware/auth');
-app.get('/api/devices/:id/screenshot', (req, res) => {
+app.get('/api/devices/:id/screenshot', asyncHandler(async (req, res) => {
   let user = null;
   const authHeader = req.headers.authorization;
   const tokenParam = req.query.token;
@@ -395,11 +404,11 @@ app.get('/api/devices/:id/screenshot', (req, res) => {
   try {
     const decoded = verifyToken(token);
     const { db } = require('./db/database');
-    user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(decoded.id);
+    user = await db.prepare('SELECT id, role FROM users WHERE id = ?').get(decoded.id);
     if (!user) return res.status(401).json({ error: 'User not found' });
   } catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
   const { db: sdb } = require('./db/database');
-  const device = sdb.prepare('SELECT user_id FROM devices WHERE id = ?').get(req.params.id);
+  const device = await sdb.prepare('SELECT user_id FROM devices WHERE id = ?').get(req.params.id);
   if (!device) return res.status(404).json({ error: 'Device not found' });
   if (!['admin','superadmin'].includes(user.role) && device.user_id && device.user_id !== user.id) return res.status(403).json({ error: 'Access denied' });
   // Serve from memory if available (device online), otherwise from disk (offline snapshot)
@@ -411,12 +420,12 @@ app.get('/api/devices/:id/screenshot', (req, res) => {
     res.set('Cache-Control', 'no-cache');
     return res.send(buffer);
   }
-  const screenshot = sdb.prepare('SELECT * FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1').get(req.params.id);
+  const screenshot = await sdb.prepare('SELECT * FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1').get(req.params.id);
   if (!screenshot) return res.status(404).json({ error: 'No screenshot available' });
   const safePath = path.resolve(config.screenshotsDir, path.basename(screenshot.filepath));
   if (!safePath.startsWith(path.resolve(config.screenshotsDir))) return res.status(403).json({ error: 'Invalid path' });
   res.sendFile(safePath);
-});
+}));
 
 // A logged-in user who can access the content's workspace may view its file /
 // thumbnail even when it isn't referenced by a playlist/widget yet (e.g. the
@@ -424,7 +433,7 @@ app.get('/api/devices/:id/screenshot', (req, res) => {
 // send an Authorization header, so the dashboard fetches these with the Bearer
 // token; this verifies it and checks workspace membership. Anonymous players
 // (no token) still fall back to the playlist/widget reference gate. (#39)
-function requesterCanAccessContent(req, content) {
+async function requesterCanAccessContent(req, content) {
   try {
     const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
     if (!m) return false;
@@ -433,29 +442,29 @@ function requesterCanAccessContent(req, content) {
     if (!decoded || !decoded.id) return false;
     if (decoded.role === 'platform_admin') return true;
     const { db } = require('./db/database');
-    return !!db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+    return !!await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
       .get(content.workspace_id, decoded.id);
   } catch { return false; }
 }
 
 // Public content file serving (must be BEFORE protected routes)
-app.get('/api/content/:id/file', (req, res) => {
+app.get('/api/content/:id/file', asyncHandler(async (req, res) => {
   const { db } = require('./db/database');
-  const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
+  const content = await db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
   if (!content) return res.status(404).json({ error: 'Content not found' });
   if (!content.filepath) return res.status(404).json({ error: 'No file (remote URL content)' });
-  const inPlaylist = db.prepare('SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1').get(req.params.id);
+  const inPlaylist = await db.prepare('SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1').get(req.params.id);
   // Scope widget lookup to widgets in the content's workspace — prevents a user
   // in another workspace from unlocking this content by creating a widget that
   // references the UUID. Phase 2.2d: keyed off content.workspace_id (was user_id).
   // Perf note: LIKE scan on widgets.config is O(n) per request. Fine at current scale
   // (<100 widgets); revisit with a content_widget_refs join table if this grows.
-  const inWidget = inPlaylist ? null : db.prepare('SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1').get(content.workspace_id, `%/api/content/${req.params.id}/%`);
-  if (!inPlaylist && !inWidget && !requesterCanAccessContent(req, content)) return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
+  const inWidget = inPlaylist ? null : await db.prepare('SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1').get(content.workspace_id, `%/api/content/${req.params.id}/%`);
+  if (!inPlaylist && !inWidget && !await requesterCanAccessContent(req, content)) return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
   const safePath = path.resolve(config.contentDir, path.basename(content.filepath));
   if (!safePath.startsWith(path.resolve(config.contentDir))) return res.status(403).json({ error: 'Invalid path' });
   res.sendFile(safePath);
-});
+}));
 
 // Proxy a remote thumbnail (e.g. YouTube's img.youtube.com/.../hqdefault.jpg, which
 // content.js stores as thumbnail_path) server-side, SAME-ORIGIN, so the dashboard CSP
@@ -480,17 +489,17 @@ async function proxyRemoteThumbnail(url, res) {
 }
 
 // Public thumbnail serving (must be BEFORE protected routes)
-app.get('/api/content/:id/thumbnail', (req, res) => {
+app.get('/api/content/:id/thumbnail', asyncHandler(async (req, res) => {
   const { db } = require('./db/database');
-  const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
+  const content = await db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
   if (!content || !content.thumbnail_path) return res.status(404).json({ error: 'Thumbnail not found' });
   // Security: gate the same way as /file - only serve when the content is
   // referenced by a playlist or by a widget IN THE CONTENT'S WORKSPACE. Without
   // this, any anonymous caller holding a content UUID could pull any tenant's
   // thumbnail (the /file route already had this check; the thumbnail route did not).
-  const inPlaylist = db.prepare('SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1').get(req.params.id);
-  const inWidget = inPlaylist ? null : db.prepare('SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1').get(content.workspace_id, `%/api/content/${req.params.id}/%`);
-  if (!inPlaylist && !inWidget && !requesterCanAccessContent(req, content)) return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
+  const inPlaylist = await db.prepare('SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1').get(req.params.id);
+  const inWidget = inPlaylist ? null : await db.prepare('SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1').get(content.workspace_id, `%/api/content/${req.params.id}/%`);
+  if (!inPlaylist && !inWidget && !await requesterCanAccessContent(req, content)) return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
   // YouTube (and any future remote-sourced) content stores thumbnail_path as a remote
   // http(s) URL, not a local file. Proxy it instead of resolving it to a local path that
   // doesn't exist (contentDir/hqdefault.jpg -> ENOENT spam). Local thumbnails are
@@ -499,7 +508,7 @@ app.get('/api/content/:id/thumbnail', (req, res) => {
   const safePath = path.resolve(config.contentDir, path.basename(content.thumbnail_path));
   if (!safePath.startsWith(path.resolve(config.contentDir))) return res.status(403).json({ error: 'Invalid path' });
   res.sendFile(safePath);
-});
+}));
 
 // Protected API Routes.
 // Phase 2.1: resolveTenancy runs right after requireAuth on every resource
@@ -605,6 +614,15 @@ require('./lib/content-ack-limiter').startSweep();   // #146 Item E: evict idle 
 const apkCache = require('./lib/apk-cache');
 apkCache.start();                                    // #146 Item C: resolve APK path/size/mtime once + refresh on interval (no per-request fs)
 const { getBand } = require('./services/loop-lag');  // #146 Item C: critical-band download shed
+
+// #146 Item C/E: OTA update-check log — COALESCED (one summarized line per reason per
+// window) so a poll flood can't turn synchronous stdout writes into a loop hog. Never
+// keys on IP for any decision (SNAT).
+const logCoalescer = require('./lib/log-coalescer');
+function logOtaCheck(deviceId, client, latest, available, reason) {
+  logCoalescer.record(`ota-check:${reason}:${available}`, `[ota] update check: latest=${latest} update_available=${available} reason=${reason}`);
+}
+
 app.get('/api/update/check', (req, res) => {
   const currentVersion = req.query.version;
   const deviceId = req.query.device_id || null;   // #144: optional; beta4+ clients send it for per-device keying
@@ -656,165 +674,173 @@ app.use('/uploads/content', (req, res, next) => {
   next();
 }, express.static(config.contentDir));
 
-// Setup WebSockets
-const setupWebSockets = require('./ws');
-const { deviceNs, dashboardNs } = setupWebSockets(io);
-app.set('io', io);
-
-// Start heartbeat checker
-const { startHeartbeatChecker } = require('./services/heartbeat');
-startHeartbeatChecker(io);
-
-// #142: start event-loop lag sampling (feeds /api/status + the reconnect throttle)
-const { startLoopLagMonitor } = require('./services/loop-lag');
-startLoopLagMonitor();
-
-// Start command-queue sweep (prunes expired entries for offline devices)
-const commandQueue = require('./lib/command-queue');
-commandQueue.startSweep();
-
-// Start scheduler
-const { startScheduler } = require('./services/scheduler');
-startScheduler(io);
-
-// Start alert service
-const { startAlertService } = require('./services/alerts');
-startAlertService(io);
-
-// Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
-const { startActivationNudge } = require('./services/activationNudge');
-startActivationNudge();
-
-// #73: agency-upload digest flush (batched draft/published notifications to admins + owner)
-const { startAgencyDigest } = require('./services/agency-digest');
-startAgencyDigest();
-
-// Off-main-thread WAL checkpointer: disables inline auto-checkpoint on the main connection
-// (the ~60s p99 spike = a synchronous fsync-heavy checkpoint on the loop) and runs PASSIVE
-// (escalating to TRUNCATE if starved) from a worker thread. Started AFTER the DB is open+migrated.
-const { startWalCheckpointer, stopWalCheckpointer } = require('./db/wal-checkpointer');
-startWalCheckpointer(require('./db/database').db, config.dbPath);
-
-// Graceful shutdown: stop the checkpointer worker (closes its own DB handle) + flush + close.
+// Graceful shutdown: flush buffered audit rows, then drain + close the MySQL pool.
 let _shuttingDown = false;
-function gracefulShutdown(sig) {
+async function gracefulShutdown(sig) {
   if (_shuttingDown) return; _shuttingDown = true;
-  console.log(`[shutdown] ${sig} — stopping WAL checkpointer + closing DB`);
-  Promise.resolve(stopWalCheckpointer()).catch(() => {}).finally(() => {
-    try { require('./lib/status-log-writer').flush(); } catch (_) {}
-    try { require('./db/database').db.close(); } catch (_) {}
-    process.exit(0);
-  });
+  console.log(`[shutdown] ${sig} — flushing + closing DB pool`);
+  try { await require('./lib/status-log-writer').flush(); } catch (_) {}
+  try { await require('./db/database').db.close(); } catch (_) {}
+  process.exit(0);
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle provisioning via WebSocket notification
-const { db } = require('./db/database');
-const originalProvisionRoute = require('./routes/provisioning');
+// Everything below registers WebSocket handlers, the remaining routes, starts background
+// services, and opens the listening socket. All of it is deferred inside boot() until AFTER
+// initDb() resolves - unlike the old synchronous better-sqlite3 open (schema ready the instant
+// the module was required), MySQL's schema setup is async, and several of the service starters
+// below (heartbeat, scheduler, alerts) run DB queries on their very first tick. Nothing before
+// this point in the file touches the DB or accepts connections, so deferring this tail is safe:
+// route/middleware registration above (PUBLIC_ROUTERS/JWT_ONLY_ROUTERS/AGENCY_ROUTERS, /app,
+// /api/branding, etc.) already happened synchronously, and the process can't receive any HTTP
+// traffic until server.listen() inside boot() actually runs.
+async function boot() {
+  const { db, initDb } = require('./db/database');
+  await initDb();
 
-// Override provision to also notify device via WS
-const { checkDeviceLimit } = require('./middleware/subscription');
-const pairLockout = require('./lib/pair-lockout');
-app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (req, res) => {
-  // #87: lock out an IP after repeated failed pairing-code guesses (brute-force defense
-  // beyond the 5/min rate-limit on /api/provision).
-  const ip = getClientIp(req);
-  if (pairLockout.isLocked(ip)) {
-    return res.status(429).json({ error: 'Too many failed pairing attempts. Try again in a few minutes.' });
-  }
-  const { pairing_code, name } = req.body;
-  if (!pairing_code) return res.status(400).json({ error: 'pairing_code required' });
-  // Phase 2.2a: pair into the caller's current workspace. Refusing on no
-  // context prevents the regression window where a newly-paired device
-  // would have workspace_id NULL and be invisible to workspace-filtered lists.
-  if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before pairing.' });
+  // Setup WebSockets
+  const setupWebSockets = require('./ws');
+  const { deviceNs, dashboardNs } = setupWebSockets(io);
+  app.set('io', io);
 
-  const device = db.prepare('SELECT * FROM devices WHERE pairing_code = ?').get(pairing_code);
-  // #87: an UNKNOWN code is a brute-force guess - count it toward the per-IP lockout.
-  if (!device) {
-    pairLockout.recordFailure(ip);
-    return res.status(404).json({ error: 'No device found with that pairing code' });
-  }
-  // An EXPIRED code is a legitimate-but-stale code (a slow rollout, not an attack), so it
-  // does NOT count toward the lockout - it just asks the display to regenerate. This keeps
-  // a bulk rollout from one office/NAT IP from locking itself out on expired codes.
-  if (pairLockout.isCodeExpired(device.created_at)) {
-    return res.status(410).json({ error: 'Pairing code expired - restart the display to get a new code' });
-  }
-  pairLockout.reset(ip); // a valid claim forgives prior failed attempts from this IP
+  // Start heartbeat checker
+  const { startHeartbeatChecker } = require('./services/heartbeat');
+  startHeartbeatChecker(io);
 
-  const deviceName = name || 'Display ' + (db.prepare('SELECT COUNT(*) as count FROM devices WHERE user_id = ?').get(req.user.id).count + 1);
-  db.prepare("UPDATE devices SET pairing_code = NULL, name = ?, user_id = ?, workspace_id = ?, status = 'online', updated_at = strftime('%s','now') WHERE id = ?")
-    .run(deviceName, req.user.id, req.workspaceId, device.id);
+  // #142: start event-loop lag sampling (feeds /api/status + the reconnect throttle)
+  const { startLoopLagMonitor } = require('./services/loop-lag');
+  startLoopLagMonitor();
 
-  // Link fingerprint to user
-  db.prepare("UPDATE device_fingerprints SET user_id = ?, device_id = ? WHERE device_id = ?")
-    .run(req.user.id, device.id, device.id);
+  // Start command-queue sweep (prunes expired entries for offline devices)
+  const commandQueue = require('./lib/command-queue');
+  commandQueue.startSweep();
 
-  // Notify the device via WebSocket
-  deviceNs.to(device.id).emit('device:paired', { device_id: device.id, name: deviceName });
+  // Start scheduler
+  const { startScheduler } = require('./services/scheduler');
+  startScheduler(io);
 
-  const updated = db.prepare('SELECT * FROM devices WHERE id = ?').get(device.id);
-  require('./lib/device-sanitize').stripDeviceSecrets(updated); // never leak device_token to clients
-  // Phase 2.3: scope to the workspace the device was just claimed into.
-  const { workspaceRoom, emitToWorkspace } = require('./lib/socket-rooms');
-  emitToWorkspace(dashboardNs, workspaceRoom(updated.workspace_id), 'dashboard:device-added', updated);
+  // Start alert service
+  const { startAlertService } = require('./services/alerts');
+  startAlertService(io);
 
-  res.json(updated);
-});
+  // Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
+  const { startActivationNudge } = require('./services/activationNudge');
+  startActivationNudge();
 
-// #146 Item C/E: OTA update-check log — COALESCED (one summarized line per reason per
-// window) so a poll flood can't turn synchronous stdout writes into a loop hog. Never
-// keys on IP for any decision (SNAT).
-const logCoalescer = require('./lib/log-coalescer');
-function logOtaCheck(deviceId, client, latest, available, reason) {
-  logCoalescer.record(`ota-check:${reason}:${available}`, `[ota] update check: latest=${latest} update_available=${available} reason=${reason}`);
-}
+  // #73: agency-upload digest flush (batched draft/published notifications to admins + owner)
+  const { startAgencyDigest } = require('./services/agency-digest');
+  startAgencyDigest();
 
-// #146 Item C: GLOBAL download admission (lib/ota-download-guard) — concurrency + rate
-// caps + critical-band shed, NEVER per-IP (SNAT). Single bounded rolling state.
-const otaDownloadGuard = require('./lib/ota-download-guard');
-const otaDownloadState = otaDownloadGuard.prodState();   // #146 P3.8: shared singleton so /api/status can read stats
+  // Handle provisioning via WebSocket notification (kept as a require for its
+  // registration side effect on the /api/provision router mounted earlier).
+  require('./routes/provisioning');
 
-app.get('/download/apk', (req, res) => {
-  const apk = apkCache.get();
-  if (!apk.exists) {
-    return res.status(404).send(`<!DOCTYPE html><html><head><title>APK Not Found</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}div{text-align:center;max-width:500px;padding:24px}h1{color:#f87171;font-size:24px}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}p{line-height:1.6;color:#94a3b8}</style></head><body><div><h1>APK Not Available</h1><p>The Android APK has not been compiled yet. In Docker, mount a built APK at <code>/data/ScreenTinker.apk</code>, or use the <a href="/player" style="color:#3b82f6">web player</a>.</p></div></body></html>`);
-  }
+  // Override provision to also notify device via WS
+  const { checkDeviceLimit } = require('./middleware/subscription');
+  const pairLockout = require('./lib/pair-lockout');
+  app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, asyncHandler(async (req, res) => {
+    // #87: lock out an IP after repeated failed pairing-code guesses (brute-force defense
+    // beyond the 5/min rate-limit on /api/provision).
+    const ip = getClientIp(req);
+    if (pairLockout.isLocked(ip)) {
+      return res.status(429).json({ error: 'Too many failed pairing attempts. Try again in a few minutes.' });
+    }
+    const { pairing_code, name } = req.body;
+    if (!pairing_code) return res.status(400).json({ error: 'pairing_code required' });
+    // Phase 2.2a: pair into the caller's current workspace. Refusing on no
+    // context prevents the regression window where a newly-paired device
+    // would have workspace_id NULL and be invisible to workspace-filtered lists.
+    if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before pairing.' });
 
-  const verdict = otaDownloadGuard.admit(otaDownloadState, getBand());
-  if (verdict.summary) {
-    console.log(`[ota] downloads last ${Math.round(config.otaDownloadWindowMs / 1000)}s: ${verdict.summary.served} served, ${verdict.summary.shed} shed (in-flight ${verdict.summary.inFlight})`);
-  }
-  if (!verdict.allow) {
-    res.setHeader('Retry-After', String(verdict.retryAfter));
-    return res.status(verdict.status).json({ error: 'download capacity reached, retry shortly', retry_after: verdict.retryAfter });
-  }
+    const device = await db.prepare('SELECT * FROM devices WHERE pairing_code = ?').get(pairing_code);
+    // #87: an UNKNOWN code is a brute-force guess - count it toward the per-IP lockout.
+    if (!device) {
+      pairLockout.recordFailure(ip);
+      return res.status(404).json({ error: 'No device found with that pairing code' });
+    }
+    // An EXPIRED code is a legitimate-but-stale code (a slow rollout, not an attack), so it
+    // does NOT count toward the lockout - it just asks the display to regenerate. This keeps
+    // a bulk rollout from one office/NAT IP from locking itself out on expired codes.
+    if (pairLockout.isCodeExpired(device.created_at)) {
+      return res.status(410).json({ error: 'Pairing code expired - restart the display to get a new code' });
+    }
+    pairLockout.reset(ip); // a valid claim forgives prior failed attempts from this IP
 
-  let released = false;
-  const release = () => { if (released) return; released = true; otaDownloadGuard.release(otaDownloadState); };
-  res.on('finish', release); res.on('close', release);
-  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-  res.setHeader('Content-Disposition', 'attachment; filename="ScreenTinker.apk"');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(apk.path, (err) => { if (err) release(); });
-});
+    const countRow = await db.prepare('SELECT COUNT(*) as count FROM devices WHERE user_id = ?').get(req.user.id);
+    const deviceName = name || 'Display ' + (countRow.count + 1);
+    await db.prepare("UPDATE devices SET pairing_code = NULL, name = ?, user_id = ?, workspace_id = ?, status = 'online', updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+      .run(deviceName, req.user.id, req.workspaceId, device.id);
 
-// SPA fallback for app routes. Unmatched /api/ paths return 404 so misrouted
-// clients fail fast instead of hanging until Cloudflare's 15s upstream timeout.
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api/')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  res.sendFile(path.join(config.frontendDir, 'index.html'));
-});
+    // Link fingerprint to user
+    await db.prepare("UPDATE device_fingerprints SET user_id = ?, device_id = ? WHERE device_id = ?")
+      .run(req.user.id, device.id, device.id);
 
-const listenPort = hasSsl ? config.httpsPort : config.port;
-const protocol = hasSsl ? 'https' : 'http';
+    // Notify the device via WebSocket
+    deviceNs.to(device.id).emit('device:paired', { device_id: device.id, name: deviceName });
 
-server.listen(listenPort, '0.0.0.0', () => {
-  console.log(`
+    const updated = await db.prepare('SELECT * FROM devices WHERE id = ?').get(device.id);
+    require('./lib/device-sanitize').stripDeviceSecrets(updated); // never leak device_token to clients
+    // Phase 2.3: scope to the workspace the device was just claimed into.
+    const { workspaceRoom, emitToWorkspace } = require('./lib/socket-rooms');
+    emitToWorkspace(dashboardNs, workspaceRoom(updated.workspace_id), 'dashboard:device-added', updated);
+
+    res.json(updated);
+  }));
+
+  // #146 Item C: GLOBAL download admission (lib/ota-download-guard) — concurrency + rate
+  // caps + critical-band shed, NEVER per-IP (SNAT). Single bounded rolling state.
+  const otaDownloadGuard = require('./lib/ota-download-guard');
+  const otaDownloadState = otaDownloadGuard.prodState();   // #146 P3.8: shared singleton so /api/status can read stats
+
+  app.get('/download/apk', (req, res) => {
+    const apk = apkCache.get();
+    if (!apk.exists) {
+      return res.status(404).send(`<!DOCTYPE html><html><head><title>APK Not Found</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}div{text-align:center;max-width:500px;padding:24px}h1{color:#f87171;font-size:24px}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}p{line-height:1.6;color:#94a3b8}</style></head><body><div><h1>APK Not Available</h1><p>The Android APK has not been compiled yet. In Docker, mount a built APK at <code>/data/ScreenTinker.apk</code>, or use the <a href="/player" style="color:#3b82f6">web player</a>.</p></div></body></html>`);
+    }
+
+    const verdict = otaDownloadGuard.admit(otaDownloadState, getBand());
+    if (verdict.summary) {
+      console.log(`[ota] downloads last ${Math.round(config.otaDownloadWindowMs / 1000)}s: ${verdict.summary.served} served, ${verdict.summary.shed} shed (in-flight ${verdict.summary.inFlight})`);
+    }
+    if (!verdict.allow) {
+      res.setHeader('Retry-After', String(verdict.retryAfter));
+      return res.status(verdict.status).json({ error: 'download capacity reached, retry shortly', retry_after: verdict.retryAfter });
+    }
+
+    let released = false;
+    const release = () => { if (released) return; released = true; otaDownloadGuard.release(otaDownloadState); };
+    res.on('finish', release); res.on('close', release);
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="ScreenTinker.apk"');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(apk.path, (err) => { if (err) release(); });
+  });
+
+  // SPA fallback for app routes. Unmatched /api/ paths return 404 so misrouted
+  // clients fail fast instead of hanging until Cloudflare's 15s upstream timeout.
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api/')) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    res.sendFile(path.join(config.frontendDir, 'index.html'));
+  });
+
+  // JSON error-handling middleware. Registered last (Express requires error middleware -
+  // 4 args - to come after all other app.use/routes). asyncHandler forwards every rejected
+  // promise from route handlers/middleware to next(err), which lands here instead of
+  // Express's default HTML error page or an uncaught-exception crash.
+  app.use((err, req, res, next) => {
+    console.error(`[error] ${req.method} ${req.originalUrl}:`, err);
+    if (res.headersSent) return next(err);
+    res.status(err.status || 500).json({ error: err.expose ? err.message : 'Internal server error' });
+  });
+
+  const listenPort = hasSsl ? config.httpsPort : config.port;
+  const protocol = hasSsl ? 'https' : 'http';
+
+  server.listen(listenPort, '0.0.0.0', () => {
+    console.log(`
 ╔══════════════════════════════════════════════════╗
 ║       ScreenTinker Server v${VERSION.padEnd(22).slice(0, 22)}║
 ║──────────────────────────────────────────────────║
@@ -824,17 +850,23 @@ server.listen(listenPort, '0.0.0.0', () => {
 ║──────────────────────────────────────────────────║
 ║  Listening on all interfaces (0.0.0.0)           ║
 ╚══════════════════════════════════════════════════╝
-  `);
-});
+    `);
+  });
 
-// If SSL is enabled, also start an HTTP server that redirects to HTTPS
-if (hasSsl) {
-  const redirectApp = express();
-  redirectApp.use((req, res) => {
-    const host = req.headers.host?.replace(`:${config.port}`, `:${config.httpsPort}`) || `localhost:${config.httpsPort}`;
-    res.redirect(301, `https://${host}${req.url}`);
-  });
-  http.createServer(redirectApp).listen(config.port, '0.0.0.0', () => {
-    console.log(`  HTTP redirect: http://localhost:${config.port} → https://localhost:${config.httpsPort}\n`);
-  });
+  // If SSL is enabled, also start an HTTP server that redirects to HTTPS
+  if (hasSsl) {
+    const redirectApp = express();
+    redirectApp.use((req, res) => {
+      const host = req.headers.host?.replace(`:${config.port}`, `:${config.httpsPort}`) || `localhost:${config.httpsPort}`;
+      res.redirect(301, `https://${host}${req.url}`);
+    });
+    http.createServer(redirectApp).listen(config.port, '0.0.0.0', () => {
+      console.log(`  HTTP redirect: http://localhost:${config.port} → https://localhost:${config.httpsPort}\n`);
+    });
+  }
 }
+
+boot().catch((err) => {
+  console.error('[boot] fatal error during startup:', err);
+  process.exit(1);
+});
