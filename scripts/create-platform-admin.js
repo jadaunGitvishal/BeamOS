@@ -35,52 +35,53 @@ console.log("[debug] database module loaded");
 
 const [, , emailArg, nameArg, passwordArg] = process.argv;
 
-if (!emailArg || !nameArg || !passwordArg) {
-  console.error(`
+async function main() {
+  if (!emailArg || !nameArg || !passwordArg) {
+    console.error(`
 Usage: node scripts/create-platform-admin.js <email> <name> <password>
 
 Example:
   node scripts/create-platform-admin.js jadaunVishal@gmail.com vishal MyS3curePass!
 `);
-  process.exit(1);
-}
+    return 1;
+  }
 
-const email = emailArg.trim().toLowerCase();
-const name = nameArg.trim();
-const password = passwordArg;
+  const email = emailArg.trim().toLowerCase();
+  const name = nameArg.trim();
+  const password = passwordArg;
 
-if (password.length < 8) {
-  console.error("Password must be at least 8 characters.");
-  process.exit(1);
-}
+  if (password.length < 8) {
+    console.error("Password must be at least 8 characters.");
+    return 1;
+  }
 
-const existing = db
-  .prepare("SELECT id, role FROM users WHERE email = ?")
-  .get(email);
-if (existing) {
-  console.error(
-    `A user with email "${email}" already exists (role: ${existing.role}). Refusing to overwrite.`,
-  );
-  console.error(
-    "If you want to replace them, delete that account from Admin > All Users first, then re-run this script.",
-  );
-  process.exit(1);
-}
+  const existing = await db
+    .prepare("SELECT id, role FROM users WHERE email = ?")
+    .get(email);
+  if (existing) {
+    console.error(
+      `A user with email "${email}" already exists (role: ${existing.role}). Refusing to overwrite.`,
+    );
+    console.error(
+      "If you want to replace them, delete that account from Admin > All Users first, then re-run this script.",
+    );
+    return 1;
+  }
 
-const id = crypto.randomUUID();
-const passwordHash = bcrypt.hashSync(password, 10);
-console.log("[debug] about to insert user:", email);
+  const id = crypto.randomUUID();
+  const passwordHash = bcrypt.hashSync(password, 10);
+  console.log("[debug] about to insert user:", email);
 
-db.prepare(
-  `
+  await db.prepare(
+    `
   INSERT INTO users (id, email, name, password_hash, auth_provider, role, plan_id, trial_started, trial_plan)
   VALUES (?, ?, ?, ?, 'local', 'platform_admin', 'enterprise', NULL, NULL)
 `,
-).run(id, email, name, passwordHash);
+  ).run(id, email, name, passwordHash);
 
-console.log("[debug] insert complete");
+  console.log("[debug] insert complete");
 
-console.log(`
+  console.log(`
 Platform admin created successfully.
 
   Email: ${email}
@@ -92,3 +93,9 @@ You can now log in at your BeamOS URL with this email and password.
 IMPORTANT: make sure DISABLE_REGISTRATION=true is set as an environment
 variable on your server, so no one else can ever self-register.
 `);
+  return 0;
+}
+
+main()
+  .then((code) => db.close().finally(() => process.exit(code)))
+  .catch((e) => { console.error("FATAL:", e); process.exit(1); });

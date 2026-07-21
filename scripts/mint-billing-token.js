@@ -26,14 +26,14 @@ const has = (flag) => process.argv.includes(flag);
 
 function fmtTime(t) { return t ? new Date(t * 1000).toISOString() : '—'; }
 
-function main() {
+async function main() {
   if (has('--help') || has('-h')) {
     console.log('Usage:\n  --name "<label>"   mint a billing:read token\n  --list             list billing tokens\n  --revoke <id>      revoke a billing token');
     return 0;
   }
 
   if (has('--list')) {
-    const rows = listBillingTokens(db);
+    const rows = await listBillingTokens(db);
     if (!rows.length) { console.log('No billing:read tokens.'); return 0; }
     for (const r of rows) {
       console.log(`${r.id}  ${r.prefix}…  "${r.name}"  created=${fmtTime(r.created_at)}  last_used=${fmtTime(r.last_used_at)}  ${r.revoked_at ? 'REVOKED ' + fmtTime(r.revoked_at) : 'active'}`);
@@ -44,7 +44,7 @@ function main() {
   const revokeId = arg('--revoke');
   if (revokeId !== undefined) {
     if (!revokeId) { console.error('ERROR: --revoke needs a token id (see --list)'); return 1; }
-    const res = revokeBillingToken(db, revokeId);
+    const res = await revokeBillingToken(db, revokeId);
     if (!res.ok) { console.error(`ERROR: ${res.reason}`); return 1; }
     console.log(res.alreadyRevoked ? `Token ${revokeId} was already revoked.` : `✔ Revoked billing token ${revokeId}. It is refused on the next request.`);
     return 0;
@@ -54,7 +54,7 @@ function main() {
   if (name === undefined) { console.error('ERROR: nothing to do. Use --name "<label>" to mint, --list, or --revoke <id>.'); return 1; }
 
   let minted;
-  try { minted = mintBillingToken(db, { name }); }
+  try { minted = await mintBillingToken(db, { name }); }
   catch (e) { console.error(`ERROR: ${e.message}`); return 1; }
 
   console.log('');
@@ -71,4 +71,6 @@ function main() {
   return 0;
 }
 
-process.exit(main());
+main()
+  .then((code) => { require('../server/db/database').db.close().finally(() => process.exit(code)); })
+  .catch((e) => { console.error('FATAL:', e); process.exit(1); });
