@@ -4,6 +4,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const config = require('../config');
+const { asyncHandler } = require('../lib/async-handler');
 // Phase 2.2k: workspace-aware access. requirePlaylistOwnership is replaced
 // by read/write helpers gated on the playlist's workspace_id.
 const { accessContext } = require('../lib/tenancy');
@@ -27,7 +28,7 @@ async function probeAndUpdateDuration(content) {
     const info = JSON.parse(probe);
     if (info.format?.duration) {
       const dur = parseFloat(info.format.duration);
-      db.prepare('UPDATE content SET duration_sec = ? WHERE id = ?').run(dur, content.id);
+      await db.prepare('UPDATE content SET duration_sec = ? WHERE id = ?').run(dur, content.id);
       return dur;
     }
   } catch (e) {
@@ -38,11 +39,11 @@ async function probeAndUpdateDuration(content) {
 
 // Phase 2.2k: workspace-aware playlist access. Returns the playlist row (with
 // req.playlistCtx populated) or sends 403/404. requireWrite=false for reads.
-function loadPlaylistAccess(req, res, requireWrite) {
-  const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id);
+async function loadPlaylistAccess(req, res, requireWrite) {
+  const playlist = await db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id);
   if (!playlist) { res.status(404).json({ error: 'playlist not found' }); return null; }
   if (!playlist.workspace_id) { res.status(403).json({ error: 'Playlist not assigned to a workspace' }); return null; }
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(playlist.workspace_id);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(playlist.workspace_id);
   const ctx = ws && accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   if (requireWrite && !ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
@@ -53,19 +54,19 @@ function loadPlaylistAccess(req, res, requireWrite) {
   return playlist;
 }
 
-function requirePlaylistRead(req, res, next) {
-  if (!loadPlaylistAccess(req, res, false)) return;
+const requirePlaylistRead = asyncHandler(async (req, res, next) => {
+  if (!await loadPlaylistAccess(req, res, false)) return;
   next();
-}
+});
 
-function requirePlaylistWrite(req, res, next) {
-  if (!loadPlaylistAccess(req, res, true)) return;
+const requirePlaylistWrite = asyncHandler(async (req, res, next) => {
+  if (!await loadPlaylistAccess(req, res, true)) return;
   next();
-}
+});
 
 // Build the snapshot item list for a playlist (denormalized for device payload)
-function buildSnapshotItems(playlistId) {
-  const items = db.prepare(`
+async function buildSnapshotItems(playlistId) {
+  const items = await db.prepare(`
     SELECT pi.id AS _iid, pi.content_id, pi.widget_id, pi.zone_id, pi.sort_order, pi.duration_sec, pi.muted,
            COALESCE(c.filename, w.name) as filename, c.mime_type, c.filepath, c.file_size,
            c.duration_sec as content_duration, c.remote_url,
@@ -81,7 +82,7 @@ function buildSnapshotItems(playlistId) {
   // `schedules` field -> always on. Additive: old players ignore the field. _iid is
   // only used here to fetch blocks and is then dropped (snapshot stays id-free).
   for (const it of items) {
-    const blocks = schedulesForItem(it._iid);
+    const blocks = await schedulesForItem(it._iid);
     if (blocks.length) it.schedules = blocks;
     delete it._iid;
   }
@@ -94,11 +95,11 @@ function buildSnapshotItems(playlistId) {
 // -> fullscreen (null); 1 distinct layout -> use it; >1 (rare/legacy: zones from
 // different layouts) -> the layout covering the MOST items, flagged ambiguous so the
 // dashboard can caption it. Never throws.
-function derivePreviewLayout(assignments) {
+async function derivePreviewLayout(assignments) {
   const zoneIds = [...new Set((assignments || []).map(a => a && a.zone_id).filter(Boolean))];
   if (zoneIds.length === 0) return null;
   const ph = zoneIds.map(() => '?').join(',');
-  const zoneRows = db.prepare(`SELECT id, layout_id FROM layout_zones WHERE id IN (${ph})`).all(...zoneIds);
+  const zoneRows = await db.prepare(`SELECT id, layout_id FROM layout_zones WHERE id IN (${ph})`).all(...zoneIds);
   if (zoneRows.length === 0) return null; // dangling zone_ids -> fullscreen
   const layoutIds = [...new Set(zoneRows.map(r => r.layout_id))];
   let layoutId = layoutIds[0];
@@ -110,18 +111,19 @@ function derivePreviewLayout(assignments) {
     for (const a of assignments) { const l = z2l.get(a && a.zone_id); if (l) tally[l] = (tally[l] || 0) + 1; }
     layoutId = Object.entries(tally).sort((x, y) => y[1] - x[1])[0][0];
   }
-  const layout = db.prepare('SELECT * FROM layouts WHERE id = ?').get(layoutId);
+  const layout = await db.prepare('SELECT * FROM layouts WHERE id = ?').get(layoutId);
   if (!layout) return null;
-  layout.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layoutId);
+  layout.zones = await db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layoutId);
   if (ambiguous) layout._preview_ambiguous = true;
   return layout;
 }
 
 // Map an item's schedule rows into the evaluator's block shape.
-function schedulesForItem(itemId) {
-  return db.prepare(
+async function schedulesForItem(itemId) {
+  const rows = await db.prepare(
     'SELECT active_days, start_time, end_time, start_date, end_date FROM playlist_item_schedules WHERE playlist_item_id = ? ORDER BY sort_order ASC, created_at ASC'
-  ).all(itemId).map(r => ({
+  ).all(itemId);
+  return rows.map(r => ({
     days: String(r.active_days || '').split(',').filter(s => s !== '').map(Number),
     start: r.start_time,
     end: r.end_time,
@@ -131,19 +133,19 @@ function schedulesForItem(itemId) {
 }
 
 // Mark playlist as draft (called after item mutations from the playlist detail UI)
-function markDraft(playlistId) {
-  db.prepare("UPDATE playlists SET status = 'draft', updated_at = strftime('%s','now') WHERE id = ?").run(playlistId);
+async function markDraft(playlistId) {
+  await db.prepare("UPDATE playlists SET status = 'draft', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(playlistId);
 }
 
 // Push playlist update to all devices using this playlist
-function pushToDevices(playlistId, req) {
+async function pushToDevices(playlistId, req) {
   try {
     const io = req.app.get('io');
     if (!io) return;
     const { buildPlaylistPayload } = require('../ws/deviceSocket');
     const commandQueue = require('../lib/command-queue');
     const deviceNs = io.of('/device');
-    const devices = db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(playlistId);
+    const devices = await db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(playlistId);
     for (const d of devices) {
       commandQueue.queueOrEmitPlaylistUpdate(deviceNs, d.id, buildPlaylistPayload);
     }
@@ -154,19 +156,19 @@ function pushToDevices(playlistId, req) {
 // devices actually consume) + push to devices. POST /:id/publish AND the agency
 // auto-publish path both call this, so they can never drift (a "published" playlist that
 // wasn't snapshotted would be live-on-no-screen).
-function publishPlaylist(playlistId, req) {
-  const snapshotItems = buildSnapshotItems(playlistId);
-  db.prepare("UPDATE playlists SET status = 'published', published_snapshot = ?, updated_at = strftime('%s','now') WHERE id = ?")
+async function publishPlaylist(playlistId, req) {
+  const snapshotItems = await buildSnapshotItems(playlistId);
+  await db.prepare("UPDATE playlists SET status = 'published', published_snapshot = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
     .run(JSON.stringify(snapshotItems), playlistId);
-  pushToDevices(playlistId, req);
+  await pushToDevices(playlistId, req);
 }
 
 // Phase 2.2k: list scoped to caller's current workspace. No platform_admin
 // bypass - cross-workspace view comes from switch-workspace, matching the
 // precedent established across all other migrated routes.
-router.get('/', (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.json([]);
-  const playlists = db.prepare(`
+  const playlists = await db.prepare(`
     SELECT p.*, COUNT(DISTINCT pi.id) as item_count, COUNT(DISTINCT d.id) as display_count,
            EXISTS(SELECT 1 FROM playlist_items z WHERE z.playlist_id = p.id AND z.zone_id IS NOT NULL) as zoned
     FROM playlists p
@@ -177,13 +179,13 @@ router.get('/', (req, res) => {
     ORDER BY p.name ASC
   `).all(req.workspaceId);
   res.json(playlists);
-});
+}));
 
 // Phase 2.2k: create stamps workspace_id from req.workspaceId. Viewer-deny
 // gate so workspace_viewers cannot create playlists in their workspace.
-router.post('/', (req, res) => {
+router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(400).json({ error: 'No active workspace' });
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
   const ctx = ws && accessContext(req.user.id, req.user.role, ws);
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
   if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
@@ -192,16 +194,16 @@ router.post('/', (req, res) => {
   const { name, description } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'name required' });
   const id = uuidv4();
-  db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, description) VALUES (?, ?, ?, ?, ?)')
+  await db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, description) VALUES (?, ?, ?, ?, ?)')
     .run(id, req.user.id, req.workspaceId, name.trim(), (description || '').trim());
-  res.status(201).json(db.prepare(`
+  res.status(201).json(await db.prepare(`
     SELECT p.*, 0 as item_count, 0 as display_count FROM playlists p WHERE p.id = ?
   `).get(id));
-});
+}));
 
 // Get single playlist with items
-router.get('/:id', requirePlaylistRead, (req, res) => {
-  const items = db.prepare(`
+router.get('/:id', requirePlaylistRead, asyncHandler(async (req, res) => {
+  const items = await db.prepare(`
     SELECT pi.*,
            COALESCE(c.filename, w.name) as filename,
            c.mime_type, c.filepath, c.thumbnail_path,
@@ -213,9 +215,9 @@ router.get('/:id', requirePlaylistRead, (req, res) => {
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
-  const displayCount = db.prepare('SELECT COUNT(*) as count FROM devices WHERE playlist_id = ?').get(req.params.id).count;
-  res.json({ ...req.playlist, items, item_count: items.length, display_count: displayCount });
-});
+  const displayRow = await db.prepare('SELECT COUNT(*) as count FROM devices WHERE playlist_id = ?').get(req.params.id);
+  res.json({ ...req.playlist, items, item_count: items.length, display_count: displayRow.count });
+}));
 
 // #104: device-free draft preview payload. Same shape the device player consumes
 // (via assemblePayload, so it can't drift), but built from LIVE items (draft-aware,
@@ -223,16 +225,16 @@ router.get('/:id', requirePlaylistRead, (req, res) => {
 // gated + workspace-scoped by requirePlaylistRead. The dashboard iframes /player
 // with ?preview=1&playlist=:id and renders this with the unmodified player renderer.
 const PREVIEW_ORIENTATIONS = new Set(['landscape', 'portrait', 'landscape-flipped', 'portrait-flipped']);
-router.get('/:id/preview-payload', requirePlaylistRead, (req, res) => {
+router.get('/:id/preview-payload', requirePlaylistRead, asyncHandler(async (req, res) => {
   const { assemblePayload } = require('../ws/deviceSocket');
-  const assignments = buildSnapshotItems(req.params.id);
-  const layout = derivePreviewLayout(assignments);
+  const assignments = await buildSnapshotItems(req.params.id);
+  const layout = await derivePreviewLayout(assignments);
   const orientation = PREVIEW_ORIENTATIONS.has(req.query.orientation) ? req.query.orientation : 'landscape';
   res.json(assemblePayload({ assignments, layout, orientation, wall_config: null, timezone: null }));
-});
+}));
 
 // Update playlist
-router.put('/:id', requirePlaylistWrite, (req, res) => {
+router.put('/:id', requirePlaylistWrite, asyncHandler(async (req, res) => {
   const { name, description } = req.body;
   const updates = [];
   const values = [];
@@ -246,22 +248,22 @@ router.put('/:id', requirePlaylistWrite, (req, res) => {
     values.push(description.trim());
   }
   if (updates.length > 0) {
-    updates.push("updated_at = strftime('%s','now')");
+    updates.push("updated_at = UNIX_TIMESTAMP()");
     values.push(req.params.id);
-    db.prepare(`UPDATE playlists SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await db.prepare(`UPDATE playlists SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
-  res.json(db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id));
-});
+  res.json(await db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id));
+}));
 
 // Publish playlist — snapshot current items and push to devices
-router.post('/:id/publish', requirePlaylistWrite, (req, res) => {
+router.post('/:id/publish', requirePlaylistWrite, asyncHandler(async (req, res) => {
   // Snapshot shape (no pi.id) is intentional — published_snapshot is consumed
   // by devices and stored as JSON; row IDs there would be misleading.
-  publishPlaylist(req.params.id, req);
+  await publishPlaylist(req.params.id, req);
   // UI response shape must include pi.id so the post-publish render can wire
   // per-row delete/duration listeners. TODO: refactor to share this SELECT
   // with GET /:id (also duplicated in /discard and POST /:id/items/reorder).
-  const items = db.prepare(`
+  const items = await db.prepare(`
     SELECT pi.*,
            COALESCE(c.filename, w.name) as filename,
            c.mime_type, c.filepath, c.thumbnail_path,
@@ -273,11 +275,11 @@ router.post('/:id/publish', requirePlaylistWrite, (req, res) => {
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
-  res.json({ ...db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id), items });
-});
+  res.json({ ...await db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id), items });
+}));
 
 // Discard draft — revert playlist_items to match published_snapshot
-router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
+router.post('/:id/discard', requirePlaylistWrite, asyncHandler(async (req, res) => {
   const playlist = req.playlist;
   if (!playlist.published_snapshot) {
     return res.status(400).json({ error: 'No published version to revert to' });
@@ -291,27 +293,27 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
     return res.status(500).json({ error: 'Corrupt published snapshot' });
   }
 
-  const transaction = db.transaction(() => {
+  const transaction = db.transaction(async (tx) => {
     // Clear current draft items
-    db.prepare('DELETE FROM playlist_items WHERE playlist_id = ?').run(req.params.id);
+    await tx.prepare('DELETE FROM playlist_items WHERE playlist_id = ?').run(req.params.id);
     // Re-insert from snapshot, skipping items whose content/widget was deleted
-    const insert = db.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, zone_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?, ?)');
+    const insert = tx.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, zone_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?, ?)');
     for (const item of publishedItems) {
       try {
-        insert.run(req.params.id, item.content_id || null, item.widget_id || null, item.zone_id || null, item.sort_order, item.duration_sec);
+        await insert.run(req.params.id, item.content_id || null, item.widget_id || null, item.zone_id || null, item.sort_order, item.duration_sec);
       } catch (e) {
-        if (e.message.includes('FOREIGN KEY')) {
+        if (e.code === 'ER_NO_REFERENCED_ROW' || e.code === 'ER_NO_REFERENCED_ROW_2') {
           console.warn(`Discard: skipping snapshot item (content_id=${item.content_id}, widget_id=${item.widget_id}) — referenced entity was deleted`);
           continue;
         }
         throw e;
       }
     }
-    db.prepare("UPDATE playlists SET status = 'published', updated_at = strftime('%s','now') WHERE id = ?").run(req.params.id);
+    await tx.prepare("UPDATE playlists SET status = 'published', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(req.params.id);
   });
-  transaction();
+  await transaction();
 
-  const items = db.prepare(`
+  const items = await db.prepare(`
     SELECT pi.*,
            COALESCE(c.filename, w.name) as filename,
            c.mime_type, c.filepath, c.thumbnail_path,
@@ -323,20 +325,20 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
-  res.json({ ...db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id), items });
-});
+  res.json({ ...await db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id), items });
+}));
 
 // Delete playlist
-router.delete('/:id', requirePlaylistWrite, (req, res) => {
-  db.prepare('DELETE FROM playlists WHERE id = ?').run(req.params.id);
+router.delete('/:id', requirePlaylistWrite, asyncHandler(async (req, res) => {
+  await db.prepare('DELETE FROM playlists WHERE id = ?').run(req.params.id);
   res.json({ success: true });
-});
+}));
 
 // --- Playlist Items ---
 
 // List items
-router.get('/:id/items', requirePlaylistRead, (req, res) => {
-  const items = db.prepare(`
+router.get('/:id/items', requirePlaylistRead, asyncHandler(async (req, res) => {
+  const items = await db.prepare(`
     SELECT pi.*,
            COALESCE(c.filename, w.name) as filename,
            c.mime_type, c.filepath, c.thumbnail_path,
@@ -348,9 +350,9 @@ router.get('/:id/items', requirePlaylistRead, (req, res) => {
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
-  for (const it of items) it.schedules = schedulesForItem(it.id); // #74/#75: editor needs the blocks
+  for (const it of items) it.schedules = await schedulesForItem(it.id); // #74/#75: editor needs the blocks
   res.json(items);
-});
+}));
 
 // --- Per-item schedule blocks (#74 dayparting + #75 expiry) ---
 // Same permission as editing items (requirePlaylistWrite). Block shape mirrors the
@@ -368,31 +370,35 @@ function validateBlocks(blocks) {
   }
   return null;
 }
-function itemInPlaylist(itemId, playlistId) {
+async function itemInPlaylist(itemId, playlistId) {
   return db.prepare('SELECT id FROM playlist_items WHERE id = ? AND playlist_id = ?').get(itemId, playlistId);
 }
 
-router.get('/:id/items/:itemId/schedules', requirePlaylistRead, (req, res) => {
-  const item = itemInPlaylist(req.params.itemId, req.params.id);
+router.get('/:id/items/:itemId/schedules', requirePlaylistRead, asyncHandler(async (req, res) => {
+  const item = await itemInPlaylist(req.params.itemId, req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  res.json(schedulesForItem(item.id));
-});
+  res.json(await schedulesForItem(item.id));
+}));
 
 // Replace an item's schedule blocks wholesale ([] = no schedule = always on).
-router.put('/:id/items/:itemId/schedules', requirePlaylistWrite, (req, res) => {
-  const item = itemInPlaylist(req.params.itemId, req.params.id);
+router.put('/:id/items/:itemId/schedules', requirePlaylistWrite, asyncHandler(async (req, res) => {
+  const item = await itemInPlaylist(req.params.itemId, req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   const blocks = req.body.blocks;
   const err = validateBlocks(blocks);
   if (err) return res.status(400).json({ error: err });
-  const ins = db.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');
-  db.transaction(() => {
-    db.prepare('DELETE FROM playlist_item_schedules WHERE playlist_item_id = ?').run(item.id);
-    blocks.forEach((b, i) => ins.run(uuidv4(), item.id, b.days.join(','), b.start, b.end, b.start_date || null, b.end_date || null, i));
-  })();
-  markDraft(req.params.id); // schedule changes affect playback -> draft until re-published
-  res.json(schedulesForItem(item.id));
-});
+  const transaction = db.transaction(async (tx) => {
+    await tx.prepare('DELETE FROM playlist_item_schedules WHERE playlist_item_id = ?').run(item.id);
+    const ins = tx.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      await ins.run(uuidv4(), item.id, b.days.join(','), b.start, b.end, b.start_date || null, b.end_date || null, i);
+    }
+  });
+  await transaction();
+  await markDraft(req.params.id); // schedule changes affect playback -> draft until re-published
+  res.json(await schedulesForItem(item.id));
+}));
 
 // Phase 2.2k: add item closes 2 pre-existing cross-tenant leaks:
 //   1. Content gate: today checks content.user_id == caller. A workspace_admin
@@ -413,7 +419,7 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
     }
 
     if (content_id) {
-      const content = db.prepare('SELECT id, workspace_id, duration_sec, mime_type, filepath FROM content WHERE id = ?').get(content_id);
+      const content = await db.prepare('SELECT id, workspace_id, duration_sec, mime_type, filepath FROM content WHERE id = ?').get(content_id);
       if (!content) return res.status(404).json({ error: 'Content not found' });
       if (content.workspace_id && content.workspace_id !== req.playlist.workspace_id) {
         return res.status(403).json({ error: 'Content is not in this playlist\'s workspace' });
@@ -425,7 +431,7 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
     }
     if (duration_sec === undefined || duration_sec === null) duration_sec = 10;
     if (widget_id) {
-      const widget = db.prepare('SELECT id, workspace_id FROM widgets WHERE id = ?').get(widget_id);
+      const widget = await db.prepare('SELECT id, workspace_id FROM widgets WHERE id = ?').get(widget_id);
       if (!widget) return res.status(404).json({ error: 'Widget not found' });
       if (widget.workspace_id && widget.workspace_id !== req.playlist.workspace_id) {
         return res.status(403).json({ error: 'Widget is not in this playlist\'s workspace' });
@@ -435,27 +441,27 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
     // #public-api: optional multi-zone placement. Validate the zone belongs to a
     // template or a layout in this playlist's workspace (the agency portal needs this).
     if (zone_id) {
-      const zone = db.prepare('SELECT lz.id FROM layout_zones lz JOIN layouts l ON l.id = lz.layout_id WHERE lz.id = ? AND (l.is_template = 1 OR l.workspace_id = ?)').get(zone_id, req.playlist.workspace_id);
+      const zone = await db.prepare('SELECT lz.id FROM layout_zones lz JOIN layouts l ON l.id = lz.layout_id WHERE lz.id = ? AND (l.is_template = 1 OR l.workspace_id = ?)').get(zone_id, req.playlist.workspace_id);
       if (!zone) return res.status(400).json({ error: 'zone_id not found in this workspace' });
     }
 
     // Auto-increment sort_order if not specified
     let order = sort_order;
     if (order === undefined || order === null) {
-      const max = db.prepare('SELECT MAX(sort_order) as max_order FROM playlist_items WHERE playlist_id = ?')
+      const max = await db.prepare('SELECT MAX(sort_order) as max_order FROM playlist_items WHERE playlist_id = ?')
         .get(req.params.id);
       order = (max.max_order || 0) + 1;
     }
 
-    const result = db.prepare(`
+    const result = await db.prepare(`
       INSERT INTO playlist_items (playlist_id, content_id, widget_id, zone_id, sort_order, duration_sec)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(req.params.id, content_id || null, widget_id || null, zone_id || null, order, duration_sec);
 
     // Mark as draft (items changed since last publish)
-    markDraft(req.params.id);
+    await markDraft(req.params.id);
 
-    const item = db.prepare(`
+    const item = await db.prepare(`
       SELECT pi.*,
              COALESCE(c.filename, w.name) as filename,
              c.mime_type, c.filepath, c.thumbnail_path,
@@ -475,8 +481,8 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
 });
 
 // Update item
-router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
-  const item = db.prepare('SELECT * FROM playlist_items WHERE id = ? AND playlist_id = ?')
+router.put('/:id/items/:itemId', requirePlaylistWrite, asyncHandler(async (req, res) => {
+  const item = await db.prepare('SELECT * FROM playlist_items WHERE id = ? AND playlist_id = ?')
     .get(req.params.itemId, req.params.id);
   if (!item) return res.status(404).json({ error: 'item not found' });
 
@@ -488,7 +494,7 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
   // #public-api: multi-zone placement (zone_id null clears it). Undefined = no change.
   if (zone_id !== undefined) {
     if (zone_id !== null) {
-      const zone = db.prepare('SELECT lz.id FROM layout_zones lz JOIN layouts l ON l.id = lz.layout_id WHERE lz.id = ? AND (l.is_template = 1 OR l.workspace_id = ?)').get(zone_id, req.playlist.workspace_id);
+      const zone = await db.prepare('SELECT lz.id FROM layout_zones lz JOIN layouts l ON l.id = lz.layout_id WHERE lz.id = ? AND (l.is_template = 1 OR l.workspace_id = ?)').get(zone_id, req.playlist.workspace_id);
       if (!zone) return res.status(400).json({ error: 'zone_id not found in this workspace' });
     }
     updates.push('zone_id = ?'); values.push(zone_id || null);
@@ -516,13 +522,13 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
     if (!newContentId && !newWidgetId) return res.status(400).json({ error: 'content_id or widget_id required to replace' });
     if (newContentId && newWidgetId) return res.status(400).json({ error: 'provide only one of content_id / widget_id' });
     if (newContentId) {
-      const content = db.prepare('SELECT id, workspace_id FROM content WHERE id = ?').get(newContentId);
+      const content = await db.prepare('SELECT id, workspace_id FROM content WHERE id = ?').get(newContentId);
       if (!content) return res.status(404).json({ error: 'Content not found' });
       if (content.workspace_id && content.workspace_id !== req.playlist.workspace_id) {
         return res.status(403).json({ error: 'Content is not in this playlist\'s workspace' });
       }
     } else {
-      const widget = db.prepare('SELECT id, workspace_id FROM widgets WHERE id = ?').get(newWidgetId);
+      const widget = await db.prepare('SELECT id, workspace_id FROM widgets WHERE id = ?').get(newWidgetId);
       if (!widget) return res.status(404).json({ error: 'Widget not found' });
       if (widget.workspace_id && widget.workspace_id !== req.playlist.workspace_id) {
         return res.status(403).json({ error: 'Widget is not in this playlist\'s workspace' });
@@ -533,13 +539,13 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
   }
 
   if (updates.length > 0) {
-    updates.push("updated_at = strftime('%s','now')");
+    updates.push("updated_at = UNIX_TIMESTAMP()");
     values.push(req.params.itemId);
-    db.prepare(`UPDATE playlist_items SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    markDraft(req.params.id);
+    await db.prepare(`UPDATE playlist_items SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await markDraft(req.params.id);
   }
 
-  const updated = db.prepare(`
+  const updated = await db.prepare(`
     SELECT pi.*,
            COALESCE(c.filename, w.name) as filename,
            c.mime_type, c.filepath, c.thumbnail_path,
@@ -551,43 +557,43 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
     WHERE pi.id = ?
   `).get(req.params.itemId);
   res.json(updated);
-});
+}));
 
 // Delete item
-router.delete('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
-  const item = db.prepare('SELECT * FROM playlist_items WHERE id = ? AND playlist_id = ?')
+router.delete('/:id/items/:itemId', requirePlaylistWrite, asyncHandler(async (req, res) => {
+  const item = await db.prepare('SELECT * FROM playlist_items WHERE id = ? AND playlist_id = ?')
     .get(req.params.itemId, req.params.id);
   if (!item) return res.status(404).json({ error: 'item not found' });
 
-  db.prepare('DELETE FROM playlist_items WHERE id = ?').run(req.params.itemId);
-  markDraft(req.params.id);
+  await db.prepare('DELETE FROM playlist_items WHERE id = ?').run(req.params.itemId);
+  await markDraft(req.params.id);
   res.json({ success: true });
-});
+}));
 
 // #105 duplicate: append a copy of an item (same content/widget + zone + duration)
 // plus its schedule rows (new ids). One transaction so a half-copied item can't exist.
-router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => {
-  const item = db.prepare('SELECT * FROM playlist_items WHERE id = ? AND playlist_id = ?')
+router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, asyncHandler(async (req, res) => {
+  const item = await db.prepare('SELECT * FROM playlist_items WHERE id = ? AND playlist_id = ?')
     .get(req.params.itemId, req.params.id);
   if (!item) return res.status(404).json({ error: 'item not found' });
 
-  const copy = db.transaction(() => {
-    const max = db.prepare('SELECT MAX(sort_order) as m FROM playlist_items WHERE playlist_id = ?').get(req.params.id);
+  const copy = db.transaction(async (tx) => {
+    const max = await tx.prepare('SELECT MAX(sort_order) as m FROM playlist_items WHERE playlist_id = ?').get(req.params.id);
     const order = (max.m || 0) + 1;
-    const result = db.prepare(`
+    const result = await tx.prepare(`
       INSERT INTO playlist_items (playlist_id, content_id, widget_id, zone_id, sort_order, duration_sec)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(req.params.id, item.content_id, item.widget_id, item.zone_id, order, item.duration_sec);
     const newId = result.lastInsertRowid;
-    const scheds = db.prepare('SELECT active_days, start_time, end_time, start_date, end_date, sort_order FROM playlist_item_schedules WHERE playlist_item_id = ?').all(req.params.itemId);
-    const insSched = db.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');
-    for (const s of scheds) insSched.run(uuidv4(), newId, s.active_days, s.start_time, s.end_time, s.start_date, s.end_date, s.sort_order);
+    const scheds = await tx.prepare('SELECT active_days, start_time, end_time, start_date, end_date, sort_order FROM playlist_item_schedules WHERE playlist_item_id = ?').all(req.params.itemId);
+    const insSched = tx.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');
+    for (const s of scheds) await insSched.run(uuidv4(), newId, s.active_days, s.start_time, s.end_time, s.start_date, s.end_date, s.sort_order);
     return newId;
   });
-  const newId = copy();
-  markDraft(req.params.id);
+  const newId = await copy();
+  await markDraft(req.params.id);
 
-  const newItem = db.prepare(`
+  const newItem = await db.prepare(`
     SELECT pi.*,
            COALESCE(c.filename, w.name) as filename,
            c.mime_type, c.filepath, c.thumbnail_path,
@@ -599,24 +605,24 @@ router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => 
     WHERE pi.id = ?
   `).get(newId);
   res.status(201).json(newItem);
-});
+}));
 
 // Reorder items
-router.post('/:id/items/reorder', requirePlaylistWrite, (req, res) => {
+router.post('/:id/items/reorder', requirePlaylistWrite, asyncHandler(async (req, res) => {
   const { order } = req.body;
   if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be an array of item IDs' });
 
-  const updateStmt = db.prepare('UPDATE playlist_items SET sort_order = ? WHERE id = ? AND playlist_id = ?');
-  const transaction = db.transaction(() => {
-    order.forEach((itemId, index) => {
-      updateStmt.run(index, itemId, req.params.id);
-    });
+  const transaction = db.transaction(async (tx) => {
+    const updateStmt = tx.prepare('UPDATE playlist_items SET sort_order = ? WHERE id = ? AND playlist_id = ?');
+    for (let index = 0; index < order.length; index++) {
+      await updateStmt.run(index, order[index], req.params.id);
+    }
   });
-  transaction();
+  await transaction();
 
-  markDraft(req.params.id);
+  await markDraft(req.params.id);
 
-  const items = db.prepare(`
+  const items = await db.prepare(`
     SELECT pi.*,
            COALESCE(c.filename, w.name) as filename,
            c.mime_type, c.filepath, c.thumbnail_path,
@@ -629,23 +635,23 @@ router.post('/:id/items/reorder', requirePlaylistWrite, (req, res) => {
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
   res.json(items);
-});
+}));
 
 // Assign playlist to a device. Phase 2.2k: closes a pre-existing cross-tenant
 // leak. Today checks device.user_id only; a caller with reach into a foreign
 // workspace could assign their own playlist to a device in that workspace
 // (or vice versa). Now: device must be in the playlist's workspace.
-router.post('/:id/assign', requirePlaylistWrite, (req, res) => {
+router.post('/:id/assign', requirePlaylistWrite, asyncHandler(async (req, res) => {
   const { device_id } = req.body;
   if (!device_id) return res.status(400).json({ error: 'device_id required' });
 
-  const device = db.prepare('SELECT id, workspace_id FROM devices WHERE id = ?').get(device_id);
+  const device = await db.prepare('SELECT id, workspace_id FROM devices WHERE id = ?').get(device_id);
   if (!device) return res.status(404).json({ error: 'Device not found' });
   if (device.workspace_id !== req.playlist.workspace_id) {
     return res.status(403).json({ error: 'Device is not in this playlist\'s workspace' });
   }
 
-  db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(req.params.id, device_id);
+  await db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(req.params.id, device_id);
 
   // Push update to device
   try {
@@ -658,7 +664,7 @@ router.post('/:id/assign', requirePlaylistWrite, (req, res) => {
   } catch (e) { /* silent */ }
 
   res.json({ success: true });
-});
+}));
 
 module.exports = router;
 module.exports.publishPlaylist = publishPlaylist; // #73: shared with the agency auto-publish path
