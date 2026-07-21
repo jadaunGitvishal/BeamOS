@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
+const { asyncHandler } = require('../lib/async-handler');
 // Phase 2.2l: workspace-aware access. Drops the previous listVisibleWalls /
 // userCanAccessWall helpers - the admin/team_members branches there were
 // dead code after the Phase 2.1 role rename (no users carry role='admin'
@@ -10,11 +11,11 @@ const { accessContext } = require('../lib/tenancy');
 
 // Load a wall + access context. Returns the wall row or null after sending
 // 403/404. requireWrite=true also denies workspace_viewer.
-function loadWallAccess(req, res, requireWrite) {
-  const wall = db.prepare('SELECT * FROM video_walls WHERE id = ?').get(req.params.id);
+async function loadWallAccess(req, res, requireWrite) {
+  const wall = await db.prepare('SELECT * FROM video_walls WHERE id = ?').get(req.params.id);
   if (!wall) { res.status(404).json({ error: 'Wall not found' }); return null; }
   if (!wall.workspace_id) { res.status(403).json({ error: 'Wall not assigned to a workspace' }); return null; }
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(wall.workspace_id);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(wall.workspace_id);
   const ctx = ws && accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   if (requireWrite && !ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
@@ -25,21 +26,21 @@ function loadWallAccess(req, res, requireWrite) {
   return wall;
 }
 
-function requireWallRead(req, res, next) {
-  if (!loadWallAccess(req, res, false)) return;
+const requireWallRead = asyncHandler(async (req, res, next) => {
+  if (!await loadWallAccess(req, res, false)) return;
   next();
-}
+});
 
-function requireWallWrite(req, res, next) {
-  if (!loadWallAccess(req, res, true)) return;
+const requireWallWrite = asyncHandler(async (req, res, next) => {
+  if (!await loadWallAccess(req, res, true)) return;
   next();
-}
+});
 
 // List walls (with attached devices). Phase 2.2l: scoped to caller's
 // current workspace.
-router.get('/', (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.json([]);
-  const walls = db.prepare('SELECT * FROM video_walls WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId);
+  const walls = await db.prepare('SELECT * FROM video_walls WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId);
 
   const devStmt = db.prepare(`
     SELECT vwd.*, d.name as device_name, d.status as device_status
@@ -48,10 +49,10 @@ router.get('/', (req, res) => {
     WHERE vwd.wall_id = ?
     ORDER BY vwd.grid_row, vwd.grid_col
   `);
-  walls.forEach(w => { w.devices = devStmt.all(w.id); });
+  for (const w of walls) { w.devices = await devStmt.all(w.id); }
 
   res.json(walls);
-});
+}));
 
 // Notify dashboard clients to re-fetch walls/devices. Phase 2.3: scoped to
 // the wall's workspace room so other tenants don't get a stray refresh ping.
@@ -64,10 +65,10 @@ function notifyDashboards(req, workspaceId) {
   } catch (e) { /* silent */ }
 }
 
-function loadWallWithDevices(id) {
-  const wall = db.prepare('SELECT * FROM video_walls WHERE id = ?').get(id);
+async function loadWallWithDevices(id) {
+  const wall = await db.prepare('SELECT * FROM video_walls WHERE id = ?').get(id);
   if (!wall) return null;
-  wall.devices = db.prepare(`
+  wall.devices = await db.prepare(`
     SELECT vwd.*, d.name as device_name, d.status as device_status
     FROM video_wall_devices vwd JOIN devices d ON vwd.device_id = d.id
     WHERE vwd.wall_id = ? ORDER BY vwd.grid_row, vwd.grid_col
@@ -86,22 +87,22 @@ function pushWallPayloadToDevice(req, deviceId) {
   } catch (e) { /* silent */ }
 }
 
-function pushToWallMembers(req, wallId) {
-  const members = db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(wallId);
+async function pushToWallMembers(req, wallId) {
+  const members = await db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(wallId);
   for (const m of members) pushWallPayloadToDevice(req, m.device_id);
 }
 
 // Get wall with devices
-router.get('/:id', requireWallRead, (req, res) => {
-  res.json(loadWallWithDevices(req.wall.id));
-});
+router.get('/:id', requireWallRead, asyncHandler(async (req, res) => {
+  res.json(await loadWallWithDevices(req.wall.id));
+}));
 
 // Create wall. Phase 2.2l: stamps workspace_id; closes pre-existing leak
 // where playlist_id was accepted with NO cross-tenant check (caller could
 // embed a foreign workspace's playlist into a wall they create).
-router.post('/', (req, res) => {
+router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(400).json({ error: 'No active workspace' });
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
   const ctx = ws && accessContext(req.user.id, req.user.role, ws);
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
   if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
@@ -112,7 +113,7 @@ router.post('/', (req, res) => {
   if (!name) return res.status(400).json({ error: 'name required' });
 
   if (playlist_id) {
-    const pl = db.prepare('SELECT workspace_id FROM playlists WHERE id = ?').get(playlist_id);
+    const pl = await db.prepare('SELECT workspace_id FROM playlists WHERE id = ?').get(playlist_id);
     if (!pl) return res.status(404).json({ error: 'Playlist not found' });
     if (pl.workspace_id !== req.workspaceId) {
       return res.status(403).json({ error: 'Playlist is not in this workspace' });
@@ -120,39 +121,39 @@ router.post('/', (req, res) => {
   }
 
   const id = uuidv4();
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO video_walls (id, user_id, workspace_id, name, grid_cols, grid_rows, bezel_h_mm, bezel_v_mm, playlist_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, req.user.id, req.workspaceId, name, grid_cols || 2, grid_rows || 1,
     bezel_h_mm || 0, bezel_v_mm || 0, playlist_id || null);
 
-  const wall = loadWallWithDevices(id);
+  const wall = await loadWallWithDevices(id);
   notifyDashboards(req, req.workspaceId);
   res.status(201).json(wall);
-});
+}));
 
 // Update wall (name, grid, bezels, playlist, leader, sync_mode). Phase 2.2l:
 // closes pre-existing leaks where playlist_id / content_id / leader_device_id
 // were accepted without any cross-tenant check.
-router.put('/:id', requireWallWrite, (req, res) => {
+router.put('/:id', requireWallWrite, asyncHandler(async (req, res) => {
   const wall = req.wall;
 
   if (req.body.playlist_id) {
-    const pl = db.prepare('SELECT workspace_id FROM playlists WHERE id = ?').get(req.body.playlist_id);
+    const pl = await db.prepare('SELECT workspace_id FROM playlists WHERE id = ?').get(req.body.playlist_id);
     if (!pl) return res.status(404).json({ error: 'Playlist not found' });
     if (pl.workspace_id !== wall.workspace_id) {
       return res.status(403).json({ error: 'Playlist is not in this workspace' });
     }
   }
   if (req.body.content_id) {
-    const c = db.prepare('SELECT workspace_id FROM content WHERE id = ?').get(req.body.content_id);
+    const c = await db.prepare('SELECT workspace_id FROM content WHERE id = ?').get(req.body.content_id);
     if (!c) return res.status(404).json({ error: 'Content not found' });
     if (c.workspace_id && c.workspace_id !== wall.workspace_id) {
       return res.status(403).json({ error: 'Content is not in this workspace' });
     }
   }
   if (req.body.leader_device_id) {
-    const d = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(req.body.leader_device_id);
+    const d = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(req.body.leader_device_id);
     if (!d) return res.status(404).json({ error: 'Leader device not found' });
     if (d.workspace_id !== wall.workspace_id) {
       return res.status(403).json({ error: 'Leader device is not in this workspace' });
@@ -169,34 +170,34 @@ router.put('/:id', requireWallWrite, (req, res) => {
   }
 
   if (updates.length > 0) {
-    updates.push("updated_at = strftime('%s','now')");
+    updates.push("updated_at = UNIX_TIMESTAMP()");
     values.push(req.params.id);
-    db.prepare(`UPDATE video_walls SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await db.prepare(`UPDATE video_walls SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
 
   // If playlist changed, propagate to every member device's playlist_id so the
   // existing buildPlaylistPayload picks up the right items.
   if (req.body.playlist_id !== undefined) {
-    const members = db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(req.params.id);
+    const members = await db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(req.params.id);
     const stmt = db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?');
-    for (const m of members) stmt.run(req.body.playlist_id || null, m.device_id);
+    for (const m of members) await stmt.run(req.body.playlist_id || null, m.device_id);
   }
 
-  pushToWallMembers(req, req.params.id);
+  await pushToWallMembers(req, req.params.id);
   notifyDashboards(req, req.wall.workspace_id);
-  res.json(loadWallWithDevices(req.params.id));
-});
+  res.json(await loadWallWithDevices(req.params.id));
+}));
 
 // Delete wall — clear playlists + wall_id on every former member (matches
 // group-dissolve semantics: leaving the wall returns devices to ungrouped).
-router.delete('/:id', requireWallWrite, (req, res) => {
+router.delete('/:id', requireWallWrite, asyncHandler(async (req, res) => {
   const wallWorkspaceId = req.wall.workspace_id; // capture before the DELETE
-  const members = db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(req.params.id);
-  const tx = db.transaction(() => {
-    db.prepare("UPDATE devices SET wall_id = NULL, playlist_id = NULL WHERE wall_id = ?").run(req.params.id);
-    db.prepare('DELETE FROM video_walls WHERE id = ?').run(req.params.id);
+  const members = await db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(req.params.id);
+  const tx = db.transaction(async (t) => {
+    await t.prepare("UPDATE devices SET wall_id = NULL, playlist_id = NULL WHERE wall_id = ?").run(req.params.id);
+    await t.prepare('DELETE FROM video_walls WHERE id = ?').run(req.params.id);
   });
-  tx();
+  await tx();
 
   // Push fresh (now wall-less, playlist-less) payloads to ex-members so they
   // exit wall mode and clear content immediately.
@@ -204,7 +205,7 @@ router.delete('/:id', requireWallWrite, (req, res) => {
   notifyDashboards(req, wallWorkspaceId);
 
   res.json({ success: true });
-});
+}));
 
 // Set device grid positions. Replaces the entire member set.
 // Devices removed lose their playlist (returned to ungrouped); devices added
@@ -214,51 +215,51 @@ router.delete('/:id', requireWallWrite, (req, res) => {
 // effectively only the device.user_id direct-ownership branch was active,
 // missing the workspace dimension. Now: every device must be in the wall's
 // workspace.
-router.put('/:id/devices', requireWallWrite, (req, res) => {
+router.put('/:id/devices', requireWallWrite, asyncHandler(async (req, res) => {
   const { devices } = req.body;
   if (!Array.isArray(devices)) return res.status(400).json({ error: 'devices array required' });
 
   const wall = req.wall;
   for (const d of devices) {
-    const dev = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(d.device_id);
+    const dev = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(d.device_id);
     if (!dev) return res.status(404).json({ error: `Device ${d.device_id} not found` });
     if (dev.workspace_id !== wall.workspace_id) {
       return res.status(403).json({ error: `Device ${d.device_id} is not in this workspace` });
     }
   }
 
-  const previous = db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(req.params.id);
+  const previous = await db.prepare('SELECT device_id FROM video_wall_devices WHERE wall_id = ?').all(req.params.id);
   const previousIds = new Set(previous.map(p => p.device_id));
   const incomingIds = new Set(devices.map(d => d.device_id));
   const removedIds = [...previousIds].filter(id => !incomingIds.has(id));
 
-  const tx = db.transaction(() => {
-    db.prepare('DELETE FROM video_wall_devices WHERE wall_id = ?').run(req.params.id);
-    db.prepare("UPDATE devices SET wall_id = NULL WHERE wall_id = ?").run(req.params.id);
+  const tx = db.transaction(async (t) => {
+    await t.prepare('DELETE FROM video_wall_devices WHERE wall_id = ?').run(req.params.id);
+    await t.prepare("UPDATE devices SET wall_id = NULL WHERE wall_id = ?").run(req.params.id);
 
     // Removed devices: clear playlist (they're returning to ungrouped state).
     for (const id of removedIds) {
-      db.prepare("UPDATE devices SET playlist_id = NULL WHERE id = ?").run(id);
+      await t.prepare("UPDATE devices SET playlist_id = NULL WHERE id = ?").run(id);
     }
 
-    const insertPos = db.prepare(`
+    const insertPos = t.prepare(`
       INSERT INTO video_wall_devices
         (wall_id, device_id, grid_col, grid_row, rotation, canvas_x, canvas_y, canvas_width, canvas_height)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const updateDevice = db.prepare("UPDATE devices SET wall_id = ?, playlist_id = ? WHERE id = ?");
+    const updateDevice = t.prepare("UPDATE devices SET wall_id = ?, playlist_id = ? WHERE id = ?");
 
     for (const d of devices) {
-      insertPos.run(
+      await insertPos.run(
         req.params.id, d.device_id,
         d.grid_col, d.grid_row, d.rotation || 0,
         d.canvas_x ?? null, d.canvas_y ?? null,
         d.canvas_width ?? null, d.canvas_height ?? null,
       );
-      updateDevice.run(req.params.id, wall.playlist_id || null, d.device_id);
+      await updateDevice.run(req.params.id, wall.playlist_id || null, d.device_id);
       // A device joining a wall leaves all of its groups (walls and groups
       // are mutually exclusive concepts in this UX).
-      db.prepare('DELETE FROM device_group_members WHERE device_id = ?').run(d.device_id);
+      await t.prepare('DELETE FROM device_group_members WHERE device_id = ?').run(d.device_id);
     }
 
     if (devices.length > 0) {
@@ -268,45 +269,45 @@ router.put('/:id/devices', requireWallWrite, (req, res) => {
         [...devices].sort((a, b) => ((a.canvas_x ?? 0) + (a.canvas_y ?? 0)) - ((b.canvas_x ?? 0) + (b.canvas_y ?? 0)))[0]
         || devices.find(d => d.grid_col === 0 && d.grid_row === 0)
         || devices[0];
-      db.prepare('UPDATE video_walls SET leader_device_id = ? WHERE id = ?').run(leader.device_id, req.params.id);
+      await t.prepare('UPDATE video_walls SET leader_device_id = ? WHERE id = ?').run(leader.device_id, req.params.id);
     } else {
-      db.prepare('UPDATE video_walls SET leader_device_id = NULL WHERE id = ?').run(req.params.id);
+      await t.prepare('UPDATE video_walls SET leader_device_id = NULL WHERE id = ?').run(req.params.id);
     }
   });
-  tx();
+  await tx();
 
   // Push wall-aware payload to current members, and a wall-less payload to
   // ex-members so they exit wall mode.
   for (const id of removedIds) pushWallPayloadToDevice(req, id);
-  pushToWallMembers(req, req.params.id);
+  await pushToWallMembers(req, req.params.id);
   notifyDashboards(req, req.wall.workspace_id);
 
-  res.json(loadWallWithDevices(req.params.id));
-});
+  res.json(await loadWallWithDevices(req.params.id));
+}));
 
 // Set wall content (legacy single-video path — kept for back-compat).
 // Phase 2.2l: closes pre-existing leak where content_id was accepted with
 // NO cross-tenant check.
-router.put('/:id/content', requireWallWrite, (req, res) => {
+router.put('/:id/content', requireWallWrite, asyncHandler(async (req, res) => {
   const wall = req.wall;
   const { content_id } = req.body;
   if (content_id) {
-    const c = db.prepare('SELECT workspace_id FROM content WHERE id = ?').get(content_id);
+    const c = await db.prepare('SELECT workspace_id FROM content WHERE id = ?').get(content_id);
     if (!c) return res.status(404).json({ error: 'Content not found' });
     if (c.workspace_id && c.workspace_id !== wall.workspace_id) {
       return res.status(403).json({ error: 'Content is not in this workspace' });
     }
   }
-  db.prepare("UPDATE video_walls SET content_id = ?, updated_at = strftime('%s','now') WHERE id = ?")
+  await db.prepare("UPDATE video_walls SET content_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
     .run(content_id || null, req.params.id);
   res.json({ success: true });
-});
+}));
 
 // Get wall config for a specific device (legacy fetch path)
-router.get('/:id/device-config/:deviceId', requireWallRead, (req, res) => {
+router.get('/:id/device-config/:deviceId', requireWallRead, asyncHandler(async (req, res) => {
   const wall = req.wall;
 
-  const position = db.prepare('SELECT * FROM video_wall_devices WHERE wall_id = ? AND device_id = ?')
+  const position = await db.prepare('SELECT * FROM video_wall_devices WHERE wall_id = ? AND device_id = ?')
     .get(req.params.id, req.params.deviceId);
   if (!position) return res.status(404).json({ error: 'Device not in this wall' });
 
@@ -322,6 +323,6 @@ router.get('/:id/device-config/:deviceId', requireWallRead, (req, res) => {
     sync_mode: wall.sync_mode,
     is_leader: wall.leader_device_id === req.params.deviceId,
   });
-});
+}));
 
 module.exports = router;
