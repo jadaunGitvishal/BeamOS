@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
+const { asyncHandler } = require('../lib/async-handler');
 // Phase 2.2m: workspace-aware schedule access. Schedules inherit workspace_id
 // from their target (device or device_group). All polymorphic references
 // (content / widget / layout / playlist) must live in the same workspace as
@@ -34,11 +35,11 @@ function getDeviceSchedulesQuery() {
 }
 
 // Load a schedule + access context, sending 403/404 on failure.
-function loadScheduleAccess(req, res, requireWrite) {
-  const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(req.params.id);
+async function loadScheduleAccess(req, res, requireWrite) {
+  const schedule = await db.prepare('SELECT * FROM schedules WHERE id = ?').get(req.params.id);
   if (!schedule) { res.status(404).json({ error: 'Schedule not found' }); return null; }
   if (!schedule.workspace_id) { res.status(403).json({ error: 'Schedule not assigned to a workspace' }); return null; }
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(schedule.workspace_id);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(schedule.workspace_id);
   const ctx = ws && accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   if (requireWrite && !ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
@@ -49,16 +50,16 @@ function loadScheduleAccess(req, res, requireWrite) {
   return schedule;
 }
 
-function requireScheduleWrite(req, res, next) {
-  if (!loadScheduleAccess(req, res, true)) return;
+const requireScheduleWrite = asyncHandler(async (req, res, next) => {
+  if (!await loadScheduleAccess(req, res, true)) return;
   next();
-}
+});
 
 // Verify caller has at least read access to the given workspace (used when
 // resolving the target's workspace before stamping a new schedule).
-function workspaceAccess(req, workspaceId) {
+async function workspaceAccess(req, workspaceId) {
   if (!workspaceId) return null;
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId);
   if (!ws) return null;
   return accessContext(req.user.id, req.user.role, ws);
 }
@@ -68,8 +69,8 @@ function workspaceAccess(req, workspaceId) {
 // / layout / playlist refs (where workspace_id IS NULL is the platform-template
 // path and is always allowed) and for devices / device_groups (where
 // workspace_id is required - those tables never carry template rows).
-function checkRefInWorkspace(table, id, workspaceId, opts = { allowNullWorkspace: false }) {
-  const row = db.prepare(`SELECT workspace_id FROM ${table} WHERE id = ?`).get(id);
+async function checkRefInWorkspace(table, id, workspaceId, opts = { allowNullWorkspace: false }) {
+  const row = await db.prepare(`SELECT workspace_id FROM ${table} WHERE id = ?`).get(id);
   if (!row) return { status: 404, error: `${table.replace(/_/g, ' ').slice(0, -1)} not found` };
   if (row.workspace_id === workspaceId) return null;
   if (opts.allowNullWorkspace && row.workspace_id == null) return null;
@@ -77,7 +78,7 @@ function checkRefInWorkspace(table, id, workspaceId, opts = { allowNullWorkspace
 }
 
 // List schedules (filterable). Phase 2.2m: workspace-scoped.
-router.get('/', (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.json([]);
   const { device_id, group_id, start, end } = req.query;
   let sql = `SELECT s.*, c.filename as content_name, w.name as widget_name, p.name as playlist_name,
@@ -99,30 +100,30 @@ router.get('/', (req, res) => {
   if (end) { sql += ' AND s.start_time <= ?'; params.push(end); }
 
   sql += ' ORDER BY s.start_time ASC';
-  res.json(db.prepare(sql).all(...params));
-});
+  res.json(await db.prepare(sql).all(...params));
+}));
 
 // Get schedules for a device. Phase 2.2m: device access via workspace_id.
-router.get('/device/:deviceId', (req, res) => {
-  const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(req.params.deviceId);
+router.get('/device/:deviceId', asyncHandler(async (req, res) => {
+  const device = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(req.params.deviceId);
   if (!device) return res.status(404).json({ error: 'Device not found' });
   if (!device.workspace_id) return res.status(403).json({ error: 'Device not assigned to a workspace' });
-  const ctx = workspaceAccess(req, device.workspace_id);
+  const ctx = await workspaceAccess(req, device.workspace_id);
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
 
-  const schedules = db.prepare(getDeviceSchedulesQuery()).all(req.params.deviceId, req.params.deviceId);
+  const schedules = await db.prepare(getDeviceSchedulesQuery()).all(req.params.deviceId, req.params.deviceId);
   res.json(schedules);
-});
+}));
 
 // Expanded week view (resolves recurrences). Phase 2.2m: device access via workspace.
-router.get('/week', (req, res) => {
+router.get('/week', asyncHandler(async (req, res) => {
   const { date, device_id } = req.query;
   if (!device_id) return res.status(400).json({ error: 'device_id required' });
 
-  const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(device_id);
+  const device = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(device_id);
   if (!device) return res.status(404).json({ error: 'Device not found' });
   if (!device.workspace_id) return res.status(403).json({ error: 'Device not assigned to a workspace' });
-  const ctx = workspaceAccess(req, device.workspace_id);
+  const ctx = await workspaceAccess(req, device.workspace_id);
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
 
   const weekStart = date ? new Date(date) : new Date();
@@ -131,20 +132,20 @@ router.get('/week', (req, res) => {
   const weekEnd = new Date(weekStart);
   weekEnd.setDate(weekEnd.getDate() + 7);
 
-  const schedules = db.prepare(getDeviceSchedulesQuery()).all(device_id, device_id);
+  const schedules = await db.prepare(getDeviceSchedulesQuery()).all(device_id, device_id);
   const events = [];
   for (const s of schedules) {
     const expanded = expandSchedule(s, weekStart, weekEnd);
     events.push(...expanded);
   }
   res.json(events);
-});
+}));
 
 // Create schedule. Phase 2.2m: schedule.workspace_id is inherited from the
 // target (device or group). Single workspace lookup also enforces caller's
 // write access. Closes 4 pre-existing leaks: content / widget / layout /
 // playlist were accepted with NO ownership check at all.
-router.post('/', (req, res) => {
+router.post('/', asyncHandler(async (req, res) => {
   const { device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time,
           timezone, recurrence, recurrence_end, priority, color } = req.body;
 
@@ -161,18 +162,18 @@ router.post('/', (req, res) => {
   // Resolve target's workspace_id and verify caller has write access there.
   let targetWorkspaceId = null;
   if (device_id) {
-    const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(device_id);
+    const device = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(device_id);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     if (!device.workspace_id) return res.status(403).json({ error: 'Device not assigned to a workspace' });
     targetWorkspaceId = device.workspace_id;
   }
   if (group_id) {
-    const group = db.prepare('SELECT workspace_id FROM device_groups WHERE id = ?').get(group_id);
+    const group = await db.prepare('SELECT workspace_id FROM device_groups WHERE id = ?').get(group_id);
     if (!group) return res.status(404).json({ error: 'Group not found' });
     if (!group.workspace_id) return res.status(403).json({ error: 'Group not assigned to a workspace' });
     targetWorkspaceId = group.workspace_id;
   }
-  const ctx = workspaceAccess(req, targetWorkspaceId);
+  const ctx = await workspaceAccess(req, targetWorkspaceId);
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
   if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
     return res.status(403).json({ error: 'Read-only access' });
@@ -188,12 +189,12 @@ router.post('/', (req, res) => {
   ];
   for (const [table, id, allowNull] of refChecks) {
     if (!id) continue;
-    const err = checkRefInWorkspace(table, id, targetWorkspaceId, { allowNullWorkspace: allowNull });
+    const err = await checkRefInWorkspace(table, id, targetWorkspaceId, { allowNullWorkspace: allowNull });
     if (err) return res.status(err.status).json({ error: err.error });
   }
 
   const id = uuidv4();
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO schedules (id, user_id, workspace_id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title,
       start_time, end_time, timezone, recurrence, recurrence_end, priority, color)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -201,14 +202,14 @@ router.post('/', (req, res) => {
     layout_id || null, playlist_id || null, title || '', start_time, end_time, timezone || 'UTC',
     recurrence || null, recurrence_end || null, priority || 0, color || '#3B82F6');
 
-  const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
+  const schedule = await db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
   res.status(201).json(schedule);
-});
+}));
 
 // Update schedule. Phase 2.2m: every polymorphic target that is changing must
 // live in the schedule's workspace. Closes the pre-existing leak where
 // verifyOwnership keyed only on user_id (workspace-blind).
-router.put('/:id', requireScheduleWrite, (req, res) => {
+router.put('/:id', requireScheduleWrite, asyncHandler(async (req, res) => {
   const schedule = req.schedule;
 
   const newDeviceId = req.body.device_id !== undefined ? req.body.device_id : schedule.device_id;
@@ -234,7 +235,7 @@ router.put('/:id', requireScheduleWrite, (req, res) => {
   ];
   for (const [table, newVal, oldVal, allowNull] of ownershipChecks) {
     if (newVal === undefined || newVal === oldVal || !newVal) continue;
-    const err = checkRefInWorkspace(table, newVal, schedule.workspace_id, { allowNullWorkspace: allowNull });
+    const err = await checkRefInWorkspace(table, newVal, schedule.workspace_id, { allowNullWorkspace: allowNull });
     if (err) return res.status(err.status).json({ error: err.error });
   }
 
@@ -254,19 +255,19 @@ router.put('/:id', requireScheduleWrite, (req, res) => {
   }
 
   if (updates.length > 0) {
-    updates.push("updated_at = strftime('%s','now')");
+    updates.push("updated_at = UNIX_TIMESTAMP()");
     values.push(req.params.id);
-    db.prepare(`UPDATE schedules SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await db.prepare(`UPDATE schedules SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
 
-  res.json(db.prepare('SELECT * FROM schedules WHERE id = ?').get(req.params.id));
-});
+  res.json(await db.prepare('SELECT * FROM schedules WHERE id = ?').get(req.params.id));
+}));
 
 // Delete schedule
-router.delete('/:id', requireScheduleWrite, (req, res) => {
-  db.prepare('DELETE FROM schedules WHERE id = ?').run(req.params.id);
+router.delete('/:id', requireScheduleWrite, asyncHandler(async (req, res) => {
+  await db.prepare('DELETE FROM schedules WHERE id = ?').run(req.params.id);
   res.json({ success: true });
-});
+}));
 
 // Helper: expand a schedule with recurrence into individual events for a date range
 function expandSchedule(schedule, rangeStart, rangeEnd) {
