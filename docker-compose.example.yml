@@ -1,6 +1,6 @@
 # Example docker-compose for self-hosting ScreenTinker.
 #   cp docker-compose.example.yml docker-compose.yml   # then edit to taste
-# The container serves plain HTTP on 4001 - front it with a TLS-terminating
+# The container serves plain HTTP on 5001 - front it with a TLS-terminating
 # reverse proxy or Cloudflare in production.
 services:
   screentinker:
@@ -9,7 +9,7 @@ services:
     # build: .
     restart: unless-stopped
     ports:
-      - "4001:4001"
+      - "5001:5001"
     environment:
       SELF_HOSTED: "true"            # first registered user becomes admin, no billing
       # JWT_SECRET: "set-a-long-random-string"   # else one is generated under /data/certs
@@ -20,7 +20,7 @@ services:
       # - ./ScreenTinker.apk:/data/ScreenTinker.apk:ro
     healthcheck:
       # image is node:20-slim (no curl) - use node's built-in fetch
-      test: ["CMD", "node", "-e", "fetch('http://localhost:4001/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5001/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">BeamOS</string>
-    <string name="accessibility_description">RemoteDisplay usa acessibilidade para habilitar controles remotos de energia e navegação do sistema.</string>
+    <string name="accessibility_description">BeamOS usa acessibilidade para habilitar controles remotos de energia e navegação do sistema.</string>
     <string name="nothing_scheduled">Nada programado no momento</string>
     <string name="waiting_for_content">Aguardando conteúdo…</string>
 </resources>

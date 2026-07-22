@@ -95,7 +95,7 @@ npm install
 SELF_HOSTED=true npm start
 ```
 
-The server starts on port 4001 (HTTP). If SSL certificates are present in `server/certs/`, it starts on port 3443 (HTTPS) with automatic HTTP-to-HTTPS redirect. Open the URL shown in the startup banner. The first registered user gets full access with all features unlocked.
+The server starts on port (HTTP). If SSL certificates are present in `server/certs/`, it starts on port 3443 (HTTPS) with automatic HTTP-to-HTTPS redirect. Open the URL shown in the startup banner. The first registered user gets full access with all features unlocked.
 
 Schema migrations run automatically on first boot — no manual migration commands at any point in the lifecycle.
 
@@ -105,7 +105,7 @@ Schema migrations run automatically on first boot — no manual migration comman
 
 | Variable               | Description                                                                                                                                                                | Default                 |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| `PORT`                 | HTTP port                                                                                                                                                                  | `4001`                  |
+| `PORT`                 | HTTP port                                                                                                                                                                  | `5001`                  |
 | `HTTPS_PORT`           | HTTPS port (used when SSL certs are present)                                                                                                                               | `3443`                  |
 | `NODE_ENV`             | Runtime env (`production` enables Express production optimizations + stricter error handling)                                                                              | _(none)_                |
 | `SELF_HOSTED`          | First user gets all features unlocked                                                                                                                                      | `false`                 |
@@ -250,7 +250,7 @@ User=screentinker
 WorkingDirectory=/opt/screentinker/server
 ExecStart=/usr/bin/node server.js
 Restart=always
-Environment=PORT=4001
+Environment=PORT=5001
 Environment=NODE_ENV=production
 Environment=SELF_HOSTED=true
 # Lock down an internal / provisioned-only instance (all accounts created by your
@@ -296,7 +296,7 @@ server {
     client_max_body_size 500M;
 
     location / {
-        proxy_pass http://127.0.0.1:4001;
+        proxy_pass http://127.0.0.1:5001;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";

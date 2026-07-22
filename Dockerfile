@@ -3,7 +3,7 @@
 # survives container restarts - mount a volume there. A built ScreenTinker.apk
 # can be mounted at /data/ScreenTinker.apk to enable OTA APK downloads.
 #
-# No TLS in the image: it listens on plain HTTP :4001. Front it with a
+# No TLS in the image: it listens on plain HTTP :5001. Front it with a
 # TLS-terminating reverse proxy / Cloudflare in production.
 
 # --- builder: install production deps (native: better-sqlite3, sharp) ---
@@ -36,5 +36,5 @@ COPY docs/openapi.yaml /app/docs/openapi.yaml
 # database.js requires scripts/migrate-multitenancy at boot
 COPY scripts/ /app/scripts/
 VOLUME ["/data"]
-EXPOSE 4001
+EXPOSE 5001
 CMD ["node", "server.js"]

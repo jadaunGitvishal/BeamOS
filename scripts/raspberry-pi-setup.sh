@@ -19,7 +19,7 @@ set -euo pipefail
 
 # -- Configuration --
 SCREENTINKER_DIR="/opt/screentinker"
-SCREENTINKER_PORT=4001
+SCREENTINKER_PORT=5001
 NODE_MAJOR=20
 LOG_FILE="/var/log/screentinker-setup.log"
 
@@ -547,9 +547,9 @@ echo "CPU Temp:  $(vcgencmd measure_temp 2>/dev/null | cut -d= -f2 || echo 'n/a'
 echo "Disk:      $(df -h /opt/screentinker 2>/dev/null | tail -1 | awk '{print $3 "/" $2 " (" $5 " used)"}')"
 echo "Memory:    $(free -h | awk '/Mem:/ {print $3 " / " $2}')"
 echo ""
-echo "Dashboard: http://${IP}:4001"
-echo "Player:    http://${IP}:4001/player"
-echo "mDNS:      http://$(hostname).local:4001"
+echo "Dashboard: http://${IP}:5001"
+echo "Player:    http://${IP}:5001/player"
+echo "mDNS:      http://$(hostname).local:5001"
 echo ""
 STATUSEOF
     chmod +x /usr/local/bin/screentinker-status
@@ -571,11 +571,11 @@ fi
 # ============================================================
 cat > /etc/motd << 'MOTDEOF'
 
-  ____                        _____          _
- / ___|  ___ _ __ ___  ___  |_   _|_ _ __ | | _____ _ __
- \___ \ / __| '__/ _ \/ _ \   | || | '_ \| |/ / _ \ '__|
-  ___) | (__| | |  __/  __/   | || | | | |   <  __/ |
- |____/ \___|_|  \___|\___|   |_||_|_| |_|_|\_\___|_|
+ ____                          ___  ____
+| __ )  ___  __ _ _ __ ___   / _ \/ ___|
+|  _ \ / _ \/ _` | '_ ` _ \ | | | \___ \
+| |_) |  __/ (_| | | | | | || |_| |___) |
+|____/ \___|\__,_|_| |_| |_| \___/|____/
 
  Open-Source Digital Signage for Any Screen
 

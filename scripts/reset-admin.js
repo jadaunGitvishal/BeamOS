@@ -25,7 +25,7 @@ const token = jwt.sign(
   { expiresIn: "1h" },
 );
 
-const port = config.port || 4001;
+const port = config.port || 5001;
 
 console.log(`
 ╔══════════════════════════════════════════════════╗

@@ -88,7 +88,7 @@ jobs:
 
       # Boot against a fresh SQLite db (clean checkout = no db yet). SELF_HOSTED
       # makes the first user an admin with no billing. No certs present, so the
-      # server listens on plain HTTP at :4001. Background it and wait until it
+      # server listens on plain HTTP at :5001. Background it and wait until it
       # answers.
       - name: Boot server
         working-directory: server
@@ -98,7 +98,7 @@ jobs:
           node server.js > "$RUNNER_TEMP/server.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/server.pid"
           for i in $(seq 1 30); do
-            curl -sf http://localhost:4001/api/status >/dev/null && exit 0
+            curl -sf http://localhost:5001/api/status >/dev/null && exit 0
             sleep 1
           done
           echo "server did not come up within 30s:"; cat "$RUNNER_TEMP/server.log"; exit 1
@@ -107,7 +107,7 @@ jobs:
       # VERSION file - this is what proves the single-source-of-truth wiring.
       - name: Assert /api/status ok and version matches VERSION
         run: |
-          STATUS="$(curl -sf http://localhost:4001/api/status)"
+          STATUS="$(curl -sf http://localhost:5001/api/status)"
           echo "status: $STATUS"
           EXPECTED="$(cat VERSION)"
           REPORTED="$(echo "$STATUS" | jq -r .version)"

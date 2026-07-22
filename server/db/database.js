@@ -9,6 +9,9 @@ const {
   currentBand,
 } = require("../lib/chunked-prune"); // #146 non-blocking sweeps
 
+console.log("MYSQL_USER:", config.mysqlUser);
+console.log("MYSQL_PASSWORD:", config.mysqlPassword);
+
 const poolConfig = {
   host: config.mysqlHost,
   port: config.mysqlPort,
@@ -44,7 +47,10 @@ function makeHandle(queryable) {
           const [result] = await queryable.query(sql, params);
           // Field names match better-sqlite3's RunResult so `.changes` / `.lastInsertRowid`
           // call sites keep working unchanged.
-          return { changes: result.affectedRows, lastInsertRowid: result.insertId };
+          return {
+            changes: result.affectedRows,
+            lastInsertRowid: result.insertId,
+          };
         },
       };
     },
@@ -155,7 +161,9 @@ async function snapshotDatabase(label) {
       { env: { ...process.env, MYSQL_PWD: config.mysqlPassword } },
       (err) => {
         if (err) {
-          console.error(`[snapshot] mysqldump failed (continuing anyway): ${err.message}`);
+          console.error(
+            `[snapshot] mysqldump failed (continuing anyway): ${err.message}`,
+          );
         } else {
           console.log(`[snapshot] pre-migration backup written: ${outPath}`);
         }
@@ -240,7 +248,9 @@ async function initDb() {
   await appSettings.__reload();
 
   _initialized = true;
-  console.log(`[db] MySQL ready (${config.mysqlHost}:${config.mysqlPort}/${config.mysqlDatabase})`);
+  console.log(
+    `[db] MySQL ready (${config.mysqlHost}:${config.mysqlPort}/${config.mysqlDatabase})`,
+  );
   return db;
 }
 
