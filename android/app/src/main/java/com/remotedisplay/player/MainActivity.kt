@@ -88,16 +88,9 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("remote_display", MODE_PRIVATE)
 
         // Show setup wizard if not completed yet
-        if (!prefs.getBoolean("setup_complete", false)) {
-            // Auto-mark complete if accessibility is already enabled (existing install)
-            if (isAccessibilityEnabled()) {
-                prefs.edit().putBoolean("setup_complete", true).apply()
-            } else {
-                startActivity(Intent(this, SetupActivity::class.java))
-                finish()
-                return
-            }
-        }
+        // Setup wizard permanently disabled for BeamOS - remote control features
+        // are intentionally not used, so no permissions need to be requested here.
+        prefs.edit().putBoolean("setup_complete", true).apply()
 
         // Check provisioning BEFORE inflating the heavy media layout
         if (!config.isProvisioned || !config.isPaired) {
