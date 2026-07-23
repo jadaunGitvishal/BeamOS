@@ -71,7 +71,7 @@ jobs:
         working-directory: android
         run: ./gradlew :app:testDebugUnitTest --no-daemon
 
- smoke:
+  smoke:
     name: Boot smoke + version check
     runs-on: ubuntu-latest
     services:
