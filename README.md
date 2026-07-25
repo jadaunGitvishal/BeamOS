@@ -247,170 +247,113 @@ server {
 
 **Database:** BeamOS runs on MySQL. For a one-off snapshot:
 
-The SQLite database is at `server/db/remote_display.db` and uploaded content is in
-`server/uploads/`. For a one-off DB copy (safe while the server runs):
+mysqldump --single-transaction -u beamos_user -p beamos > backup.sql
 
-```bash
-sqlite3 server/db/remote_display.db ".backup /path/to/backup.db"
-```
+To restore:
 
-**Recommended: nightly automated backups** via `scripts/backup.sh`. It takes an
-atomic DB snapshot plus a hard-linked, point-in-time copy of your content (durable
-images/videos; ephemeral per-device screenshots are excluded), with daily + monthly
-retention and an error log. Add a cron entry:
+mysql -u beamos_user -p beamos < backup.sql
 
-```bash
-# as root (or your service user) — adjust the path to your install
-0 3 * * * /opt/screentinker/scripts/backup.sh
-```
 
-Override defaults with env vars if your layout differs:
-`SCREENTINKER_DIR` (default `/opt/screentinker`), `BACKUP_DIR`, `DB`, `UPLOADS`,
-`DAILY_KEEP` (7), `MONTHLY_KEEP` (12), `DB_KEEP_DAYS` (30). Backups land in
-`$BACKUP_DIR` (`remote_display-<ts>.db`, `content-latest/`, `content-<ts>/`,
-`content-monthly-<YYYYMM>/`) and each run appends to `$BACKUP_DIR/backup.log`.
+**Uploaded content** lives in `server/uploads/` — back this up separately (e.g. `rsync` or a scheduled copy).
 
-### Admin Recovery
+Recommend automating both via cron for nightly backups.
 
-Locked out? Run this on the server to get a temporary admin token (1 hour):
+## Admin Recovery
 
-```bash
+Locked out? Run this on the server:
+
 node scripts/reset-admin.js
-```
+
+
+To create the very first platform_admin account directly (bypassing the public registration form entirely — the recommended way to bootstrap a production instance):
+
+node scripts/create-platform-admin.js <email> <name> <password>
+
 
 ### Building the Android APK
 
-The Android player app is in the `android/` directory. To build it:
-
-```bash
 cd android
-
-# Set your keystore credentials (or generate a new keystore)
 export KEYSTORE_PASSWORD=your_password
 export KEY_ALIAS=your_alias
 export KEY_PASSWORD=your_password
-
-# Build the APK
 ./gradlew assembleDebug
-```
 
-The APK will be at `android/app/build/outputs/apk/debug/app-debug.apk`. Copy it to `server/` as `ScreenTinker.apk` to serve it from `/download/apk`:
+cp android/app/build/outputs/apk/debug/app-debug.apk BeamOS.apk
 
-```bash
-cp android/app/build/outputs/apk/debug/app-debug.apk ScreenTinker.apk
-```
+Requirements: Java 17+, Android SDK (API 34).
 
-> **Release builds & MDM signage (#81):** `./gradlew assembleRelease` is automatically
-> re-signed to carry a **v1 (JAR) signature alongside v2/v3** (the `resignReleaseV1` task in
-> `app/build.gradle.kts`). At `minSdk 26` the Gradle plugin omits v1, and some MDM-managed
-> commercial displays (e.g. MAXHUB/Pivot) **strip a v2-only APK on reboot** — screens that
-> power-cycle nightly then lose the app. v1+v2+v3 installs everywhere from API 19 to the
-> latest Android. (`enableV1Signing = true` alone does not work at minSdk ≥ 24.)
+## Device Setup
 
-To generate a new signing keystore:
-
-```bash
-keytool -genkey -v -keystore android/release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias your_alias
-```
-
-**Requirements:** Java 17+, Android SDK (API 34).
-
-### Device Setup
-
-1. Register at your ScreenTinker instance
+1. Register at your BeamOS instance
 2. Go to **Displays** and click **Add Display**
-3. Install the ScreenTinker app on your device:
-   - **Android TV / tablets**: Download the APK from your instance (`/download/apk`) or build it from source (see above)
-   - **Raspberry Pi**: `curl -sSL https://your-instance/scripts/raspberry-pi-setup.sh | bash`
-   - **Debian 13 (headless)**: `curl -sSL https://your-instance/scripts/debian-13-setup.sh | sudo bash`
-   - **Windows**: Run the setup script from `scripts/windows-setup.bat`
-   - **Samsung Tizen TV / signage**: point the TV's URL Launcher (or browser) at `https://your-instance/player` - no signing needed. For an installed native app, see [tizen/README.md](tizen/README.md)
-   - **Any browser**: Open `https://your-instance/player` in kiosk/fullscreen mode
+3. Install the BeamOS app on your device:
+   - **Android TV / tablets:** Download the APK from your instance (`/download/apk`) or build it from source
+   - **Raspberry Pi:** `curl -sSL https://your-instance/scripts/raspberry-pi-setup.sh | sudo bash`
+   - **Windows:** Run `scripts/windows-setup.bat`
+   - **Samsung Tizen TV:** point the TV's URL Launcher at `https://your-instance/player`
+   - **Any browser:** open `https://your-instance/player` in fullscreen mode
 4. Enter the pairing code shown on the device
 
-> **Troubleshooting a player** (stuck on "Connecting to server", re-pointing a
-> device to a different server, or connecting adb over Wi-Fi): see
-> [docs/android-troubleshooting.md](docs/android-troubleshooting.md).
+## For Developers
 
-### For Developers
-
-Working on ScreenTinker itself:
-
-```bash
-git clone https://github.com/screentinker/screentinker.git
-cd screentinker/server
+git clone https://github.com/jadaunGitvishal/BeamOS.git
+cd BeamOS/server
 npm install
-npm start          # starts in dev with --env-file-if-exists=.env
-# or:
-npm run dev        # same as start, plus --watch for auto-restart
-```
+npm start
 
-**`.env` file (gitignored):** create `server/.env` for local configuration. Anything documented in the env var tables above works. Common starting set:
+or:
 
-```
+npm run dev # auto-restart on changes
+
+
+Create `server/.env` for local configuration:
+
 SELF_HOSTED=true
+MYSQL_HOST=localhost
+MYSQL_USER=beamos_user
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=beamos
 APP_URL=https://localhost:3443
-# Optional: Microsoft Graph email config for testing real delivery
-# GRAPH_TENANT_ID=...
-# GRAPH_CLIENT_ID=...
-# GRAPH_CLIENT_SECRET=...
-# GRAPH_SENDER_EMAIL=you@yourcompany.com
-# Optional: dev safety - only let these recipient emails through to Graph
-# GRAPH_DEV_RESTRICT_TO=you@yourcompany.com,colleague@yourcompany.com
-```
 
-**No M365 access?** That's fine. With `GRAPH_*` env vars unset, `sendEmail()` short-circuits and logs `[EMAIL] not configured - would send to ...` to stdout. Everything else runs normally; only outbound email is suppressed. Useful for backend work that touches the email path without setting up an Azure app.
-
-**Running against a fresh prod DB clone?** Set `GRAPH_DEV_RESTRICT_TO=your-email@example.com` to keep accidental sends from reaching real users in the cloned database. Sends to anyone outside the list are logged but never posted to Graph.
-
-**Reporting issues:** [GitHub Issues](https://github.com/screentinker/screentinker/issues) for bugs and feature requests, or drop into [Discord](https://discord.gg/utTdsrqq4Z) for quick questions and feedback.
-
-**Contributions welcome.** Fork → branch → PR. There are no formal style guides yet beyond what you can pick up from reading the existing code. Tests aren't required but smoke-test against your local server before opening a PR.
 
 ## Project Structure
 
-```
-server/           Node.js/Express backend
-  config.js       Configuration and environment variables
-  server.js       Main entry point
-  db/             SQLite database, schema, and migrations
-  routes/         API route handlers (devices, playlists, groups, schedules, etc.)
-  middleware/     Auth (JWT + device tokens), rate limiting, file upload, sanitization
-  services/       Background services (heartbeat, scheduler, alerts, activity logging)
-  ws/             WebSocket handlers (device namespace + dashboard namespace)
-  player/         Web-based display player
-frontend/         Static SPA dashboard
-  js/views/       View components (dashboard, playlists, groups, schedules, etc.)
-  js/utils.js     Shared utilities (HTML escaping)
-  css/            Stylesheets
-  legal/          Terms, privacy, licenses
-android/          Android TV/tablet player app (Kotlin, ExoPlayer)
-scripts/          Device setup scripts + admin recovery
-```
+server/ Node.js/Express backend
+config.js Configuration and environment variables
+server.js Main entry point
+db/ MySQL connection pool, schema, and migrations
+routes/ API route handlers
+middleware/ Auth (JWT + device tokens), rate limiting, file upload
+services/ Background services (heartbeat, scheduler, alerts, activity logging)
+ws/ WebSocket handlers (device namespace + dashboard namespace)
+player/ Web-based display player
+frontend/ Static SPA dashboard
+js/views/ View components
+js/utils.js Shared utilities
+css/ Stylesheets
+android/ Android TV/tablet player app (Kotlin, ExoPlayer)
+scripts/ Device setup scripts + admin recovery
 
 ## Tech Stack
 
-- **Backend:** Node.js 20.6+, Express, Socket.IO, SQLite (better-sqlite3)
-- **Frontend:** Vanilla JS SPA (no framework, no build step), ES modules, Service Worker for offline support
+- **Backend:** Node.js 20.6+, Express, Socket.IO, MySQL (mysql2)
+- **Frontend:** Vanilla JS SPA, ES modules, Service Worker for offline support
 - **Android:** Kotlin, ExoPlayer, Socket.IO client
 - **Auth:** JWT with bcrypt, Google/Microsoft OAuth (optional)
-- **Email:** Microsoft Graph via `@azure/msal-node` client-credentials (optional)
+- **Email:** Microsoft Graph via `@azure/msal-node` (optional)
 - **Payments:** Stripe (optional)
-- **Data model:** multi-tenant — organizations contain workspaces contain resources; six-level role hierarchy gated server-side at every API route
-
-## Support
-
-ScreenTinker is built and maintained by one developer. If the project is useful to you and you want to support continued development:
-
-- **[Donate via Wise](https://wise.com/pay/business/bytetinkerllc?utm_source=quick_pay)** — directly help fund continued development (ByteTinker LLC)
-- Star the repo on GitHub
-- Open [issues](https://github.com/screentinker/screentinker/issues) with feedback or bug reports
-- Drop into the [Discord](https://discord.gg/utTdsrqq4Z) and say hi
-- Contribute back if you've extended something useful
-
-GitHub Sponsors integration is also planned. Direct contact: [dan@bytetinker.net](mailto:dan@bytetinker.net) or via Discord.
+- **Data model:** multi-tenant — organizations contain workspaces contain resources
 
 ## License
 
-[MIT](LICENSE)
+MIT
+
+Step 5 — Push it:
+
+git add .
+git commit -m "Rewrite README for BeamOS with accurate MySQL documentation"
+git push
+
+
+
 ````
