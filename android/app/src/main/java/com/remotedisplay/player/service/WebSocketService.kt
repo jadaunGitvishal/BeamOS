@@ -12,8 +12,11 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.remotedisplay.player.MainActivity
 import com.remotedisplay.player.RemoteDisplayApp
+import com.remotedisplay.player.data.PlayEventQueue
+import com.remotedisplay.player.data.PlayEventRecord
 import com.remotedisplay.player.data.ServerConfig
 import com.remotedisplay.player.telemetry.DeviceInfo
+import io.socket.client.Ack
 import io.socket.client.IO
 import io.socket.client.Socket
 import org.json.JSONObject
@@ -31,6 +34,9 @@ class WebSocketService : Service() {
     private var reopenRunnable: Runnable? = null
     private lateinit var config: ServerConfig
     private lateinit var deviceInfo: DeviceInfo
+    // Same underlying SQLite file as MainActivity's instance (data/PlayEventQueue.kt) - this
+    // one is only ever used to flush (read + delete), MainActivity's is what enqueues.
+    private lateinit var playEventQueue: PlayEventQueue
     private val handler = Handler(Looper.getMainLooper())
     private var heartbeatRunnable: Runnable? = null
     private val binder = LocalBinder()
@@ -71,6 +77,7 @@ class WebSocketService : Service() {
         super.onCreate()
         config = ServerConfig(this)
         deviceInfo = DeviceInfo(this)
+        playEventQueue = PlayEventQueue(this)
         // #5: claim ONLY the mediaPlayback FGS type. The 2-arg startForeground
         // claims every manifest-declared type, and on Android 14+ claiming
         // mediaProjection without a consent token throws and kills the service at
@@ -191,6 +198,8 @@ class WebSocketService : Service() {
                     Log.i("WebSocketService", "Registered as: $newDeviceId")
                     handler.post { try { onRegistered?.invoke(newDeviceId) } catch (e: Throwable) { Log.e("WebSocketService", "onRegistered cb: ${e.message}") } }
                     startHeartbeat()
+                    // Reconnect: drain any proof-of-play events queued while we were offline.
+                    flushPendingPlayEvents()
                 }
 
                 safeOn("device:unpaired") {
@@ -409,9 +418,12 @@ class WebSocketService : Service() {
             override fun run() {
                 sendHeartbeat()
                 heartbeatCount++
-                // Every 4th heartbeat (60s), request a fresh playlist
+                // Every 4th heartbeat (60s): request a fresh playlist, and re-check for any
+                // proof-of-play events still unacked (covers an ack that got lost while the
+                // socket otherwise looked fine, so device:registered's flush never re-fires).
                 if (heartbeatCount % 4 == 0) {
                     requestPlaylistRefresh()
+                    flushPendingPlayEvents()
                 }
                 handler.postDelayed(this, 15000) // Every 15 seconds
             }
@@ -616,6 +628,42 @@ class WebSocketService : Service() {
                 put("ota_attempts", config.otaAttempts)
             })
         } catch (e: Throwable) { Log.w("WebSocketService", "sendOtaStatus: ${e.message}") }
+    }
+
+    // Proof-of-play (offline-resilient). MainActivity writes every play_start/play_end to
+    // PlayEventQueue BEFORE calling this — this only ever tries to drain what's already
+    // durably queued, and never deletes a row itself except via the ack in sendOne(). Only the
+    // video-wall leader (or non-walled players) ever enqueue in the first place — that gate
+    // lives in PlaylistController, not here.
+    fun flushPendingPlayEvents() {
+        if (socket?.connected() != true) return
+        try {
+            playEventQueue.getPending().forEach { sendOne(it) }
+        } catch (e: Throwable) { Log.w("WebSocketService", "flushPendingPlayEvents: ${e.message}") }
+    }
+
+    private fun sendOne(rec: PlayEventRecord) {
+        if (socket?.connected() != true) return
+        try {
+            val data = JSONObject().apply {
+                put("device_id", config.deviceId)
+                put("event", rec.eventType)
+                put("session_id", rec.sessionId)
+                put("content_id", rec.contentId ?: JSONObject.NULL)
+                put("content_name", rec.contentName)
+                put("started_at", rec.startedAtMs)
+                if (rec.eventType == "play_start") {
+                    put("duration_sec", rec.durationSec ?: JSONObject.NULL)
+                } else {
+                    put("ended_at", rec.endedAtMs ?: rec.startedAtMs)
+                    put("completed", rec.completed ?: true)
+                }
+            }
+            socket?.emit("device:play-event", data, Ack { args ->
+                val ok = (args.firstOrNull() as? JSONObject)?.optBoolean("ok", false) ?: false
+                if (ok) playEventQueue.markAcked(rec.sessionId, rec.eventType)
+            })
+        } catch (e: Throwable) { Log.w("WebSocketService", "sendOne(${rec.eventType}): ${e.message}") }
     }
 
     fun sendPlaybackState(contentId: String, positionSec: Float) {

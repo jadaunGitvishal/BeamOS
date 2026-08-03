@@ -537,9 +537,14 @@ CREATE TABLE IF NOT EXISTS play_logs (
     completed       TINYINT(1) NOT NULL DEFAULT 0,
     trigger_type    VARCHAR(50) DEFAULT 'playlist',
     created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    -- Client-generated id shared by a play_start/play_end pair. Lets offline-queued
+    -- events be retried/replayed in any order without double-inserting (see
+    -- device:play-event in ws/deviceSocket.js). NULL for pre-offline-queue clients.
+    session_id      VARCHAR(64) NULL,
     FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
     FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE SET NULL,
-    FOREIGN KEY (widget_id) REFERENCES widgets(id) ON DELETE SET NULL
+    FOREIGN KEY (widget_id) REFERENCES widgets(id) ON DELETE SET NULL,
+    UNIQUE KEY uniq_play_logs_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE INDEX idx_play_logs_device ON play_logs(device_id, started_at DESC);

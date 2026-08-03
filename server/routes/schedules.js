@@ -40,7 +40,7 @@ async function loadScheduleAccess(req, res, requireWrite) {
   if (!schedule) { res.status(404).json({ error: 'Schedule not found' }); return null; }
   if (!schedule.workspace_id) { res.status(403).json({ error: 'Schedule not assigned to a workspace' }); return null; }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(schedule.workspace_id);
-  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   if (requireWrite && !ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
     res.status(403).json({ error: 'Read-only access' }); return null;

@@ -22,6 +22,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.ui.PlayerView
 import com.remotedisplay.player.data.ContentCache
+import com.remotedisplay.player.data.PlayEventQueue
 import com.remotedisplay.player.data.ServerConfig
 import com.remotedisplay.player.player.MediaPlayerManager
 import com.remotedisplay.player.player.PlaylistController
@@ -40,6 +41,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var config: ServerConfig
     private lateinit var contentCache: ContentCache
+    private lateinit var playEventQueue: PlayEventQueue
     private lateinit var screenshotCapture: ScreenshotCapture
     private lateinit var touchInjector: TouchInjector
 
@@ -119,6 +121,11 @@ class MainActivity : AppCompatActivity() {
         contentCache = ContentCache(this)
         screenshotCapture = ScreenshotCapture()
         touchInjector = TouchInjector()
+        // Constructed here (not just in WebSocketService) so a play event that happens before
+        // the service is bound - e.g. cached-playlist playback starting right below, before
+        // bindService() further down this method - still gets durably queued. Both instances
+        // point at the same underlying SQLite file.
+        playEventQueue = PlayEventQueue(this)
 
         playerView = findViewById(R.id.playerView)
         imageView = findViewById(R.id.imageView)
@@ -164,7 +171,19 @@ class MainActivity : AppCompatActivity() {
             // #74/#75: clear the last frame when going idle (else a now-filtered item lingers on screen)
             onPlaylistEmpty = { if (::mediaPlayer.isInitialized) mediaPlayer.stop(); showStatus(getString(R.string.waiting_for_content)) },
             onRequestRefresh = { wsService?.requestPlaylistRefresh() },
-            onNothingScheduled = { if (::mediaPlayer.isInitialized) mediaPlayer.stop(); showStatus(getString(R.string.nothing_scheduled)) }
+            onNothingScheduled = { if (::mediaPlayer.isInitialized) mediaPlayer.stop(); showStatus(getString(R.string.nothing_scheduled)) },
+            // Offline-resilient proof-of-play: always persist locally first (works even before
+            // wsService is bound), then opportunistically try to drain the queue. The service's
+            // own reconnect/periodic flush (WebSocketService.flushPendingPlayEvents) is what
+            // guarantees delivery if this particular attempt can't go out right now.
+            onPlayStart = { item, sessionId, startedAtMs ->
+                playEventQueue.enqueuePlayStart(sessionId, item.contentId.ifEmpty { null }, item.filename, item.durationSec, startedAtMs)
+                wsService?.flushPendingPlayEvents()
+            },
+            onPlayEnd = { item, sessionId, startedAtMs, endedAtMs ->
+                playEventQueue.enqueuePlayEnd(sessionId, item.contentId.ifEmpty { null }, item.filename, startedAtMs, endedAtMs)
+                wsService?.flushPendingPlayEvents()
+            }
         )
 
         // Setup media player

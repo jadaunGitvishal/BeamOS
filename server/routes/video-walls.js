@@ -16,7 +16,7 @@ async function loadWallAccess(req, res, requireWrite) {
   if (!wall) { res.status(404).json({ error: 'Wall not found' }); return null; }
   if (!wall.workspace_id) { res.status(403).json({ error: 'Wall not assigned to a workspace' }); return null; }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(wall.workspace_id);
-  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   if (requireWrite && !ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
     res.status(403).json({ error: 'Read-only access' }); return null;
@@ -103,7 +103,7 @@ router.get('/:id', requireWallRead, asyncHandler(async (req, res) => {
 router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(400).json({ error: 'No active workspace' });
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
-  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
   if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
     return res.status(403).json({ error: 'Read-only access' });

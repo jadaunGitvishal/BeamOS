@@ -46,7 +46,7 @@ async function checkLayoutRead(req, res) {
     res.status(403).json({ error: 'Layout not assigned to a workspace' }); return null;
   }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(layout.workspace_id);
-  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   return layout;
 }
@@ -66,7 +66,7 @@ async function checkLayoutWrite(req, res) {
     res.status(403).json({ error: 'Layout not assigned to a workspace' }); return null;
   }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(layout.workspace_id);
-  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
     res.status(403).json({ error: 'Read-only access' }); return null;
@@ -272,7 +272,7 @@ router.put('/device/:deviceId', asyncHandler(async (req, res) => {
   if (!device.workspace_id) return res.status(403).json({ error: 'Device not assigned to a workspace' });
 
   const deviceWs = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
-  const ctx = deviceWs && accessContext(req.user.id, req.user.role, deviceWs);
+  const ctx = deviceWs && await accessContext(req.user.id, req.user.role, deviceWs);
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
   if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
     return res.status(403).json({ error: 'Read-only access' });

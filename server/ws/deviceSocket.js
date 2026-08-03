@@ -41,10 +41,17 @@ const evictedSockets = new Set();
 // with 0-second item durations) fires device:play-event 'play_start' several
 // times per second; unthrottled this once bloated play_logs to ~900k rows
 // (~3 inserts/sec from a single web player). Cap proof-of-play inserts to at
-// most one per device per PLAY_LOG_MIN_GAP_MS. The live dashboard progress
-// event is still forwarded every time, so the UI is unaffected. In-memory only.
+// most one per device per PLAY_LOG_MIN_GAP_MS. Only applies to LIVE events (see
+// PLAY_EVENT_LIVE_WINDOW_MS below) - a backfilled event replayed from a client's
+// offline queue is never spammy (bounded by queue size) and must never be
+// silently dropped, so it always bypasses this throttle. In-memory only.
 const lastPlayLogAt = new Map();
 const PLAY_LOG_MIN_GAP_MS = 2000;
+
+// An event whose client-reported timestamp is within this window of "now" is
+// treated as "live" (throttled + relayed to the dashboard progress bar). Anything
+// older is a backfilled replay from an offline queue - see device:play-event.
+const PLAY_EVENT_LIVE_WINDOW_MS = 15000;
 
 // #142 dedup + #143 per-device rate budget + global loop-lag valve for content-acks
 // all live in one control: lib/content-ack-limiter.js (required above as
@@ -783,27 +790,101 @@ module.exports = function setupDeviceSocket(io) {
         .run(ota_status ?? 'none', ota_target_version ?? null, ota_attempts ?? 0, device_id);
     });
 
-    // Play event logging (proof-of-play)
-    socket.on('device:play-event', async (data) => {
-      if (!requireDeviceAuth()) return;
-      const { device_id, event, content_id, content_name, zone_id, completed, duration_sec } = data;
-      if (device_id !== currentDeviceId) return;
+    // Play event logging (proof-of-play). Offline-resilient: clients persist events locally
+    // first and only delete their local copy once THIS handler acks them (see PlayEventQueue.kt
+    // on Android and the IndexedDB queue in player/index.html) - never just on send, since the
+    // ack itself can be lost in transit. session_id is the client-generated id shared by a
+    // play_start/play_end pair; it's also the idempotency key, so INSERT ... ON DUPLICATE KEY
+    // UPDATE makes replaying either event any number of times, in any order, converge to one
+    // correct row - a queued device doesn't need to guarantee send order. Clients that don't
+    // send session_id (pre-offline-queue builds, during a rolling rollout) fall back to the
+    // original throttle/latest-open-row behavior below.
+    socket.on('device:play-event', async (data, ack) => {
+      const respond = (ok) => { if (typeof ack === 'function') ack({ ok }); };
+      if (!requireDeviceAuth()) return respond(false);
+      const { device_id, event, content_id, content_name, zone_id, completed, duration_sec, session_id, started_at, ended_at } = data || {};
+      if (device_id !== currentDeviceId) return respond(false);
+
       try {
-        if (event === 'play_start') {
-          // Throttle proof-of-play inserts per device so a runaway player
-          // (0-second items) can't flood play_logs. Skipped cycles simply
-          // don't create a row; the dashboard progress event below still fires.
-          const nowMs = Date.now();
-          const lastMs = lastPlayLogAt.get(device_id) || 0;
-          if (nowMs - lastMs >= PLAY_LOG_MIN_GAP_MS) {
-            lastPlayLogAt.set(device_id, nowMs);
+        if (!session_id) {
+          // Legacy path: unchanged from the original always-inserts-at-"now" behavior.
+          if (event === 'play_start') {
+            const nowMs = Date.now();
+            const lastMs = lastPlayLogAt.get(device_id) || 0;
+            if (nowMs - lastMs >= PLAY_LOG_MIN_GAP_MS) {
+              lastPlayLogAt.set(device_id, nowMs);
+              await db.prepare(`
+                INSERT INTO play_logs (device_id, content_id, zone_id, content_name, started_at, trigger_type)
+                VALUES (?, ?, ?, ?, UNIX_TIMESTAMP(), 'playlist')
+              `).run(device_id, content_id || null, zone_id || null, content_name || 'Unknown');
+            }
+            await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:playback-progress', {
+              device_id,
+              content_id: content_id || null,
+              content_name: content_name || null,
+              duration_sec: typeof duration_sec === 'number' && duration_sec > 0 ? duration_sec : null,
+              started_at: Date.now(),
+            });
+          } else if (event === 'play_end') {
             await db.prepare(`
-              INSERT INTO play_logs (device_id, content_id, zone_id, content_name, started_at, trigger_type)
-              VALUES (?, ?, ?, ?, UNIX_TIMESTAMP(), 'playlist')
-            `).run(device_id, content_id || null, zone_id || null, content_name || 'Unknown');
+              UPDATE play_logs SET ended_at = UNIX_TIMESTAMP(),
+                duration_sec = UNIX_TIMESTAMP() - started_at,
+                completed = ?
+              WHERE id = (
+                SELECT id FROM (
+                  SELECT id FROM play_logs WHERE device_id = ? AND content_id = ? AND ended_at IS NULL
+                  ORDER BY started_at DESC LIMIT 1
+                ) x
+              )
+            `).run(completed ? 1 : 0, device_id, content_id);
           }
-          // Forward to dashboard so it can render a per-device progress bar.
-          // Server-side timestamp avoids clock-skew between player and dashboard.
+          return respond(true);
+        }
+
+        // session_id path: idempotent, order-independent upsert.
+        const nowMs = Date.now();
+        const startedAtSec = Math.floor((typeof started_at === 'number' ? started_at : nowMs) / 1000);
+        // "Live" = this is (close to) actually happening right now, not a backfilled replay
+        // from an offline queue. Only live play_start writes are throttled/relayed - a replay
+        // is bounded by queue size, never a flood risk, and must never be silently dropped.
+        const isLive = Math.abs(nowMs - (typeof started_at === 'number' ? started_at : nowMs)) < PLAY_EVENT_LIVE_WINDOW_MS;
+
+        const upsert = async (cid) => {
+          if (event === 'play_start') {
+            if (isLive) {
+              const lastMs = lastPlayLogAt.get(device_id) || 0;
+              if (nowMs - lastMs < PLAY_LOG_MIN_GAP_MS) return; // throttled - still ack success
+              lastPlayLogAt.set(device_id, nowMs);
+            }
+            await db.prepare(`
+              INSERT INTO play_logs (device_id, content_id, zone_id, content_name, started_at, trigger_type, session_id)
+              VALUES (?, ?, ?, ?, ?, 'playlist', ?)
+              ON DUPLICATE KEY UPDATE content_name = VALUES(content_name), started_at = VALUES(started_at)
+            `).run(device_id, cid, zone_id || null, content_name || 'Unknown', startedAtSec, session_id);
+          } else if (event === 'play_end') {
+            const endedAtSec = Math.floor((typeof ended_at === 'number' ? ended_at : nowMs) / 1000);
+            const durationSec = Math.max(0, endedAtSec - startedAtSec);
+            await db.prepare(`
+              INSERT INTO play_logs (device_id, content_id, zone_id, content_name, started_at, ended_at, duration_sec, completed, trigger_type, session_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'playlist', ?)
+              ON DUPLICATE KEY UPDATE ended_at = VALUES(ended_at), duration_sec = VALUES(duration_sec), completed = VALUES(completed)
+            `).run(device_id, cid, zone_id || null, content_name || 'Unknown', startedAtSec, endedAtSec, durationSec, completed ? 1 : 0, session_id);
+          }
+        };
+
+        try {
+          await upsert(content_id || null);
+        } catch (err) {
+          // content_id referenced content deleted while the device was offline - retry once
+          // with content_id nulled rather than losing the whole event.
+          if ((err.code === 'ER_NO_REFERENCED_ROW' || err.code === 'ER_NO_REFERENCED_ROW_2') && content_id) {
+            await upsert(null);
+          } else {
+            throw err;
+          }
+        }
+
+        if (event === 'play_start' && isLive) {
           await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:playback-progress', {
             device_id,
             content_id: content_id || null,
@@ -811,21 +892,11 @@ module.exports = function setupDeviceSocket(io) {
             duration_sec: typeof duration_sec === 'number' && duration_sec > 0 ? duration_sec : null,
             started_at: Date.now(),
           });
-        } else if (event === 'play_end') {
-          await db.prepare(`
-            UPDATE play_logs SET ended_at = UNIX_TIMESTAMP(),
-              duration_sec = UNIX_TIMESTAMP() - started_at,
-              completed = ?
-            WHERE id = (
-              SELECT id FROM (
-                SELECT id FROM play_logs WHERE device_id = ? AND content_id = ? AND ended_at IS NULL
-                ORDER BY started_at DESC LIMIT 1
-              ) x
-            )
-          `).run(completed ? 1 : 0, device_id, content_id);
         }
+        respond(true);
       } catch (err) {
         console.error('Play log error:', err.message);
+        respond(false);
       }
     });
 

@@ -9,9 +9,6 @@ const {
   currentBand,
 } = require("../lib/chunked-prune"); // #146 non-blocking sweeps
 
-console.log("MYSQL_USER:", config.mysqlUser);
-console.log("MYSQL_PASSWORD:", config.mysqlPassword);
-
 const poolConfig = {
   host: config.mysqlHost,
   port: config.mysqlPort,

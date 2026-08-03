@@ -681,6 +681,162 @@
         }
       }
 
+      // ==================== Proof-of-play queue ====================
+      // Offline-resilient device:play-event reporting - the same design as Android's
+      // PlayEventQueue.kt, talking to the same server protocol (see the device:play-event
+      // handler in server/ws/deviceSocket.js): every event is written here FIRST, an attempt
+      // to send is made if connected, and the local copy is only deleted once the server acks
+      // that it saved the event - never just on send, so a lost ack or a dead socket can't
+      // silently drop an event. IndexedDB (not localStorage) since a long outage could queue
+      // more than localStorage's ~5MB is comfortable holding.
+      const PLAY_EVENT_DB_NAME = "beamos_play_events";
+      const PLAY_EVENT_STORE = "events";
+      let playEventDbPromise = null;
+      // Used only if IndexedDB itself throws/is unavailable (older embedded WebKit on some
+      // signage hardware) - best-effort, degrades to the old fire-and-forget behavior instead
+      // of crashing the player.
+      let playEventMemoryFallback = null;
+      let playEventMemoryNextId = 0;
+
+      function openPlayEventDb() {
+        if (playEventDbPromise) return playEventDbPromise;
+        playEventDbPromise = new Promise((resolve, reject) => {
+          try {
+            const req = indexedDB.open(PLAY_EVENT_DB_NAME, 1);
+            req.onupgradeneeded = () => {
+              const db = req.result;
+              if (!db.objectStoreNames.contains(PLAY_EVENT_STORE)) {
+                db.createObjectStore(PLAY_EVENT_STORE, {
+                  keyPath: "localId",
+                  autoIncrement: true,
+                });
+              }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          } catch (e) {
+            reject(e);
+          }
+        }).catch((e) => {
+          console.warn(
+            "[play-events] IndexedDB unavailable, falling back to in-memory queue:",
+            e,
+          );
+          playEventMemoryFallback = [];
+          return null;
+        });
+        return playEventDbPromise;
+      }
+
+      // Non-crypto id generator: crypto.randomUUID() requires a secure context, and these
+      // players often run over plain HTTP on a local LAN.
+      function newPlaySessionId() {
+        return Date.now().toString(36) + Math.random().toString(36).slice(2);
+      }
+
+      async function enqueuePlayEvent(rec) {
+        const db = await openPlayEventDb();
+        if (!db) {
+          rec.localId = playEventMemoryNextId++;
+          playEventMemoryFallback.push(rec);
+          return;
+        }
+        try {
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction(PLAY_EVENT_STORE, "readwrite");
+            tx.objectStore(PLAY_EVENT_STORE).add(rec);
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+          });
+        } catch (e) {
+          console.warn("[play-events] enqueue failed:", e);
+        }
+      }
+
+      async function getPendingPlayEvents() {
+        const db = await openPlayEventDb();
+        if (!db) return playEventMemoryFallback ? [...playEventMemoryFallback] : [];
+        return new Promise((resolve) => {
+          const tx = db.transaction(PLAY_EVENT_STORE, "readonly");
+          const req = tx.objectStore(PLAY_EVENT_STORE).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        });
+      }
+
+      async function deletePlayEvent(localId) {
+        const db = await openPlayEventDb();
+        if (!db) {
+          if (playEventMemoryFallback) {
+            playEventMemoryFallback = playEventMemoryFallback.filter(
+              (r) => r.localId !== localId,
+            );
+          }
+          return;
+        }
+        return new Promise((resolve) => {
+          const tx = db.transaction(PLAY_EVENT_STORE, "readwrite");
+          tx.objectStore(PLAY_EVENT_STORE).delete(localId);
+          tx.oncomplete = resolve;
+          tx.onerror = () => resolve();
+        });
+      }
+
+      // Attempts to send one queued record; deletes it locally only once the server acks the
+      // MySQL write. No response (dropped ack, disconnect mid-flight) just leaves it queued -
+      // it'll be retried on the next flushPendingPlayEvents() pass, no separate timeout needed.
+      function sendQueuedPlayEvent(rec) {
+        if (!socket?.connected) return;
+        const payload = {
+          device_id: config.deviceId,
+          event: rec.eventType,
+          session_id: rec.sessionId,
+          content_id: rec.contentId || null,
+          content_name: rec.contentName,
+          started_at: rec.startedAtMs,
+        };
+        if (rec.eventType === "play_start") {
+          payload.duration_sec = rec.durationSec || null;
+        } else {
+          payload.ended_at = rec.endedAtMs;
+          payload.completed = rec.completed !== false;
+        }
+        socket.emit("device:play-event", payload, (resp) => {
+          if (resp?.ok) deletePlayEvent(rec.localId);
+        });
+      }
+
+      // "On reconnect" hook is device:registered; "periodically while connected" is the
+      // heartbeat timer. Both just call this.
+      async function flushPendingPlayEvents() {
+        if (!socket?.connected) return;
+        const pending = await getPendingPlayEvents();
+        pending.forEach(sendQueuedPlayEvent);
+      }
+
+      function recordPlayStart(item, sessionId, startedAtMs) {
+        enqueuePlayEvent({
+          eventType: "play_start",
+          sessionId,
+          contentId: item.content_id || null,
+          contentName: item.filename,
+          durationSec: item.duration_sec || null,
+          startedAtMs,
+        }).then(flushPendingPlayEvents);
+      }
+
+      function recordPlayEnd(item, sessionId, startedAtMs, endedAtMs) {
+        enqueuePlayEvent({
+          eventType: "play_end",
+          sessionId,
+          contentId: item.content_id || null,
+          contentName: item.filename,
+          startedAtMs,
+          endedAtMs,
+          completed: true,
+        }).then(flushPendingPlayEvents);
+      }
+
       // ==================== State ====================
       let socket = null;
       let config = getConfig();
@@ -720,6 +876,8 @@
       let lastWallSync = null;
       let currentVideoEl = null;
       let currentItemStartedAt = 0;
+      // Proof-of-play: id shared by the play_start/play_end pair for the current item.
+      let currentPlaySessionId = null;
       // Followers in a video wall must stay silent — N copies of the same audio
       // slightly out of sync produce a flanged echo across the wall. Only the
       // leader is allowed to make sound. This helper is the single source of
@@ -1234,6 +1392,8 @@
           startHeartbeat();
           startPlaylistRefresh();
           startVersionCheck();
+          // Reconnect: drain any proof-of-play events queued while we were offline.
+          flushPendingPlayEvents();
         });
 
         socket.on("device:paired", (data) => {
@@ -1667,6 +1827,9 @@
               device_utc: Date.now(),
             },
           });
+          // Periodic safety net alongside the reconnect-triggered flush in device:registered -
+          // catches an ack that got lost while the socket otherwise looked fine.
+          flushPendingPlayEvents();
         }, HEARTBEAT_INTERVAL);
       }
 
@@ -2155,16 +2318,12 @@
         );
         currentItemStartedAt = Date.now();
 
-        // Only the leader (or single, non-walled players) records a play_start —
-        // followers would just spam duplicate proof-of-play rows for the same item.
-        if (socket?.connected && (!wallConfig || wallConfig.is_leader)) {
-          socket.emit("device:play-event", {
-            device_id: config.deviceId,
-            event: "play_start",
-            content_id: item.content_id,
-            content_name: item.filename,
-            duration_sec: item.duration_sec || null,
-          });
+        // Only the leader (or single, non-walled players) records proof-of-play — followers
+        // would just spam duplicate rows for the same item. Queued locally regardless of
+        // connection state - recordPlayStart persists first, then tries to send if online.
+        if (!wallConfig || wallConfig.is_leader) {
+          currentPlaySessionId = newPlaySessionId();
+          recordPlayStart(item, currentPlaySessionId, currentItemStartedAt);
         }
 
         renderContent(item);
@@ -2175,15 +2334,15 @@
       }
 
       function nextItem() {
-        // Send play_end for current
-        if (playlist[currentIndex] && socket?.connected) {
-          socket.emit("device:play-event", {
-            device_id: config.deviceId,
-            event: "play_end",
-            content_id: playlist[currentIndex].content_id,
-            content_name: playlist[currentIndex].filename,
-            completed: true,
-          });
+        // Send play_end for the item being left, before the index advances. Same leader gate
+        // as playCurrentItem() - queued locally regardless of connection state.
+        if (playlist[currentIndex] && (!wallConfig || wallConfig.is_leader)) {
+          recordPlayEnd(
+            playlist[currentIndex],
+            currentPlaySessionId || newPlaySessionId(),
+            currentItemStartedAt,
+            Date.now(),
+          );
         }
 
         // #74/#75: advance to the next item whose schedule allows it now (skip

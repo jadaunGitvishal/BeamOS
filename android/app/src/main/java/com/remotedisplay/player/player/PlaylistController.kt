@@ -5,6 +5,7 @@ import android.os.Looper
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 data class PlaylistItem(
     val assignmentId: Int,
@@ -31,7 +32,15 @@ class PlaylistController(
     private val onItemChanged: (PlaylistItem?) -> Unit,
     private val onPlaylistEmpty: () -> Unit,
     private val onRequestRefresh: (() -> Unit)? = null,
-    private val onNothingScheduled: (() -> Unit)? = null
+    private val onNothingScheduled: (() -> Unit)? = null,
+    // Proof-of-play. Only fired when !wallFollower (video wall leader or non-walled), mirroring
+    // the web player's playCurrentItem()/nextItem() emit gates in server/player/index.html —
+    // followers would otherwise spam duplicate play_logs rows for the same item. sessionId ties
+    // a play_start/play_end pair together (the offline-queue idempotency key server-side); the
+    // ms timestamps let the server report the play's actual time even if this is sent much later
+    // from an offline queue instead of "now".
+    private val onPlayStart: ((PlaylistItem, sessionId: String, startedAtMs: Long) -> Unit)? = null,
+    private val onPlayEnd: ((PlaylistItem, sessionId: String, startedAtMs: Long, endedAtMs: Long) -> Unit)? = null
 ) {
     private val items = mutableListOf<PlaylistItem>()
     private var currentIndex = -1
@@ -46,6 +55,8 @@ class PlaylistController(
     private var wallFollower = false
     // Wall-clock at which the current item started playing, for non-video sync position.
     private var itemStartedAt = 0L
+    // Proof-of-play: id shared by the play_start/play_end pair for the current item.
+    private var currentSessionId: String? = null
 
     val isPlaying: Boolean get() = isRunning && currentIndex >= 0
 
@@ -204,6 +215,13 @@ class PlaylistController(
 
     fun next() {
         if (items.isEmpty()) return
+        // Proof-of-play: report the item being left, before the index advances. Must read
+        // currentSessionId/itemStartedAt before playCurrentItem() below overwrites them.
+        if (!wallFollower) {
+            val sessionId = currentSessionId
+            val startedAt = itemStartedAt
+            currentItem?.let { onPlayEnd?.invoke(it, sessionId ?: UUID.randomUUID().toString(), startedAt, System.currentTimeMillis()) }
+        }
         // Request a playlist refresh between plays so new content gets picked up
         onRequestRefresh?.invoke()
         // #74/#75: advance to the next item the schedule allows now; idle if none.
@@ -225,7 +243,10 @@ class PlaylistController(
         cancelRetry()
         val item = currentItem ?: return
         itemStartedAt = System.currentTimeMillis()
+        val sessionId = UUID.randomUUID().toString()
+        currentSessionId = sessionId
         Log.i("PlaylistController", "Playing: ${item.filename} (index $currentIndex)")
+        if (!wallFollower) onPlayStart?.invoke(item, sessionId, itemStartedAt)
         onItemChanged(item)
 
         // For images and widgets, auto-advance after duration. For videos, wait
@@ -239,7 +260,9 @@ class PlaylistController(
     private fun scheduleAdvance(delayMs: Long) {
         cancelAdvance()
         advanceRunnable = Runnable { next() }
-        handler.postDelayed(advanceRunnable!!, delayMs)
+        // Clamp to a safe minimum: a 0/near-0 durationSec would otherwise re-trigger next()
+        // in a tight loop.
+        handler.postDelayed(advanceRunnable!!, delayMs.coerceAtLeast(1000L))
     }
 
     private fun cancelAdvance() {
