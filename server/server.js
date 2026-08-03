@@ -1157,7 +1157,7 @@ async function boot() {
   server.listen(listenPort, "0.0.0.0", () => {
     console.log(`
 ╔══════════════════════════════════════════════════╗
-║       ScreenTinker Server v${VERSION.padEnd(22).slice(0, 22)}║
+║       BeamOS Server v${VERSION.padEnd(22).slice(0, 22)}║
 ║──────────────────────────────────────────────────║
 ║  Dashboard: ${protocol}://localhost:${String(listenPort).padEnd(5)}              ║
 ║  API:       ${protocol}://localhost:${String(listenPort).padEnd(5)}/api          ║
