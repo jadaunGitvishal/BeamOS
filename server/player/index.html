@@ -2169,6 +2169,10 @@
               console.log(
                 "[refresh] media surface lost on no-change refresh — re-attaching current item",
               );
+              // The surface is genuinely gone (or errored) - this IS a real preemption of
+              // the in-progress session even though the content is "unchanged". Close it
+              // out before re-rendering, or its play_logs row orphans forever.
+              endCurrentSession(Date.now());
               playCurrentItem();
             } else if (isPlaying) {
               // #146 fix: unchanged + already playing must LEAVE playback exactly as-is. Clear
@@ -2191,6 +2195,10 @@
         const oldPlaylist = playlist;
         const oldAnchorIdx = currentIndex;
         const oldAnchorId = identityOf(oldPlaylist[oldAnchorIdx]);
+        // Captured BEFORE playlist is reassigned below - endCurrentSession() must close out
+        // THIS item, not whatever ends up sitting at oldAnchorIdx in the new array (which may
+        // be a different item, or not exist at all if the new playlist is shorter).
+        const outgoingItem = oldPlaylist[oldAnchorIdx];
 
         playlist = newItems;
         savePlaylistCache(playlist);
@@ -2236,7 +2244,7 @@
         }
         if (nextIdx === -1) nextIdx = 0;
 
-        startPlaybackAt(nextIdx);
+        startPlaybackAt(nextIdx, outgoingItem);
       }
 
       // #74/#75: per-item schedule gate. No blocks = always on. Evaluated in the
@@ -2280,8 +2288,15 @@
           } else showNothingScheduled();
         }, 30000);
       }
-      function startPlaybackAt(idx) {
+      function startPlaybackAt(idx, outgoingItem) {
         clearTimeout(scheduleRetryTimer);
+        // Close out whatever was playing before jumping to idx. No-op on a genuine cold
+        // start (currentIndex is still -1); closes a real in-progress session when this is
+        // preempting one (e.g. its content vanished from a fresh playlist-update). Callers that
+        // reassign `playlist` before calling this (handlePlaylistUpdate) MUST pass outgoingItem
+        // explicitly - by the time we get here, currentIndex no longer indexes the item that
+        // was actually playing in the (now-replaced) playlist array.
+        endCurrentSession(Date.now(), outgoingItem);
         if (scheduleAllows(playlist[idx])) {
           currentIndex = idx;
           isPlaying = true;
@@ -2333,17 +2348,31 @@
         if (wallConfig?.is_leader) emitWallSync();
       }
 
-      function nextItem() {
-        // Send play_end for the item being left, before the index advances. Same leader gate
-        // as playCurrentItem() - queued locally regardless of connection state.
-        if (playlist[currentIndex] && (!wallConfig || wallConfig.is_leader)) {
+      // Send play_end for the item currently playing (if any). Same leader gate as
+      // playCurrentItem() - queued locally regardless of connection state. Shared by
+      // nextItem() (natural advance / video error) AND by anything that preempts the
+      // current item without going through nextItem() - a playlist-update reattach or a
+      // startPlaybackAt re-anchor. Without this, a preempted session's play_logs row
+      // orphans forever (ended_at stays NULL, completed stays 0) even though the item
+      // was never actually stuck - it just got superseded before it naturally ended.
+      function endCurrentSession(endedAtMs, item) {
+        // `item` lets a caller pin down exactly which item is ending, for cases where
+        // `playlist`/`currentIndex` may already be out of sync by the time this runs
+        // (see startPlaybackAt). Falls back to the live pointer for every other caller.
+        const outgoing = item !== undefined ? item : playlist[currentIndex];
+        if (outgoing && (!wallConfig || wallConfig.is_leader)) {
           recordPlayEnd(
-            playlist[currentIndex],
+            outgoing,
             currentPlaySessionId || newPlaySessionId(),
             currentItemStartedAt,
-            Date.now(),
+            endedAtMs,
           );
         }
+      }
+
+      function nextItem() {
+        // Send play_end for the item being left, before the index advances.
+        endCurrentSession(Date.now());
 
         // #74/#75: advance to the next item whose schedule allows it now (skip
         // filtered items); idle if none are active.
