@@ -37,6 +37,7 @@ module.exports = {
   // connects via a local Unix socket instead of host/port (common on managed
   // MySQL installs) - mysql2 accepts socketPath instead of host/port in that case.
 
+  mysqlHost: process.env.MYSQL_HOST || "localhost",
   mysqlPort: parseInt(process.env.MYSQL_PORT) || 3306,
   mysqlUser: process.env.MYSQL_USER || "beamos_user",
   mysqlPassword: process.env.MYSQL_PASSWORD || "",
