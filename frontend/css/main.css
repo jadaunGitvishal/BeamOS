@@ -308,6 +308,10 @@ body {
   gap: 6px;
 }
 
+#exportBtn {
+  cursor: pointer;
+}
+
 .btn-primary {
   background: var(--accent);
   color: white;

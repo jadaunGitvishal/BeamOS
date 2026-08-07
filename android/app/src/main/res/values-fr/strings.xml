@@ -4,4 +4,5 @@
     <string name="accessibility_description">BeamOS utilise l\'accessibilité pour activer les contrôles d\'alimentation à distance et la navigation système.</string>
     <string name="nothing_scheduled">Rien de programmé pour le moment</string>
     <string name="waiting_for_content">En attente de contenu…</string>
+    <string name="content_unavailable">Contenu indisponible</string>
 </resources>

@@ -4,4 +4,5 @@
     <string name="accessibility_description">BeamOS nutzt die Bedienungshilfen, um Fernsteuerung der Stromzufuhr und Systemnavigation zu ermöglichen.</string>
     <string name="nothing_scheduled">Derzeit ist nichts geplant</string>
     <string name="waiting_for_content">Warte auf Inhalte…</string>
+    <string name="content_unavailable">Inhalt nicht verfügbar</string>
 </resources>

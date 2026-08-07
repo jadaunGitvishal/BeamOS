@@ -13,6 +13,7 @@ import { t } from '../i18n.js';
 import { showToast } from '../components/toast.js';
 import { openInviteMemberModal } from '../components/workspace-members-invite-modal.js';
 import { openAddUserModal } from '../components/workspace-members-add-user-modal.js';
+import { isPlatformAdmin } from '../utils.js';
 
 export async function render(container, workspaceId) {
   container.innerHTML = `
@@ -142,15 +143,35 @@ function renderMemberRow(m, opts = {}) {
     ? `<span class="member-via-org">${t('members.via_org_label')}</span>`
     : (showJoined ? esc(formatDate(m.joined_at)) : '');
 
-  // Role cell: select for direct-member rows when canAdmin, plain text otherwise.
-  const roleCell = (canAdmin && !viaOrg)
+  // Platform-level owners (platform_admin/superadmin) have platform-wide access
+  // that is entirely independent of their workspace_members row (verified via
+  // live testing: editing/removing that row has zero effect on their actual
+  // access). Editing it here is misleading, so their row is always shown as a
+  // static, non-interactive label with no remove action - regardless of the
+  // viewer's canAdmin.
+  const isPlatformOwner = isPlatformAdmin({ role: m.platform_role });
+
+  // Same reasoning for org-level owners/admins (org_owner/org_admin): their
+  // real power lives in organization_members, not this workspace_members row,
+  // so editing the row here is equally misleading. Only applies to direct
+  // rows - via_org rows are already fully locked via the viaOrg branch below.
+  const isOrgLocked = !viaOrg && (m.org_role === 'org_owner' || m.org_role === 'org_admin');
+  const isLocked = isPlatformOwner || isOrgLocked;
+
+  // Role cell: select for direct-member rows when canAdmin (and not locked),
+  // plain text otherwise. Platform takes precedence over org when both apply.
+  const roleCell = (canAdmin && !viaOrg && !isLocked)
     ? `<select class="member-role-select" data-member-id="${esc(m.user_id)}" aria-label="${esc(t('members.col.role'))}">
          ${WORKSPACE_ROLES.map(r => `<option value="${r}"${r === m.role ? ' selected' : ''}>${esc(t('members.role.' + r))}</option>`).join('')}
        </select>`
-    : `<div class="member-role">${esc(t('members.role.' + m.role))}</div>`;
+    : isPlatformOwner
+      ? `<div class="member-role" title="${esc(t('members.platform_role_tooltip'))}">${esc(t('admin.role.' + m.platform_role))}</div>`
+      : isOrgLocked
+        ? `<div class="member-role" title="${esc(t('members.org_role_tooltip'))}">${esc(t('members.role.' + m.org_role))}</div>`
+        : `<div class="member-role">${esc(t('members.role.' + m.role))}</div>`;
 
-  // Actions cell: remove on direct-member rows only when canAdmin.
-  const actionsCell = (canAdmin && !viaOrg)
+  // Actions cell: remove on direct-member rows only when canAdmin and not locked.
+  const actionsCell = (canAdmin && !viaOrg && !isLocked)
     ? `<div class="member-actions">
          <button class="member-action-btn member-action-btn--danger" type="button"
                  data-remove-member="${esc(m.user_id)}"

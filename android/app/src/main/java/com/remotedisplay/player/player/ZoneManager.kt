@@ -12,7 +12,9 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import org.json.JSONArray
@@ -36,7 +38,15 @@ class ZoneManager(
     private val container: FrameLayout,
     private val onAllVideosComplete: () -> Unit
 ) {
+    companion object {
+        private const val ZONE_MAX_CONSECUTIVE_FAILURES = 3
+    }
+
     private val TAG = "ZoneManager"
+    // Crash-loop guard for the single-item (looping) zone retry path, keyed by zone id.
+    // Reset once the zone reaches STATE_READY (repeat-mode-ALL zones rarely hit
+    // STATE_ENDED, so "successfully started" is the best available success signal).
+    private val zoneFailureCounts = mutableMapOf<String, Int>()
     private val handler = Handler(Looper.getMainLooper())
     private val zoneViews = mutableMapOf<String, View>()
     private val zoneExoPlayers = mutableMapOf<String, ExoPlayer>()
@@ -233,13 +243,40 @@ class ZoneManager(
                     useController = false
                     layoutParams = params
                 }
-                val exoPlayer = ExoPlayer.Builder(context).build().apply {
+                val exoPlayer = ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build().apply {
                     setMediaItem(MediaItem.fromUri(src))
                     repeatMode = if (multi) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ALL
                     volume = if (isMuted) 0f else 1f
-                    if (multi) addListener(object : Player.Listener {
+                    addListener(object : Player.Listener {
                         override fun onPlaybackStateChanged(state: Int) {
-                            if (state == Player.STATE_ENDED) handler.post { advance() }
+                            if (state == Player.STATE_ENDED && multi) handler.post { advance() }
+                            if (state == Player.STATE_READY) zoneFailureCounts.remove(zone.id)
+                        }
+
+                        override fun onPlayerError(error: PlaybackException) {
+                            if (multi) {
+                                Log.e(TAG, "Zone '${zone.name}' player error, skipping to next item: ${error.message}", error)
+                                handler.post { advance() }
+                            } else {
+                                // Single-item (looping) zone: nothing to advance to, so normally
+                                // we'd reload the same item - but with zero delay and no cap that
+                                // retries forever (mirrors the PlaylistController crash-loop bug).
+                                // Keep the 2s delay, and give up after
+                                // ZONE_MAX_CONSECUTIVE_FAILURES: blank the zone and back off to a
+                                // longer recheck instead of hot-looping.
+                                val failures = (zoneFailureCounts[zone.id] ?: 0) + 1
+                                zoneFailureCounts[zone.id] = failures
+                                if (failures < ZONE_MAX_CONSECUTIVE_FAILURES) {
+                                    Log.e(TAG, "Zone '${zone.name}' player error ($failures/$ZONE_MAX_CONSECUTIVE_FAILURES), retrying same item: ${error.message}", error)
+                                    scheduleZoneAdvance(zone.id, 2000L) { showZoneItem(zone, assignments, activeIdx, params) }
+                                } else {
+                                    Log.e(TAG, "Zone '${zone.name}' giving up on item after $failures consecutive errors: ${error.message}", error)
+                                    zoneFailureCounts.remove(zone.id)
+                                    zoneViews.remove(zone.id)?.let { container.removeView(it) }
+                                    zoneExoPlayers.remove(zone.id)?.release()
+                                    scheduleZoneAdvance(zone.id, 30_000L) { showZoneItem(zone, assignments, activeIdx, params) }
+                                }
+                            }
                         }
                     })
                     prepare()

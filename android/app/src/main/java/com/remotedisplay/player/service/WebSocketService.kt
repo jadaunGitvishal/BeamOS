@@ -51,6 +51,7 @@ class WebSocketService : Service() {
     var onPaired: ((String, String) -> Unit)? = null
     var onUnpaired: (() -> Unit)? = null
     var onRegistered: ((String) -> Unit)? = null
+    var onConnectionFailed: ((String) -> Unit)? = null
     var onPlaylistUpdate: ((JSONObject) -> Unit)? = null
     var onContentDelete: ((String) -> Unit)? = null
     var onScreenshotRequest: (() -> Unit)? = null
@@ -180,7 +181,9 @@ class WebSocketService : Service() {
                 }
 
                 safeOn(Socket.EVENT_CONNECT_ERROR) { args ->
-                    Log.e("WebSocketService", "Connection error: ${args.firstOrNull()}")
+                    val msg = args.firstOrNull()?.toString() ?: "Unknown connection error"
+                    Log.e("WebSocketService", "Connection error: $msg")
+                    handler.post { try { onConnectionFailed?.invoke(msg) } catch (e: Throwable) { Log.e("WebSocketService", "onConnectionFailed cb: ${e.message}") } }
                 }
 
                 safeOn("device:registered") { args ->
@@ -376,6 +379,8 @@ class WebSocketService : Service() {
             }
         } catch (e: Throwable) {
             Log.e("WebSocketService", "Socket setup error: ${e.message}", e)
+            val msg = e.message ?: "Socket setup failed"
+            handler.post { try { onConnectionFailed?.invoke(msg) } catch (t: Throwable) { Log.e("WebSocketService", "onConnectionFailed cb: ${t.message}") } }
         }
     }
 

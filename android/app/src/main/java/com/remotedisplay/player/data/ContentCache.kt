@@ -26,6 +26,8 @@ class ContentCache(private val context: Context) {
     }
 
     fun downloadContent(serverUrl: String, contentId: String, filename: String): File? {
+        val ext = filename.substringAfterLast('.', "mp4")
+        val file = File(cacheDir, "${contentId}.${ext}")
         try {
             val url = "${serverUrl}/api/content/${contentId}/file"
             val request = Request.Builder().url(url).build()
@@ -33,11 +35,14 @@ class ContentCache(private val context: Context) {
 
             if (!response.isSuccessful) {
                 Log.e("ContentCache", "Download failed: ${response.code}")
+                response.close()
                 return null
             }
 
-            val ext = filename.substringAfterLast('.', "mp4")
-            val file = File(cacheDir, "${contentId}.${ext}")
+            // Content-Length lets us detect a connection that drops mid-transfer -
+            // without it, a truncated large file still has length() > 0 and would be
+            // treated as a permanently valid cache entry by getCachedFile().
+            val expectedLength = response.body?.contentLength()?.takeIf { it >= 0 }
 
             response.body?.byteStream()?.use { input ->
                 FileOutputStream(file).use { output ->
@@ -45,10 +50,17 @@ class ContentCache(private val context: Context) {
                 }
             }
 
+            if (expectedLength != null && file.length() != expectedLength) {
+                Log.e("ContentCache", "Download incomplete for $filename: got ${file.length()} of $expectedLength bytes")
+                file.delete()
+                return null
+            }
+
             Log.i("ContentCache", "Downloaded: $filename -> ${file.absolutePath}")
             return file
         } catch (e: Exception) {
             Log.e("ContentCache", "Download error: ${e.message}")
+            file.delete()
             return null
         }
     }

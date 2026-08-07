@@ -8,7 +8,9 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
@@ -24,9 +26,17 @@ import com.remotedisplay.player.service.WebSocketService
 
 class ProvisioningActivity : AppCompatActivity() {
 
+    companion object {
+        // Tied to WebSocketService's Engine.IO connect timeout (20s) — fires a bit before it
+        // so the UI never waits longer than the socket layer itself would.
+        private const val CONNECT_TIMEOUT_MS = 15000L
+    }
+
     private lateinit var config: ServerConfig
     private var wsService: WebSocketService? = null
     private var bound = false
+    private val timeoutHandler = Handler(Looper.getMainLooper())
+    private var connectTimeoutRunnable: Runnable? = null
 
     private lateinit var serverUrlInput: EditText
     private lateinit var connectBtn: Button
@@ -82,10 +92,13 @@ class ProvisioningActivity : AppCompatActivity() {
         }
 
         connectBtn.setOnClickListener {
-            val url = serverUrlInput.text.toString().trim().trimEnd('/')
+            var url = serverUrlInput.text.toString().trim().trimEnd('/')
             if (url.isEmpty()) {
                 statusText.text = "Please enter the server URL"
                 return@setOnClickListener
+            }
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                url = "http://$url"
             }
             config.serverUrl = url
             connectToServer(url)
@@ -131,11 +144,30 @@ class ProvisioningActivity : AppCompatActivity() {
         statusText.text = "Connecting to server..."
 
         wsService?.connect(url)
+        startConnectTimeout()
+    }
+
+    private fun startConnectTimeout() {
+        cancelConnectTimeout()
+        val runnable = Runnable {
+            connectTimeoutRunnable = null
+            progressBar.visibility = View.GONE
+            statusText.text = "Connection timed out - check the server URL and try again"
+            connectBtn.isEnabled = true
+        }
+        connectTimeoutRunnable = runnable
+        timeoutHandler.postDelayed(runnable, CONNECT_TIMEOUT_MS)
+    }
+
+    private fun cancelConnectTimeout() {
+        connectTimeoutRunnable?.let { timeoutHandler.removeCallbacks(it) }
+        connectTimeoutRunnable = null
     }
 
     private fun setupServiceCallbacks() {
         wsService?.onRegistered = { deviceId ->
             runOnUiThread {
+                cancelConnectTimeout()
                 progressBar.visibility = View.GONE
                 // Hide the server/connect controls so the pairing code has the
                 // whole screen and stays visible on short/landscape phones.
@@ -160,9 +192,19 @@ class ProvisioningActivity : AppCompatActivity() {
                 finish()
             }
         }
+
+        wsService?.onConnectionFailed = { message ->
+            runOnUiThread {
+                cancelConnectTimeout()
+                progressBar.visibility = View.GONE
+                statusText.text = "Could not connect - check the server URL and try again"
+                connectBtn.isEnabled = true
+            }
+        }
     }
 
     override fun onDestroy() {
+        cancelConnectTimeout()
         if (bound) {
             unbindService(connection)
             bound = false

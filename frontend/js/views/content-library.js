@@ -41,7 +41,7 @@ function hydrateAuthImages(root) {
   imgs.forEach(img => _authImgObserver.observe(img));
 }
 
-export function render(container) {
+export async function render(container) {
   container.innerHTML = `
     <div class="page-header">
       <div>
@@ -203,6 +203,18 @@ export function render(container) {
     } catch (err) { showToast(err.message, 'error'); }
   };
 
+  // Resolve edit permission before the first render so the edit button never
+  // flashes visible-then-hidden. Mirrors org-members.js's canAdmin pattern:
+  // read current_workspace_role/acting_as from /me and hide the action for
+  // workspace_viewer. The server (checkContentWrite) is the real gate; this
+  // just keeps the UI honest about what will actually succeed.
+  try {
+    const me = await api.getMe();
+    state.canEdit = !!(me?.acting_as || me?.current_workspace_role !== 'workspace_viewer');
+  } catch {
+    state.canEdit = true;
+  }
+
   loadContent();
 }
 
@@ -211,6 +223,7 @@ export function render(container) {
 const state = {
   currentFolderId: null, // null = root
   folders: [],           // all folders for this user (flat tree)
+  canEdit: true,          // resolved from /auth/me before first load; default fails open (server still enforces)
 };
 
 async function handleFiles(files) {
@@ -419,13 +432,14 @@ async function loadContent() {
           </div>
         </div>
         <div class="content-item-actions">
+          ${state.canEdit ? `
           <button class="btn btn-secondary btn-sm" data-edit-content="${c.id}" title="${t('content.btn_edit')}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
             </svg>
             ${t('content.btn_edit')}
-          </button>
+          </button>` : ''}
           <button class="btn btn-danger btn-sm" data-delete-content="${c.id}" title="${t('content.btn_delete')}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="3 6 5 6 21 6"/>
@@ -462,7 +476,7 @@ async function loadContent() {
 
       // Edit button
       const editBtn = e.target.closest('[data-edit-content]');
-      if (editBtn) {
+      if (editBtn && state.canEdit) {
         const id = editBtn.dataset.editContent;
         const c = content.find(x => x.id === id);
         if (c) showEditModal(c, loadContent);
@@ -583,9 +597,6 @@ function showEditModal(contentItem, onSave) {
     const replaceFile = overlay.querySelector('#editFileReplace')?.files[0];
 
     try {
-      const token = localStorage.getItem('token');
-      const headers = { Authorization: 'Bearer ' + token };
-
       // Update metadata
       const folderId = overlay.querySelector('#editFolderId')?.value || '';
       const updateData = {};
@@ -595,22 +606,23 @@ function showEditModal(contentItem, onSave) {
       if ((contentItem.folder_id || '') !== folderId) updateData.folder_id = folderId || null;
 
       if (Object.keys(updateData).length > 0) {
-        await fetch('/api/content/' + contentItem.id, {
-          method: 'PUT',
-          headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify(updateData)
-        });
+        await api.updateContent(contentItem.id, updateData);
       }
 
       // Replace file if provided
       if (replaceFile) {
+        const token = localStorage.getItem('token');
         const formData = new FormData();
         formData.append('file', replaceFile);
-        await fetch('/api/content/' + contentItem.id + '/replace', {
+        const res = await fetch('/api/content/' + contentItem.id + '/replace', {
           method: 'PUT',
-          headers,
+          headers: { Authorization: 'Bearer ' + token },
           body: formData
         });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: res.statusText }));
+          throw new Error(err.error || 'Request failed');
+        }
       }
 
       overlay.remove();

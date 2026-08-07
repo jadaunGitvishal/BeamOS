@@ -183,6 +183,13 @@ class MainActivity : AppCompatActivity() {
             onPlayEnd = { item, sessionId, startedAtMs, endedAtMs ->
                 playEventQueue.enqueuePlayEnd(sessionId, item.contentId.ifEmpty { null }, item.filename, startedAtMs, endedAtMs)
                 wsService?.flushPendingPlayEvents()
+            },
+            // Consecutive playback errors exhausted the retry cap and there's nothing
+            // else schedule-active to fall back to.
+            onContentUnavailable = { item ->
+                Log.w("MainActivity", "Content unavailable after repeated playback errors: ${item.filename}")
+                if (::mediaPlayer.isInitialized) mediaPlayer.stop()
+                showStatus(getString(R.string.content_unavailable))
             }
         )
 
@@ -193,6 +200,7 @@ class MainActivity : AppCompatActivity() {
             imageView = imageView,
             youtubeWebView = youtubeWebView,
             onVideoComplete = { playlistController.onVideoComplete() },
+            onVideoError = { playlistController.onPlaybackError() },
             onImageError = {
                 Log.w("MainActivity", "Image failed to load, skipping to next item")
                 handler.postDelayed({ playlistController.next() }, 500)

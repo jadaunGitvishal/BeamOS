@@ -40,8 +40,17 @@ class PlaylistController(
     // ms timestamps let the server report the play's actual time even if this is sent much later
     // from an offline queue instead of "now".
     private val onPlayStart: ((PlaylistItem, sessionId: String, startedAtMs: Long) -> Unit)? = null,
-    private val onPlayEnd: ((PlaylistItem, sessionId: String, startedAtMs: Long, endedAtMs: Long) -> Unit)? = null
+    private val onPlayEnd: ((PlaylistItem, sessionId: String, startedAtMs: Long, endedAtMs: Long) -> Unit)? = null,
+    // Fired when an item has failed to play MAX_CONSECUTIVE_FAILURES times in a row and
+    // there is nothing else schedule-active to skip to. Falls back to onNothingScheduled/
+    // onPlaylistEmpty if not supplied.
+    private val onContentUnavailable: ((PlaylistItem) -> Unit)? = null
 ) {
+    companion object {
+        private const val MAX_CONSECUTIVE_FAILURES = 3
+        private const val RETRY_DELAY_MS = 2000L
+    }
+
     private val items = mutableListOf<PlaylistItem>()
     private var currentIndex = -1
     private val handler = Handler(Looper.getMainLooper())
@@ -50,6 +59,9 @@ class PlaylistController(
     // #74/#75: per-item scheduling state
     @Volatile private var effectiveTimezone: String? = null
     private var retryRunnable: Runnable? = null
+    // Crash-loop guard: consecutive playback errors on the current item, keyed by
+    // assignmentId. Reset when the item completes successfully (STATE_ENDED).
+    private val consecutiveFailures = mutableMapOf<Int, Int>()
 
     // Video wall: followers don't self-advance — the leader's wall:sync drives the index.
     private var wallFollower = false
@@ -235,7 +247,58 @@ class PlaylistController(
         // Called when a video finishes naturally. Wall followers don't self-advance —
         // they hold (and loop) the leader's item until a wall:sync changes the index.
         if (wallFollower) return
+        currentItem?.let { consecutiveFailures.remove(it.assignmentId) }
         next()
+    }
+
+    /**
+     * Called when ExoPlayer reports a decode/playback error for the current item
+     * (MediaPlayerManager's onPlayerError). Previously this went straight through
+     * onVideoComplete() -> next() -> playCurrentItem() with zero delay, so an
+     * undecodable file would fail and restart in a tight loop (~1s per attempt, since
+     * that's how long ExoPlayer takes to fail again), spamming play_logs with hundreds
+     * of ~1s "completed" entries. Now: retry the same item after a fixed delay
+     * (mirrors ZoneManager's single-item retry), and after MAX_CONSECUTIVE_FAILURES
+     * give up on it - skip to the next schedule-active item, or show a
+     * content-unavailable state if this is the only playable item.
+     */
+    fun onPlaybackError() {
+        if (wallFollower) return
+        val item = currentItem ?: return
+
+        val failures = (consecutiveFailures[item.assignmentId] ?: 0) + 1
+        consecutiveFailures[item.assignmentId] = failures
+
+        // Report the failed attempt's play_end before deciding what happens next -
+        // mirrors next()'s pre-advance bookkeeping.
+        if (!wallFollower) {
+            val sessionId = currentSessionId
+            val startedAt = itemStartedAt
+            onPlayEnd?.invoke(item, sessionId ?: UUID.randomUUID().toString(), startedAt, System.currentTimeMillis())
+        }
+
+        cancelAdvance()
+        cancelRetry()
+
+        if (failures < MAX_CONSECUTIVE_FAILURES) {
+            Log.w("PlaylistController", "Playback error on ${item.filename} ($failures/$MAX_CONSECUTIVE_FAILURES), retrying in ${RETRY_DELAY_MS}ms")
+            retryRunnable = Runnable { if (isRunning) playCurrentItem() }
+            handler.postDelayed(retryRunnable!!, RETRY_DELAY_MS)
+            return
+        }
+
+        Log.e("PlaylistController", "Giving up on ${item.filename} after $failures consecutive playback errors")
+        consecutiveFailures.remove(item.assignmentId)
+        onRequestRefresh?.invoke()
+        val idx = nextActiveIndex(currentIndex)
+        if (idx < 0 || idx == currentIndex) {
+            // Nothing else schedule-active to fall back to (or this was the only item) -
+            // don't replay the broken item, show an error state instead.
+            showContentUnavailable(item)
+            return
+        }
+        currentIndex = idx
+        playCurrentItem()
     }
 
     private fun playCurrentItem() {
@@ -302,6 +365,23 @@ class PlaylistController(
         cancelRetry()
         retryRunnable = Runnable {
             if (isRunning && items.isNotEmpty()) {
+                val idx = firstActiveIndex()
+                if (idx >= 0) { currentIndex = idx; playCurrentItem() } else showNothingScheduled()
+            }
+        }
+        handler.postDelayed(retryRunnable!!, 30_000L)
+    }
+
+    // MAX_CONSECUTIVE_FAILURES exhausted with nothing else to skip to: show an error
+    // state and recheck periodically (same cadence as showNothingScheduled) in case the
+    // content gets fixed/replaced without the playlist signature changing.
+    private fun showContentUnavailable(item: PlaylistItem) {
+        cancelAdvance()
+        cancelRetry()
+        if (onContentUnavailable != null) onContentUnavailable.invoke(item) else (onNothingScheduled ?: onPlaylistEmpty)()
+        retryRunnable = Runnable {
+            if (isRunning && items.isNotEmpty()) {
+                consecutiveFailures.remove(item.assignmentId)
                 val idx = firstActiveIndex()
                 if (idx >= 0) { currentIndex = idx; playCurrentItem() } else showNothingScheduled()
             }
