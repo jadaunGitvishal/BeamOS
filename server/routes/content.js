@@ -92,6 +92,12 @@ router.get('/folders', asyncHandler(async (req, res) => {
 router.post('/', checkStorageLimit, upload.single('file'), async (req, res) => {
   try {
     if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before uploading.' });
+    const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+    const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
+    if (!ctx) return res.status(403).json({ error: 'Access denied' });
+    if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
+      return res.status(403).json({ error: 'Read-only access' });
+    }
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     // #73: shared ingest - identical processing + insert for dashboard and agency uploads.
@@ -107,6 +113,12 @@ router.post('/', checkStorageLimit, upload.single('file'), async (req, res) => {
 router.post('/remote', checkRemoteUrl, asyncHandler(async (req, res) => {
   try {
     if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before adding remote content.' });
+    const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+    const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
+    if (!ctx) return res.status(403).json({ error: 'Access denied' });
+    if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
+      return res.status(403).json({ error: 'Read-only access' });
+    }
     const { url, name, mime_type } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required' });
     const urlErr = validateRemoteUrl(url);
@@ -133,6 +145,12 @@ router.post('/remote', checkRemoteUrl, asyncHandler(async (req, res) => {
 router.post('/youtube', async (req, res) => {
   try {
     if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before adding YouTube content.' });
+    const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+    const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
+    if (!ctx) return res.status(403).json({ error: 'Access denied' });
+    if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
+      return res.status(403).json({ error: 'Read-only access' });
+    }
     const { url, name } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required' });
 

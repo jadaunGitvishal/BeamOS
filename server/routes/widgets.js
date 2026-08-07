@@ -111,6 +111,12 @@ router.get('/', asyncHandler(async (req, res) => {
 // Create widget in the caller's current workspace.
 router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating widgets.' });
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
+  if (!ctx) return res.status(403).json({ error: 'Access denied' });
+  if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
   const { widget_type, name, config } = req.body;
   if (!widget_type || !name) return res.status(400).json({ error: 'widget_type and name required' });
 

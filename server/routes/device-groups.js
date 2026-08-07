@@ -58,6 +58,12 @@ router.get('/', asyncHandler(async (req, res) => {
 // Create group in the caller's current workspace.
 router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating groups.' });
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
+  if (!ctx) return res.status(403).json({ error: 'Access denied' });
+  if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
   const { name, color } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   if (color && !VALID_COLOR.test(color)) return res.status(400).json({ error: 'invalid color format, use #RRGGBB' });
@@ -182,6 +188,11 @@ router.post('/:id/devices', requireGroupWrite, asyncHandler(async (req, res) => 
 // from the group it just left.
 router.delete('/:id/devices/:deviceId', requireGroupWrite, asyncHandler(async (req, res) => {
   const deviceId = req.params.deviceId;
+  const device = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  if (device.workspace_id !== req.group.workspace_id) {
+    return res.status(403).json({ error: 'Device is not in this group\'s workspace' });
+  }
   await db.prepare('DELETE FROM device_group_members WHERE device_id = ? AND group_id = ?').run(deviceId, req.params.id);
 
   const remaining = await db.prepare(`

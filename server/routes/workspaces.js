@@ -178,20 +178,21 @@ async function listMembers(workspaceId, organizationId) {
   const direct = await db
     .prepare(
       `
-    SELECT u.id AS user_id, u.email, u.name, wm.role, wm.joined_at
+    SELECT u.id AS user_id, u.email, u.name, u.role AS platform_role, wm.role, wm.joined_at, om.role AS org_role
     FROM workspace_members wm
     JOIN users u ON u.id = wm.user_id
+    LEFT JOIN organization_members om ON om.organization_id = ? AND om.user_id = u.id
     WHERE wm.workspace_id = ?
     ORDER BY wm.joined_at ASC
   `,
     )
-    .all(workspaceId);
+    .all(organizationId, workspaceId);
   const directIds = new Set(direct.map((r) => r.user_id));
 
   const viaOrg = await db
     .prepare(
       `
-    SELECT u.id AS user_id, u.email, u.name, om.role, om.joined_at
+    SELECT u.id AS user_id, u.email, u.name, u.role AS platform_role, om.role, om.joined_at
     FROM organization_members om
     JOIN users u ON u.id = om.user_id
     WHERE om.organization_id = ? AND om.role IN ('org_owner', 'org_admin')

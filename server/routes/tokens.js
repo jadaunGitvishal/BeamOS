@@ -34,6 +34,11 @@ router.get('/', asyncHandler(async (req, res) => {
 // Create a token bound to the active workspace. The full secret is returned ONCE.
 router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId || !req.workspace) return res.status(403).json({ error: 'No active workspace' });
+  const ctx = await accessContext(req.user.id, req.user.role, req.workspace);
+  if (!ctx) return res.status(403).json({ error: 'Access denied' });
+  if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
   const name = (req.body.name || '').trim();
   const scope = req.body.scope || 'read';
   if (!name) return res.status(400).json({ error: 'name is required' });

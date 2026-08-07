@@ -6,7 +6,8 @@ const path = require("path");
 const fs = require("fs");
 const config = require("../config");
 const VERSION = require("../version");
-const { PLATFORM_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePlatformAdmin } = require("../middleware/auth");
+const { resolveTenancy } = require("../lib/tenancy");
 const loopLag = require("../services/loop-lag");
 // #146 P3.8: soak observability — internal limiter/maintenance states.
 const flapLimiter = require("../lib/flap-limiter");
@@ -66,23 +67,7 @@ function formatUptime(seconds) {
 // straight file copy of the SQLite file. MySQL has no equivalent single file; this
 // shells out to mysqldump and streams the .sql dump instead (same tool/approach as
 // db/database.js's pre-migration snapshotDatabase()).
-router.get("/backup", asyncHandler(async (req, res) => {
-  const token = req.query.token;
-  if (!token) return res.status(401).json({ error: "Token required" });
-
-  try {
-    const jwt = require("jsonwebtoken");
-    const config = require("../config");
-    const decoded = jwt.verify(token, config.jwtSecret);
-    const user = await db
-      .prepare("SELECT role FROM users WHERE id = ?")
-      .get(decoded.id);
-    if (!user || !PLATFORM_ROLES.includes(user.role))
-      return res.status(403).json({ error: "Platform admin only" });
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
+router.get("/backup", requireAuth, requirePlatformAdmin, asyncHandler(async (req, res) => {
   const { spawn } = require("child_process");
   const dateStr = new Date().toISOString().split("T")[0];
   res.setHeader("Content-Type", "application/sql");
@@ -116,22 +101,12 @@ router.get("/backup", asyncHandler(async (req, res) => {
 }));
 
 // User data export (own data only)
-router.get("/export", asyncHandler(async (req, res) => {
-  const token = req.query.token;
-  if (!token) return res.status(401).json({ error: "Token required" });
-
-  let userId;
-  let workspaceId;
-  try {
-    const jwt = require("jsonwebtoken");
-    const config = require("../config");
-    const decoded = jwt.verify(token, config.jwtSecret);
-    userId = decoded.id;
-    workspaceId = decoded.current_workspace_id || null;
-    if (!userId) return res.status(401).json({ error: "Invalid token" });
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
-  }
+router.get("/export", requireAuth, resolveTenancy, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  // resolveTenancy already re-validates any candidate workspace against live
+  // membership/accessContext (and applies the same first-accessible-workspace
+  // fallback the old manual lookup here used to do) - no need to re-derive it.
+  const workspaceId = req.workspaceId;
 
   const user = await db
     .prepare(
@@ -139,21 +114,6 @@ router.get("/export", asyncHandler(async (req, res) => {
     )
     .get(userId);
   if (!user) return res.status(404).json({ error: "User not found" });
-
-  // Phase 2.2f: export workspace-scoped branding. Fall back to first-accessible
-  // workspace if the JWT didn't carry one.
-  if (!workspaceId) {
-    const w = await db
-      .prepare(
-        `
-      SELECT w.id FROM workspaces w
-      JOIN workspace_members wm ON wm.workspace_id = w.id
-      WHERE wm.user_id = ? ORDER BY wm.joined_at ASC LIMIT 1
-    `,
-      )
-      .get(userId);
-    workspaceId = w?.id || null;
-  }
 
   const devices = await db
     .prepare(
@@ -356,44 +316,18 @@ const importUpload = multer({
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 }); // 2GB max
 
-router.post("/import", importUpload.single("file"), async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer "))
-    return res.status(401).json({ error: "Token required" });
-
-  let userId;
-  let workspaceId;
-  try {
-    const jwt = require("jsonwebtoken");
-    const jwtConfig = require("../config");
-    const decoded = jwt.verify(authHeader.split(" ")[1], jwtConfig.jwtSecret);
-    userId = decoded.id;
-    workspaceId = decoded.current_workspace_id || null;
-    if (!userId) return res.status(401).json({ error: "Invalid token" });
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
-  }
+router.post("/import", requireAuth, resolveTenancy, importUpload.single("file"), async (req, res) => {
+  const userId = req.user.id;
+  // resolveTenancy already re-validates any candidate workspace against live
+  // membership/accessContext (and applies the same first-accessible-workspace
+  // fallback the old manual lookup here used to do) - no need to re-derive it.
+  const workspaceId = req.workspaceId;
 
   const user = await db
     .prepare("SELECT id, role FROM users WHERE id = ?")
     .get(userId);
   if (!user) return res.status(404).json({ error: "User not found" });
 
-  // Phase 2.2b: imports stamp workspace_id on devices and content so the
-  // rows are visible to the workspace-filtered list endpoints. Fall back to
-  // the importer's first accessible workspace if the JWT didn't carry one.
-  if (!workspaceId) {
-    const w = await db
-      .prepare(
-        `
-      SELECT w.id FROM workspaces w
-      JOIN workspace_members wm ON wm.workspace_id = w.id
-      WHERE wm.user_id = ? ORDER BY wm.joined_at ASC LIMIT 1
-    `,
-      )
-      .get(userId);
-    workspaceId = w?.id || null;
-  }
   if (!workspaceId)
     return res
       .status(403)

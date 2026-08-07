@@ -952,10 +952,14 @@ router.delete("/users/:id", requireAuth, requireSuperAdmin, asyncHandler(async (
 }));
 
 // Update user platform role (platform admin only).
-// #14: this manages users.role (the PLATFORM-level role) only - workspace and
-// org roles are managed in the members views. Whitelist is the current model:
-// 'user' and 'platform_admin' (the legacy 'admin'/'superadmin' strings are gone
-// after normalization and are no longer accepted here).
+// #14: this manages users.role (the PLATFORM-level role) only. Workspace roles
+// are managed in workspace-members.js / routes/workspaces.js; org roles
+// (org_owner/org_admin) are managed in routes/organizations.js (added after
+// the RBAC audit found org-level membership had no route or UI at all - the
+// "members views" this comment used to point to never actually covered org
+// roles). Whitelist is the current model: 'user' and 'platform_admin' (the
+// legacy 'admin'/'superadmin' strings are gone after normalization and are no
+// longer accepted here).
 const ASSIGNABLE_PLATFORM_ROLES = [
   "user",
   "platform_operator",

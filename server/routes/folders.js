@@ -53,6 +53,12 @@ router.get('/', asyncHandler(async (req, res) => {
 // Create a folder in the caller's current workspace.
 router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating folders.' });
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
+  if (!ctx) return res.status(403).json({ error: 'Access denied' });
+  if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (name.length > 100) return res.status(400).json({ error: 'name too long' });
