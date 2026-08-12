@@ -153,7 +153,7 @@
         ready = true;
         clearTimeout(watchdog);
         try {
-          frame.contentWindow.postMessage(
+          (e.source || frame.contentWindow).postMessage(
             { source: "beamos-host", status: "hosted" },
             "*",
           );
