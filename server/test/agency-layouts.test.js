@@ -34,8 +34,8 @@ db.exec(`
   INSERT INTO devices VALUES ('d1','Lobby Screen — North Wall','L1','plA','10.0.0.5');
 `);
 
-test('#73 layout geometry: own layout only, all zones geometry, theirs marked, NO device data', () => {
-  const a = listLayoutGeometry(db, 'tokA', 'wsA');
+test('#73 layout geometry: own layout only, all zones geometry, theirs marked, NO device data', async () => {
+  const a = await listLayoutGeometry(db, 'tokA', 'wsA');
   assert.equal(a.length, 1, 'tokA sees ONLY L1 (its designated playlist feeds it), not L2');
   assert.equal(a[0].id, 'L1');
   assert.deepEqual({ name: a[0].name, width: a[0].width, height: a[0].height }, { name: 'Lobby', width: 1920, height: 1080 });
@@ -51,5 +51,5 @@ test('#73 layout geometry: own layout only, all zones geometry, theirs marked, N
   assert.deepEqual(Object.keys(a[0].zones[0]).sort(),
     ['background_color', 'fit_mode', 'height_percent', 'id', 'name', 'sort_order', 'width_percent', 'x_percent', 'y_percent', 'z_index', 'zone_type'].sort());
 
-  assert.deepEqual(listLayoutGeometry(db, 'tokB', 'wsA').map(l => l.id), ['L2'], 'tokB sees ONLY L2');
+  assert.deepEqual((await listLayoutGeometry(db, 'tokB', 'wsA')).map(l => l.id), ['L2'], 'tokB sees ONLY L2');
 });

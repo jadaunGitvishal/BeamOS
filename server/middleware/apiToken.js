@@ -15,6 +15,7 @@
 const crypto = require('crypto');
 const { db } = require('../db/database');
 const { requireAuth, isPlatformRole } = require('./auth');
+const { asyncHandler } = require('../lib/async-handler');
 
 const TOKEN_PREFIX = 'st_';
 
@@ -34,24 +35,24 @@ function displayPrefix(token) {
 
 // Throttle last_used_at writes to at most once/min per token (no write per request).
 const lastUsedThrottle = new Map();
-function touchLastUsed(tokenId) {
+async function touchLastUsed(tokenId) {
   const now = Date.now();
   if (now - (lastUsedThrottle.get(tokenId) || 0) < 60_000) return;
   lastUsedThrottle.set(tokenId, now);
-  try { db.prepare("UPDATE api_tokens SET last_used_at = strftime('%s','now') WHERE id = ?").run(tokenId); } catch { /* best-effort */ }
+  try { await db.prepare("UPDATE api_tokens SET last_used_at = UNIX_TIMESTAMP() WHERE id = ?").run(tokenId); } catch { /* best-effort */ }
 }
 
-function apiTokenAuth(req, res, next) {
+const apiTokenAuth = asyncHandler(async function apiTokenAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const raw = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!raw.startsWith(TOKEN_PREFIX)) {
     return res.status(401).json({ error: 'Invalid API token' });
   }
-  const row = db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(hashToken(raw));
+  const row = await db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(hashToken(raw));
   if (!row || row.revoked_at) {
     return res.status(401).json({ error: 'Invalid or revoked API token' });
   }
-  const user = db.prepare(
+  const user = await db.prepare(
     'SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?'
   ).get(row.user_id);
   if (!user) return res.status(401).json({ error: 'Token owner not found' });
@@ -72,9 +73,11 @@ function apiTokenAuth(req, res, next) {
   // #73: auto_publish read from the TOKEN ROW (admin-set), so the agency endpoint can
   // never take it from the request body. `|| 0` keeps it fail-safe for any row predating it.
   req.apiToken = { id: row.id, prefix: row.prefix, name: row.name, workspace_id: row.workspace_id, auto_publish: row.auto_publish || 0 };
-  touchLastUsed(row.id);
+  // Fire-and-forget (throttled, best-effort) - not awaited so it doesn't add DB latency
+  // to every token request; touchLastUsed already swallows its own errors.
+  touchLastUsed(row.id).catch(() => {});
   next();
-}
+});
 
 // Front door: token path for "Bearer st_...", else the existing JWT requireAuth
 // (unchanged). Used in place of requireAuth on the public routers only.

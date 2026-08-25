@@ -48,11 +48,13 @@ function pruneDevice(deviceId) {
 // deviceNs.to(deviceId).emit('device:playlist-update', buildPlaylistPayload(deviceId));
 // directly. Now they call queueOrEmitPlaylistUpdate which checks room presence
 // first and queues only if the device is offline.
-function queueOrEmitPlaylistUpdate(deviceNs, deviceId, buildPayload) {
+async function queueOrEmitPlaylistUpdate(deviceNs, deviceId, buildPayload) {
   if (!deviceNs || !deviceId || typeof buildPayload !== 'function') return { delivered: false };
   const room = deviceNs.adapter.rooms.get(deviceId);
   if (room && room.size > 0) {
-    deviceNs.to(deviceId).emit('device:playlist-update', buildPayload(deviceId));
+    // buildPayload (buildPlaylistPayload from ws/deviceSocket.js) queries the DB - must be
+    // awaited, or the socket would emit a pending Promise object instead of the payload.
+    deviceNs.to(deviceId).emit('device:playlist-update', await buildPayload(deviceId));
     return { delivered: true };
   }
   pendingPlaylistUpdate.set(deviceId, { expiresAt: Date.now() + config.commandQueueTtlMs });
@@ -80,7 +82,7 @@ function queueCommand(deviceId, type, payload) {
 // buildPayload is the buildPlaylistPayload function from deviceSocket.js,
 // passed in to avoid a circular require. We call it at flush time so the
 // playlist reflects current DB state, not whatever it was when queued.
-function flushQueue(deviceNs, deviceId, buildPayload) {
+async function flushQueue(deviceNs, deviceId, buildPayload) {
   if (!deviceNs || !deviceId) return { playlistUpdate: false, commands: 0 };
   pruneDevice(deviceId);
 
@@ -91,7 +93,7 @@ function flushQueue(deviceNs, deviceId, buildPayload) {
   if (pu) {
     pendingPlaylistUpdate.delete(deviceId);
     if (typeof buildPayload === 'function') {
-      deviceNs.to(deviceId).emit('device:playlist-update', buildPayload(deviceId));
+      deviceNs.to(deviceId).emit('device:playlist-update', await buildPayload(deviceId));
       playlistUpdate = true;
     }
   }

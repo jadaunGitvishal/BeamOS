@@ -32,14 +32,14 @@ function getClientIp(req) {
 // when known; the middleware below sources it from resolveTenancy. When
 // workspaceId is null but a device_id is provided, fall back to the device's
 // workspace - matches the backfill rule for consistency.
-function logActivity(userId, action, details = null, deviceId = null, ipAddress = null, workspaceId = null) {
+async function logActivity(userId, action, details = null, deviceId = null, ipAddress = null, workspaceId = null) {
   try {
     let ws = workspaceId || null;
     if (!ws && deviceId) {
-      const d = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
+      const d = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
       ws = d?.workspace_id || null;
     }
-    db.prepare(
+    await db.prepare(
       'INSERT INTO activity_log (user_id, device_id, action, details, ip_address, workspace_id) VALUES (?, ?, ?, ?, ?, ?)'
     ).run(userId || null, deviceId || null, action, details || null, ipAddress || null, ws);
   } catch (e) {
@@ -47,7 +47,7 @@ function logActivity(userId, action, details = null, deviceId = null, ipAddress 
   }
 }
 
-function getActivity(options = {}) {
+async function getActivity(options = {}) {
   const { userId, deviceId, limit = 50, offset = 0 } = options;
   let sql = `SELECT al.*, u.name as user_name, u.email as user_email
     FROM activity_log al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`;
@@ -63,8 +63,8 @@ function getActivity(options = {}) {
 }
 
 // Prune old activity logs (keep 90 days)
-function pruneActivityLog() {
-  db.prepare("DELETE FROM activity_log WHERE created_at < strftime('%s','now') - (90 * 86400)").run();
+async function pruneActivityLog() {
+  await db.prepare("DELETE FROM activity_log WHERE created_at < UNIX_TIMESTAMP() - (90 * 86400)").run();
 }
 
 // Express middleware to auto-log API mutations
@@ -77,7 +77,11 @@ function activityLogger(req, res, next) {
       const userId = req.user?.id;
       const deviceId = req.params?.id || req.params?.deviceId || req.body?.device_id;
       const details = summarizeAction(req);
-      logActivity(userId, action, details, deviceId, getClientIp(req), req.workspaceId || null);
+      // Fire-and-forget: logActivity already catches its own errors, and res.json()
+      // must stay synchronous (it's a monkey-patched override called by every route
+      // handler) - the write happening after the response is sent is fine, this is
+      // best-effort audit logging, not part of the request's correctness.
+      logActivity(userId, action, details, deviceId, getClientIp(req), req.workspaceId || null).catch(() => {});
     }
     return originalJson(data);
   };

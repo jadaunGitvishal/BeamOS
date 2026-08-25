@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { db } = require('../db/database');
+const { asyncHandler } = require('../lib/async-handler');
 
 // Phase 2.1: JWT now optionally carries the user's current workspace_id so
 // the tenancy middleware can resolve scope without an extra DB lookup on
@@ -47,48 +48,49 @@ function recoveryUser(decoded) {
 }
 
 // Express middleware - requires valid JWT
-function requireAuth(req, res, next) {
+const requireAuth = asyncHandler(async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
+  let decoded;
   try {
     const token = authHeader.split(' ')[1];
-    const decoded = verifyToken(token);
-    if (decoded.recovery) {
-      req.user = recoveryUser(decoded);
-      req.jwtWorkspaceId = null;
-      return next();
-    }
-    // #100 (tightening #1): an mfa_pending token has cleared the password but NOT the
-    // TOTP step. It must never authorize a protected route - only /api/auth/totp/verify
-    // accepts it. If this check is removed, password-alone yields a working session and
-    // TOTP is bypassed. (Covered by the mfa_pending bite-test.)
-    if (decoded.mfa_pending) return res.status(401).json({ error: 'mfa_required' });
-    const user = db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(401).json({ error: 'User not found' });
-    req.user = user;
-    // Tenancy middleware reads this on the resolver step.
-    req.jwtWorkspaceId = decoded.current_workspace_id || null;
-    // #7: enforce the forced first-login password change SERVER-SIDE (was a
-    // frontend-only redirect, so a provisioned temp password worked indefinitely
-    // via the API). While the flag is set, allow only reading/updating one's own
-    // profile (the password change is PUT /api/auth/me, which clears the flag)
-    // and logout; block everything else.
-    if (user.must_change_password) {
-      const url = (req.originalUrl || '').split('?')[0].replace(/\/$/, '');
-      const allowed = url === '/api/auth/me' || url === '/api/auth/logout';
-      if (!allowed) return res.status(403).json({ error: 'password_change_required' });
-    }
-    next();
+    decoded = verifyToken(token);
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
-}
+  if (decoded.recovery) {
+    req.user = recoveryUser(decoded);
+    req.jwtWorkspaceId = null;
+    return next();
+  }
+  // #100 (tightening #1): an mfa_pending token has cleared the password but NOT the
+  // TOTP step. It must never authorize a protected route - only /api/auth/totp/verify
+  // accepts it. If this check is removed, password-alone yields a working session and
+  // TOTP is bypassed. (Covered by the mfa_pending bite-test.)
+  if (decoded.mfa_pending) return res.status(401).json({ error: 'mfa_required' });
+  const user = await db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?').get(decoded.id);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  req.user = user;
+  // Tenancy middleware reads this on the resolver step.
+  req.jwtWorkspaceId = decoded.current_workspace_id || null;
+  // #7: enforce the forced first-login password change SERVER-SIDE (was a
+  // frontend-only redirect, so a provisioned temp password worked indefinitely
+  // via the API). While the flag is set, allow only reading/updating one's own
+  // profile (the password change is PUT /api/auth/me, which clears the flag)
+  // and logout; block everything else.
+  if (user.must_change_password) {
+    const url = (req.originalUrl || '').split('?')[0].replace(/\/$/, '');
+    const allowed = url === '/api/auth/me' || url === '/api/auth/logout';
+    if (!allowed) return res.status(403).json({ error: 'password_change_required' });
+  }
+  next();
+});
 
 // Optional auth - sets req.user if token present, continues either way
-function optionalAuth(req, res, next) {
+const optionalAuth = asyncHandler(async function optionalAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     try {
@@ -97,14 +99,14 @@ function optionalAuth(req, res, next) {
       if (decoded.mfa_pending) return next(); // #100: pre-TOTP token is not a session
       req.user = decoded.recovery
         ? recoveryUser(decoded)
-        : db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id FROM users WHERE id = ?').get(decoded.id);
+        : await db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id FROM users WHERE id = ?').get(decoded.id);
       req.jwtWorkspaceId = decoded.current_workspace_id || null;
     } catch (err) {
       // Token invalid, continue without user
     }
   }
   next();
-}
+});
 
 // Phase 2.1: role rename. Phase 1 renamed 'superadmin' to 'platform_admin' and
 // dropped the in-between 'admin' role. These two guards are widened to accept

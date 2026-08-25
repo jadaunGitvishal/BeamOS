@@ -4,18 +4,19 @@ const { db } = require('../db/database');
 const { requireAuth, requireAdmin, requireSuperAdmin } = require('../middleware/auth');
 const { getUserPlan, getUserDeviceCount, getUserStorageMB } = require('../middleware/subscription');
 const config = require('../config');
+const { asyncHandler } = require('../lib/async-handler');
 
 // Get all plans
-router.get('/plans', (req, res) => {
-  const plans = db.prepare('SELECT * FROM plans WHERE active = 1 ORDER BY sort_order ASC').all();
+router.get('/plans', asyncHandler(async (req, res) => {
+  const plans = await db.prepare('SELECT * FROM plans WHERE active = 1 ORDER BY sort_order ASC').all();
   res.json(plans);
-});
+}));
 
 // Get current user's subscription info
-router.get('/me', requireAuth, (req, res) => {
-  const plan = getUserPlan(req.user.id);
-  const deviceCount = getUserDeviceCount(req.user.id);
-  const storageMB = getUserStorageMB(req.user.id);
+router.get('/me', requireAuth, asyncHandler(async (req, res) => {
+  const plan = await getUserPlan(req.user.id);
+  const deviceCount = await getUserDeviceCount(req.user.id);
+  const storageMB = await getUserStorageMB(req.user.id);
 
   res.json({
     plan: {
@@ -50,28 +51,28 @@ router.get('/me', requireAuth, (req, res) => {
     },
     self_hosted: config.selfHosted,
   });
-});
+}));
 
 // Admin: assign plan to user
-router.post('/assign', requireAuth, requireSuperAdmin, (req, res) => {
+router.post('/assign', requireAuth, requireSuperAdmin, asyncHandler(async (req, res) => {
   const { user_id, plan_id } = req.body;
   if (!user_id || !plan_id) return res.status(400).json({ error: 'user_id and plan_id required' });
 
-  const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(plan_id);
+  const plan = await db.prepare('SELECT * FROM plans WHERE id = ?').get(plan_id);
   if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(user_id);
+  const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(user_id);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
-  db.prepare("UPDATE users SET plan_id = ?, subscription_status = 'active', updated_at = strftime('%s','now') WHERE id = ?")
+  await db.prepare("UPDATE users SET plan_id = ?, subscription_status = 'active', updated_at = UNIX_TIMESTAMP() WHERE id = ?")
     .run(plan_id, user_id);
 
   res.json({ success: true, plan: plan.display_name });
-});
+}));
 
 // Admin: update plan details
-router.put('/plans/:id', requireAuth, requireAdmin, (req, res) => {
-  const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(req.params.id);
+router.put('/plans/:id', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const plan = await db.prepare('SELECT * FROM plans WHERE id = ?').get(req.params.id);
   if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
   const { display_name, max_devices, max_storage_mb, remote_control, remote_url,
@@ -91,26 +92,26 @@ router.put('/plans/:id', requireAuth, requireAdmin, (req, res) => {
 
   if (updates.length > 0) {
     values.push(req.params.id);
-    db.prepare(`UPDATE plans SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await db.prepare(`UPDATE plans SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
 
-  const updated = db.prepare('SELECT * FROM plans WHERE id = ?').get(req.params.id);
+  const updated = await db.prepare('SELECT * FROM plans WHERE id = ?').get(req.params.id);
   res.json(updated);
-});
+}));
 
 // Admin: create custom plan
-router.post('/plans', requireAuth, requireAdmin, (req, res) => {
+router.post('/plans', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { id, name, display_name, max_devices, max_storage_mb, remote_control,
           remote_url, priority_support, price_monthly, price_yearly } = req.body;
 
   if (!id || !name || !display_name) return res.status(400).json({ error: 'id, name, and display_name required' });
 
-  const existing = db.prepare('SELECT id FROM plans WHERE id = ?').get(id);
+  const existing = await db.prepare('SELECT id FROM plans WHERE id = ?').get(id);
   if (existing) return res.status(409).json({ error: 'Plan ID already exists' });
 
-  const maxOrder = db.prepare('SELECT MAX(sort_order) as max_order FROM plans').get().max_order || 0;
+  const maxOrder = (await db.prepare('SELECT MAX(sort_order) as max_order FROM plans').get()).max_order || 0;
 
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO plans (id, name, display_name, max_devices, max_storage_mb, remote_control, remote_url,
                        priority_support, price_monthly, price_yearly, sort_order)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -118,9 +119,9 @@ router.post('/plans', requireAuth, requireAdmin, (req, res) => {
          remote_control ? 1 : 0, remote_url ? 1 : 0, priority_support ? 1 : 0,
          price_monthly || 0, price_yearly || 0, maxOrder + 1);
 
-  const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(id);
+  const plan = await db.prepare('SELECT * FROM plans WHERE id = ?').get(id);
   res.status(201).json(plan);
-});
+}));
 
 // Stripe webhook (if configured)
 router.post('/webhook/stripe', express.raw({ type: 'application/json' }), (req, res) => {

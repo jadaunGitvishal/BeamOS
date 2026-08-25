@@ -69,15 +69,19 @@ function round2(x) { return Math.round(x * 100) / 100; }
 // from the running average until it completes, so a partial today doesn't drag the estimate
 // down. For a past (final) month every day is complete, so the same formula yields the
 // contractual Σ ASD / days_in_month.
+// MySQL has no scalar MIN(a,b) overload (unlike SQLite, which overloads MIN/MAX for
+// both aggregate-1-arg and scalar-2+-arg use) - LEAST(a,b) is the MySQL equivalent for
+// clamping each row's ratio to 1.0 before SUM aggregates across the group. CAST(...AS
+// DOUBLE) requires MySQL 8.0.17+ (verified against the local 8.0.36 instance).
 const _asdByDay = db.prepare(
-  `SELECT day, SUM(MIN(1.0, online_seconds / CAST(? AS REAL))) AS asd
+  `SELECT day, SUM(LEAST(1.0, online_seconds / CAST(? AS DOUBLE))) AS asd
      FROM device_usage_daily WHERE day BETWEEN ? AND ? GROUP BY day ORDER BY day`
 );
 const _distinctDevices = db.prepare(
   'SELECT COUNT(DISTINCT device_id) AS c FROM device_usage_daily WHERE day BETWEEN ? AND ?'
 );
 
-function buildUsageReport(monthArg, nowMs = Date.now()) {
+async function buildUsageReport(monthArg, nowMs = Date.now()) {
   const month = monthArg || utcMonth(nowMs);
   if (!MONTH_RE.test(month)) throw new Error('invalid month (expected YYYY-MM)');
 
@@ -94,8 +98,8 @@ function buildUsageReport(monthArg, nowMs = Date.now()) {
   else { isFinal = false; const todayDom = new Date(nowMs).getUTCDate(); completedDays = todayDom - 1; daysElapsed = todayDom; }
 
   const denom = config.billing.hoursPerDay * 3600;
-  const rows = _asdByDay.all(denom, firstDay, lastDay);       // [{day, asd}] per day WITH data
-  const provisioned = _distinctDevices.get(firstDay, lastDay).c;
+  const rows = await _asdByDay.all(denom, firstDay, lastDay);       // [{day, asd}] per day WITH data
+  const provisioned = (await _distinctDevices.get(firstDay, lastDay)).c;
 
   // Sum ASD over COMPLETED calendar days only (day strictly before today). For a past
   // month todayStr is in a later month, so every row qualifies.

@@ -103,15 +103,15 @@ function requireOrgOwner(req, res, next) {
 // so it works for routes that operate on a target workspace specified by URL
 // param (rename, future settings/delete) rather than the caller's currently
 // active one. Does its own DB lookups against workspace_members + organization_members.
-function canAdminWorkspace(db, user, workspace) {
+async function canAdminWorkspace(db, user, workspace) {
   if (!user || !workspace) return false;
   // Owner only (isPlatformRole) - platform_operator is intentionally excluded,
   // so operators cannot manage workspace members, rename, or set branding (#13).
   if (isPlatformRole(user.role)) return true;
-  const om = db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
     .get(workspace.organization_id, user.id);
   if (om && (om.role === 'org_owner' || om.role === 'org_admin')) return true;
-  const wm = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+  const wm = await db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(workspace.id, user.id);
   return wm && wm.role === 'workspace_admin';
 }
@@ -120,23 +120,52 @@ function canAdminWorkspace(db, user, workspace) {
 // accepts any workspace_members role (admin/editor/viewer) in addition to the
 // org / platform paths. Used by GET endpoints on a URL-param target workspace
 // where resolveTenancy is not on the request (e.g. /api/workspaces/:id/members).
-function canAccessWorkspace(db, user, workspace) {
+async function canAccessWorkspace(db, user, workspace) {
   if (!user || !workspace) return false;
   // Read access: platform staff (admin OR operator) can view any workspace,
   // including its member list (#13, read-only - mutations stay owner-gated via
   // canAdminWorkspace).
   if (isPlatformStaff(user.role)) return true;
-  const om = db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
     .get(workspace.organization_id, user.id);
   if (om && (om.role === 'org_owner' || om.role === 'org_admin')) return true;
-  const wm = db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+  const wm = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(workspace.id, user.id);
   return !!wm;
 }
 
+// Decoupled org-level companions to canAdminWorkspace/canAccessWorkspace above -
+// same shape (explicit (user, org) pair, not req), for routes that operate on a
+// target org specified by URL param (server/routes/organizations.js) rather than
+// the caller's currently active one.
+//
+// canAccessOrg: read access. Platform staff (admin OR operator) or any
+// organization_members row (org_owner/org_admin).
+async function canAccessOrg(db, user, org) {
+  if (!user || !org) return false;
+  if (isPlatformStaff(user.role)) return true;
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+    .get(org.id, user.id);
+  return !!om && (om.role === 'org_owner' || om.role === 'org_admin');
+}
+
+// canAdminOrg: mutation access. Owner-tier only - platform_admin (owner only,
+// NOT platform_operator, mirroring canAdminWorkspace) or org_owner of THIS org.
+// Deliberately excludes org_admin: org-membership mutations (esp. granting
+// org_owner/org_admin) are more consequential than workspace-member mutations,
+// so unlike workspace_admin (which can manage other workspace_admins), org_admin
+// here is read-only - only org_owner or platform_admin can change membership.
+async function canAdminOrg(db, user, org) {
+  if (!user || !org) return false;
+  if (isPlatformRole(user.role)) return true;
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+    .get(org.id, user.id);
+  return !!om && om.role === 'org_owner';
+}
+
 module.exports = {
   // boolean predicates
-  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, isOrgAdmin, isOrgOwner,
+  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canAdminOrg, canAccessOrg, isOrgAdmin, isOrgOwner,
   // express middleware
   requireWorkspace,
   requireWorkspaceRead,

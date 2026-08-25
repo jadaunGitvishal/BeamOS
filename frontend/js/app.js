@@ -20,6 +20,7 @@ import * as adminPlayerDebug from "./views/admin-player-debug.js";
 import * as designer from "./views/designer.js";
 import * as playlists from "./views/playlists.js";
 import * as workspaceMembers from "./views/workspace-members.js";
+import * as orgMembers from "./views/org-members.js";
 import * as forcePasswordChange from "./views/force-password-change.js";
 import * as noWorkspace from "./views/no-workspace.js";
 import { applyBranding } from "./branding.js";
@@ -503,6 +504,10 @@ function route() {
     const wsId = hash.split("#/workspace/")[1].split("/")[0];
     currentView = workspaceMembers;
     workspaceMembers.render(app, wsId);
+  } else if (hash.startsWith("#/organizations/") && hash.includes("/members")) {
+    const orgId = hash.split("#/organizations/")[1].split("/")[0];
+    currentView = orgMembers;
+    orgMembers.render(app, orgId);
   } else if (hash === "#/help" || hash.startsWith("#/help")) {
     currentView = help;
     help.render(app);

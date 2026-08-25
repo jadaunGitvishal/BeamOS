@@ -11,19 +11,19 @@ const { db } = require('../db/database');
 // active layout can never be valid -> orphan.
 
 /** True if zoneId belongs to layoutId (or zoneId is empty = unassigned). */
-function zoneInLayout(zoneId, layoutId) {
+async function zoneInLayout(zoneId, layoutId) {
   if (!zoneId) return true;
   if (!layoutId) return false;
-  return !!db.prepare('SELECT 1 FROM layout_zones WHERE id = ? AND layout_id = ?').get(zoneId, layoutId);
+  return !!(await db.prepare('SELECT 1 FROM layout_zones WHERE id = ? AND layout_id = ?').get(zoneId, layoutId));
 }
 
 /** True when zoneId is set but NOT a zone in the device's active layout. */
-function isOrphanZone(zoneId, layoutId) {
-  return !!zoneId && !zoneInLayout(zoneId, layoutId);
+async function isOrphanZone(zoneId, layoutId) {
+  return !!zoneId && !(await zoneInLayout(zoneId, layoutId));
 }
 
 /** Zones (id+name) of a layout, for populating reassign dropdowns. [] if none. */
-function layoutZones(layoutId) {
+async function layoutZones(layoutId) {
   if (!layoutId) return [];
   return db.prepare('SELECT id, name FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layoutId);
 }
@@ -33,8 +33,8 @@ function layoutZones(layoutId) {
  * device's active layout. Same rule as isOrphanZone, computed in one query for the
  * dashboard device list. Devices with zero orphans are omitted from the map.
  */
-function orphanCountsByDevice(deviceIds) {
-  const rows = db.prepare(`
+async function orphanCountsByDevice(deviceIds) {
+  const rows = await db.prepare(`
     SELECT d.id AS device_id, COUNT(*) AS n
     FROM devices d
     JOIN playlist_items pi ON pi.playlist_id = d.playlist_id

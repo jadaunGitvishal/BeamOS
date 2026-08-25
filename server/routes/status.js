@@ -6,7 +6,8 @@ const path = require("path");
 const fs = require("fs");
 const config = require("../config");
 const VERSION = require("../version");
-const { PLATFORM_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePlatformAdmin } = require("../middleware/auth");
+const { resolveTenancy } = require("../lib/tenancy");
 const loopLag = require("../services/loop-lag");
 // #146 P3.8: soak observability — internal limiter/maintenance states.
 const flapLimiter = require("../lib/flap-limiter");
@@ -16,6 +17,7 @@ const logCoalescer = require("../lib/log-coalescer");
 const { getMaintenanceStats } = require("../db/database");
 const heartbeat = require("../services/heartbeat");
 const appSettings = require("../lib/app-settings");
+const { asyncHandler } = require("../lib/async-handler");
 
 // Public status page
 router.get("/", (req, res) => {
@@ -61,72 +63,59 @@ function formatUptime(seconds) {
   return `${m}m`;
 }
 
-// Full database backup (superadmin only)
-router.get("/backup", (req, res) => {
-  const token = req.query.token;
-  if (!token) return res.status(401).json({ error: "Token required" });
-
-  try {
-    const jwt = require("jsonwebtoken");
-    const config = require("../config");
-    const decoded = jwt.verify(token, config.jwtSecret);
-    const user = db
-      .prepare("SELECT role FROM users WHERE id = ?")
-      .get(decoded.id);
-    if (!user || !PLATFORM_ROLES.includes(user.role))
-      return res.status(403).json({ error: "Platform admin only" });
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
-  const dbPath = require("../config").dbPath;
-  res.download(
-    dbPath,
-    `remotedisplay-backup-${new Date().toISOString().split("T")[0]}.db`,
+// Full database backup (superadmin only). Was res.download(config.dbPath, ...) - a
+// straight file copy of the SQLite file. MySQL has no equivalent single file; this
+// shells out to mysqldump and streams the .sql dump instead (same tool/approach as
+// db/database.js's pre-migration snapshotDatabase()).
+router.get("/backup", requireAuth, requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const { spawn } = require("child_process");
+  const dateStr = new Date().toISOString().split("T")[0];
+  res.setHeader("Content-Type", "application/sql");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename=beamos-backup-${dateStr}.sql`,
   );
-});
+  const dump = spawn(
+    "mysqldump",
+    [
+      `--host=${config.mysqlHost}`,
+      `--port=${config.mysqlPort}`,
+      `--user=${config.mysqlUser}`,
+      "--single-transaction",
+      "--routines",
+      "--triggers",
+      config.mysqlDatabase,
+    ],
+    { env: { ...process.env, MYSQL_PWD: config.mysqlPassword } },
+  );
+  dump.stdout.pipe(res);
+  let stderr = "";
+  dump.stderr.on("data", (d) => { stderr += d; });
+  dump.on("error", (e) => {
+    console.error("[backup] mysqldump spawn failed:", e.message);
+    if (!res.headersSent) res.status(500).json({ error: "Backup failed" });
+  });
+  dump.on("close", (code) => {
+    if (code !== 0) console.error(`[backup] mysqldump exited ${code}: ${stderr}`);
+  });
+}));
 
 // User data export (own data only)
-router.get("/export", (req, res) => {
-  const token = req.query.token;
-  if (!token) return res.status(401).json({ error: "Token required" });
+router.get("/export", requireAuth, resolveTenancy, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  // resolveTenancy already re-validates any candidate workspace against live
+  // membership/accessContext (and applies the same first-accessible-workspace
+  // fallback the old manual lookup here used to do) - no need to re-derive it.
+  const workspaceId = req.workspaceId;
 
-  let userId;
-  let workspaceId;
-  try {
-    const jwt = require("jsonwebtoken");
-    const config = require("../config");
-    const decoded = jwt.verify(token, config.jwtSecret);
-    userId = decoded.id;
-    workspaceId = decoded.current_workspace_id || null;
-    if (!userId) return res.status(401).json({ error: "Invalid token" });
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
-  const user = db
+  const user = await db
     .prepare(
       "SELECT id, email, name, role, auth_provider, plan_id, created_at FROM users WHERE id = ?",
     )
     .get(userId);
   if (!user) return res.status(404).json({ error: "User not found" });
 
-  // Phase 2.2f: export workspace-scoped branding. Fall back to first-accessible
-  // workspace if the JWT didn't carry one.
-  if (!workspaceId) {
-    const w = db
-      .prepare(
-        `
-      SELECT w.id FROM workspaces w
-      JOIN workspace_members wm ON wm.workspace_id = w.id
-      WHERE wm.user_id = ? ORDER BY wm.joined_at ASC LIMIT 1
-    `,
-      )
-      .get(userId);
-    workspaceId = w?.id || null;
-  }
-
-  const devices = db
+  const devices = await db
     .prepare(
       "SELECT id, name, status, ip_address, android_version, app_version, screen_width, screen_height, created_at FROM devices WHERE user_id = ?",
     )
@@ -134,17 +123,17 @@ router.get("/export", (req, res) => {
   const deviceIds = devices.map((d) => d.id);
   const devicePlaceholders = deviceIds.map(() => "?").join(",") || "'__none__'";
 
-  const content = db
+  const content = await db
     .prepare(
       "SELECT id, filename, mime_type, file_size, duration_sec, remote_url, width, height, created_at FROM content WHERE user_id = ?",
     )
     .all(userId);
-  const widgets = db
+  const widgets = await db
     .prepare(
       "SELECT id, widget_type, name, config, created_at FROM widgets WHERE user_id = ?",
     )
     .all(userId);
-  const layouts = db
+  const layouts = await db
     .prepare(
       "SELECT id, name, width, height, is_template, template_category, created_at FROM layouts WHERE user_id = ? AND is_template = 0",
     )
@@ -152,14 +141,14 @@ router.get("/export", (req, res) => {
   const layoutIds = layouts.map((l) => l.id);
   const layoutPlaceholders = layoutIds.map(() => "?").join(",") || "'__none__'";
   const layoutZones = layoutIds.length
-    ? db
+    ? await db
         .prepare(
           `SELECT * FROM layout_zones WHERE layout_id IN (${layoutPlaceholders})`,
         )
         .all(...layoutIds)
     : [];
 
-  const playlists = db
+  const playlists = await db
     .prepare(
       "SELECT id, name, description, is_auto_generated, created_at, updated_at FROM playlists WHERE user_id = ?",
     )
@@ -168,37 +157,37 @@ router.get("/export", (req, res) => {
   const playlistPlaceholders =
     playlistIds.map(() => "?").join(",") || "'__none__'";
   const playlistItems = playlistIds.length
-    ? db
+    ? await db
         .prepare(
           `SELECT id, playlist_id, content_id, widget_id, sort_order, duration_sec FROM playlist_items WHERE playlist_id IN (${playlistPlaceholders})`,
         )
         .all(...playlistIds)
     : [];
 
-  const schedules = db
+  const schedules = await db
     .prepare(
       "SELECT id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at FROM schedules WHERE user_id = ?",
     )
     .all(userId);
-  const videoWalls = db
+  const videoWalls = await db
     .prepare("SELECT * FROM video_walls WHERE user_id = ?")
     .all(userId);
   const wallIds = videoWalls.map((w) => w.id);
   const wallPlaceholders = wallIds.map(() => "?").join(",") || "'__none__'";
   const wallDevices = wallIds.length
-    ? db
+    ? await db
         .prepare(
           `SELECT * FROM video_wall_devices WHERE wall_id IN (${wallPlaceholders})`,
         )
         .all(...wallIds)
     : [];
 
-  const kioskPages = db
+  const kioskPages = await db
     .prepare(
       "SELECT id, name, config, created_at FROM kiosk_pages WHERE user_id = ?",
     )
     .all(userId);
-  const deviceGroups = db
+  const deviceGroups = await db
     .prepare(
       "SELECT id, name, color, created_at FROM device_groups WHERE user_id = ?",
     )
@@ -206,19 +195,19 @@ router.get("/export", (req, res) => {
   const groupIds = deviceGroups.map((g) => g.id);
   const groupPlaceholders = groupIds.map(() => "?").join(",") || "'__none__'";
   const groupMembers = groupIds.length
-    ? db
+    ? await db
         .prepare(
           `SELECT * FROM device_group_members WHERE group_id IN (${groupPlaceholders})`,
         )
         .all(...groupIds)
     : [];
-  const alertConfigs = db
+  const alertConfigs = await db
     .prepare(
       "SELECT id, alert_type, enabled, config, created_at FROM alert_configs WHERE user_id = ?",
     )
     .all(userId);
   const whiteLabel = workspaceId
-    ? db
+    ? await db
         .prepare("SELECT * FROM white_labels WHERE workspace_id = ?")
         .get(workspaceId)
     : null;
@@ -227,12 +216,12 @@ router.get("/export", (req, res) => {
     format: "screentinker-export-v2",
     exported_at: new Date().toISOString(),
     user,
-    devices: devices.map((d) => {
-      const dev = db
+    devices: await Promise.all(devices.map(async (d) => {
+      const dev = await db
         .prepare("SELECT playlist_id FROM devices WHERE id = ?")
         .get(d.id);
       return { ...d, playlist_id: dev?.playlist_id || null };
-    }),
+    })),
     content,
     widgets: widgets.map((w) => ({
       ...w,
@@ -275,7 +264,7 @@ router.get("/export", (req, res) => {
     const filesToInclude = [];
     for (const c of exportData.content) {
       if (c.remote_url || !c.filename) continue;
-      const row = db
+      const row = await db
         .prepare("SELECT filepath, thumbnail_path FROM content WHERE id = ?")
         .get(c.id);
       if (row?.filepath) {
@@ -318,7 +307,7 @@ router.get("/export", (req, res) => {
     `attachment; filename=screentinker-export-${new Date().toISOString().split("T")[0]}.json`,
   );
   res.json(exportData);
-});
+}));
 
 // User data import (JSON or ZIP with files)
 const multer = require("multer");
@@ -327,44 +316,18 @@ const importUpload = multer({
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 }); // 2GB max
 
-router.post("/import", importUpload.single("file"), async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer "))
-    return res.status(401).json({ error: "Token required" });
+router.post("/import", requireAuth, resolveTenancy, importUpload.single("file"), async (req, res) => {
+  const userId = req.user.id;
+  // resolveTenancy already re-validates any candidate workspace against live
+  // membership/accessContext (and applies the same first-accessible-workspace
+  // fallback the old manual lookup here used to do) - no need to re-derive it.
+  const workspaceId = req.workspaceId;
 
-  let userId;
-  let workspaceId;
-  try {
-    const jwt = require("jsonwebtoken");
-    const jwtConfig = require("../config");
-    const decoded = jwt.verify(authHeader.split(" ")[1], jwtConfig.jwtSecret);
-    userId = decoded.id;
-    workspaceId = decoded.current_workspace_id || null;
-    if (!userId) return res.status(401).json({ error: "Invalid token" });
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
-  const user = db
+  const user = await db
     .prepare("SELECT id, role FROM users WHERE id = ?")
     .get(userId);
   if (!user) return res.status(404).json({ error: "User not found" });
 
-  // Phase 2.2b: imports stamp workspace_id on devices and content so the
-  // rows are visible to the workspace-filtered list endpoints. Fall back to
-  // the importer's first accessible workspace if the JWT didn't carry one.
-  if (!workspaceId) {
-    const w = db
-      .prepare(
-        `
-      SELECT w.id FROM workspaces w
-      JOIN workspace_members wm ON wm.workspace_id = w.id
-      WHERE wm.user_id = ? ORDER BY wm.joined_at ASC LIMIT 1
-    `,
-      )
-      .get(userId);
-    workspaceId = w?.id || null;
-  }
   if (!workspaceId)
     return res
       .status(403)
@@ -470,13 +433,13 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
     kiosk: {},
   };
 
-  const importDb = db.transaction(() => {
+  const importDb = db.transaction(async (tx) => {
     // Import devices (as offline, unlinked - they'll need re-pairing)
     for (const d of data.devices || []) {
       const newId = uuid.v4();
       idMap.devices[d.id] = newId;
       const pairingCode = String(Math.floor(100000 + Math.random() * 900000));
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO devices (id, user_id, workspace_id, name, pairing_code, status, screen_width, screen_height, created_at) VALUES (?, ?, ?, ?, ?, 'provisioning', ?, ?, ?)`,
       ).run(
         newId,
@@ -527,7 +490,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
         }
       }
 
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, remote_url, thumbnail_path, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -555,7 +518,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
         typeof w.config === "string"
           ? w.config
           : JSON.stringify(w.config || {});
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO widgets (id, user_id, workspace_id, widget_type, name, config, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -573,7 +536,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
     for (const l of data.layouts || []) {
       const newId = uuid.v4();
       idMap.layouts[l.id] = newId;
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO layouts (id, user_id, workspace_id, name, width, height, is_template, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
       ).run(
         newId,
@@ -591,7 +554,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
       if (!newLayoutId) continue;
       const newId = uuid.v4();
       idMap.zones[z.id] = newId;
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent, z_index, zone_type, fit_mode, background_color, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -614,7 +577,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
       for (const p of data.playlists || []) {
         const newId = uuid.v4();
         idMap.playlists[p.id] = newId;
-        db.prepare(
+        await tx.prepare(
           "INSERT INTO playlists (id, user_id, workspace_id, name, description, is_auto_generated, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           newId,
@@ -634,7 +597,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
         const contentId = pi.content_id ? idMap.content[pi.content_id] : null;
         const widgetId = pi.widget_id ? idMap.widgets[pi.widget_id] : null;
         if (!contentId && !widgetId) continue;
-        db.prepare(
+        await tx.prepare(
           "INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)",
         ).run(
           playlistId,
@@ -647,7 +610,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
       // Set device playlist_id references
       for (const d of data.devices || []) {
         if (d.playlist_id && idMap.playlists[d.playlist_id]) {
-          db.prepare("UPDATE devices SET playlist_id = ? WHERE id = ?").run(
+          await tx.prepare("UPDATE devices SET playlist_id = ? WHERE id = ?").run(
             idMap.playlists[d.playlist_id],
             idMap.devices[d.id],
           );
@@ -668,7 +631,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
       const playlistId = s.playlist_id
         ? idMap.playlists[s.playlist_id] || null
         : null;
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO schedules (id, user_id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -698,7 +661,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
     for (const w of data.video_walls || []) {
       const newId = uuid.v4();
       idMap.walls[w.id] = newId;
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO video_walls (id, user_id, name, grid_cols, grid_rows, bezel_h_mm, bezel_v_mm, screen_w_mm, screen_h_mm, sync_mode, content_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -720,7 +683,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
       const wallId = idMap.walls[wd.wall_id];
       const devId = idMap.devices[wd.device_id];
       if (!wallId || !devId) continue;
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO video_wall_devices (wall_id, device_id, grid_col, grid_row, rotation) VALUES (?, ?, ?, ?, ?)`,
       ).run(wallId, devId, wd.grid_col, wd.grid_row, wd.rotation || 0);
     }
@@ -733,7 +696,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
         typeof k.config === "string"
           ? k.config
           : JSON.stringify(k.config || {});
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO kiosk_pages (id, user_id, workspace_id, name, config, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -750,7 +713,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
     for (const g of data.device_groups || []) {
       const newId = uuid.v4();
       idMap.groups[g.id] = newId;
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO device_groups (id, user_id, workspace_id, name, color, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -766,8 +729,8 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
       const groupId = idMap.groups[gm.group_id];
       const devId = idMap.devices[gm.device_id];
       if (!groupId || !devId) continue;
-      db.prepare(
-        `INSERT OR IGNORE INTO device_group_members (group_id, device_id) VALUES (?, ?)`,
+      await tx.prepare(
+        `INSERT IGNORE INTO device_group_members (group_id, device_id) VALUES (?, ?)`,
       ).run(groupId, devId);
     }
 
@@ -778,7 +741,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
         typeof a.config === "string"
           ? a.config
           : JSON.stringify(a.config || {});
-      db.prepare(
+      await tx.prepare(
         `INSERT INTO alert_configs (id, user_id, alert_type, enabled, config, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
         newId,
@@ -793,12 +756,12 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
     // Import white label - UPSERT into the importer's current workspace.
     if (data.white_label && workspaceId) {
       const wl = data.white_label;
-      const existing = db
+      const existing = await tx
         .prepare("SELECT id FROM white_labels WHERE workspace_id = ?")
         .get(workspaceId);
       if (existing) {
-        db.prepare(
-          `UPDATE white_labels SET brand_name=?, logo_url=?, favicon_url=?, primary_color=?, bg_color=?, custom_domain=?, custom_css=?, hide_branding=?, updated_at=strftime('%s','now') WHERE workspace_id=?`,
+        await tx.prepare(
+          `UPDATE white_labels SET brand_name=?, logo_url=?, favicon_url=?, primary_color=?, bg_color=?, custom_domain=?, custom_css=?, hide_branding=?, updated_at=UNIX_TIMESTAMP() WHERE workspace_id=?`,
         ).run(
           wl.brand_name || "BeamOS",
           wl.logo_url || null,
@@ -811,7 +774,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
           workspaceId,
         );
       } else {
-        db.prepare(
+        await tx.prepare(
           `INSERT INTO white_labels (id, user_id, workspace_id, brand_name, logo_url, favicon_url, primary_color, bg_color, custom_domain, custom_css, hide_branding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           uuid.v4(),
@@ -831,14 +794,14 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
   });
 
   try {
-    importDb();
+    await importDb();
 
     // v1: convert assignments to per-device playlists AFTER transaction (content files now on disk)
     if (!isV2 && data.assignments?.length) {
       const { execFile } = require("child_process");
 
       async function probeImportedContent(newContentId) {
-        const c = db
+        const c = await db
           .prepare(
             "SELECT id, mime_type, filepath, duration_sec FROM content WHERE id = ?",
           )
@@ -866,7 +829,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
           const info = JSON.parse(stdout);
           if (info.format?.duration) {
             const dur = parseFloat(info.format.duration);
-            db.prepare("UPDATE content SET duration_sec = ? WHERE id = ?").run(
+            await db.prepare("UPDATE content SET duration_sec = ? WHERE id = ?").run(
               dur,
               c.id,
             );
@@ -913,7 +876,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
           });
         }
 
-        db.prepare(
+        await db.prepare(
           "INSERT INTO playlists (id, user_id, workspace_id, name, description, is_auto_generated) VALUES (?, ?, ?, ?, ?, 1)",
         ).run(
           playlistId,
@@ -923,7 +886,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
           "Converted from v1 assignments",
         );
         for (const item of items) {
-          db.prepare(
+          await db.prepare(
             "INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)",
           ).run(
             playlistId,
@@ -933,7 +896,7 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
             item.duration,
           );
         }
-        db.prepare("UPDATE devices SET playlist_id = ? WHERE id = ?").run(
+        await db.prepare("UPDATE devices SET playlist_id = ? WHERE id = ?").run(
           playlistId,
           devId,
         );
@@ -942,15 +905,15 @@ router.post("/import", importUpload.single("file"), async (req, res) => {
     }
 
     // Collect pairing codes for imported devices
-    const devicePairings = (data.devices || [])
-      .map((d) => {
+    const devicePairings = (await Promise.all(
+      (data.devices || []).map(async (d) => {
         const newId = idMap.devices[d.id];
-        const dev = db
+        const dev = await db
           .prepare("SELECT name, pairing_code FROM devices WHERE id = ?")
           .get(newId);
         return dev ? { name: dev.name, pairing_code: dev.pairing_code } : null;
-      })
-      .filter(Boolean);
+      }),
+    )).filter(Boolean);
 
     res.json({
       success: true,

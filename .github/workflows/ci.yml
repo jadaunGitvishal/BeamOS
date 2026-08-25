@@ -74,6 +74,21 @@ jobs:
   smoke:
     name: Boot smoke + version check
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: beamos
+          MYSQL_USER: beamos_user
+          MYSQL_PASSWORD: ci_test_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -86,19 +101,24 @@ jobs:
         working-directory: server
         run: npm ci
 
-      # Boot against a fresh SQLite db (clean checkout = no db yet). SELF_HOSTED
-      # makes the first user an admin with no billing. No certs present, so the
-      # server listens on plain HTTP at :4001. Background it and wait until it
-      # answers.
+      # Boot against a fresh MySQL db provided by the services block above.
+      # SELF_HOSTED makes the first user an admin with no billing. No certs
+      # present, so the server listens on plain HTTP at :5001. Background it
+      # and wait until it answers.
       - name: Boot server
         working-directory: server
         env:
           SELF_HOSTED: "true"
+          MYSQL_HOST: "127.0.0.1"
+          MYSQL_PORT: "3306"
+          MYSQL_USER: "beamos_user"
+          MYSQL_PASSWORD: "ci_test_password"
+          MYSQL_DATABASE: "beamos"
         run: |
           node server.js > "$RUNNER_TEMP/server.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/server.pid"
           for i in $(seq 1 30); do
-            curl -sf http://localhost:4001/api/status >/dev/null && exit 0
+            curl -sf http://localhost:5001/api/status >/dev/null && exit 0
             sleep 1
           done
           echo "server did not come up within 30s:"; cat "$RUNNER_TEMP/server.log"; exit 1
@@ -107,7 +127,7 @@ jobs:
       # VERSION file - this is what proves the single-source-of-truth wiring.
       - name: Assert /api/status ok and version matches VERSION
         run: |
-          STATUS="$(curl -sf http://localhost:4001/api/status)"
+          STATUS="$(curl -sf http://localhost:5001/api/status)"
           echo "status: $STATUS"
           EXPECTED="$(cat VERSION)"
           REPORTED="$(echo "$STATUS" | jq -r .version)"
@@ -119,7 +139,6 @@ jobs:
       - name: Stop server
         if: always()
         run: kill "$(cat "$RUNNER_TEMP/server.pid")" 2>/dev/null || true
-
   # TODO (deferred - needs a tag earlier than HEAD, so meaningful from v1.8.0 on):
   # upgrade-path job. Restore a db created by the previous tagged release, boot
   # the current code against it, and assert migrations complete and /api/status

@@ -26,10 +26,10 @@ db.exec(`
   -- p3 is in wsA but designated to no one -> OUTSIDE the allowlist -> must NOT appear
 `);
 
-test('#73 GET targets: returns ONLY this token\'s designated, in-workspace playlists', () => {
-  const a = listDesignatedPlaylists(db, 'tokA', 'wsA').map(r => r.id);
+test('#73 GET targets: returns ONLY this token\'s designated, in-workspace playlists', async () => {
+  const a = (await listDesignatedPlaylists(db, 'tokA', 'wsA')).map(r => r.id);
   assert.deepEqual(a, ['p1'],
     'tokA sees ONLY p1 - not p2 (another token), not p3 (outside allowlist), not pX (cross-workspace)');
-  const b = listDesignatedPlaylists(db, 'tokB', 'wsA').map(r => r.id);
+  const b = (await listDesignatedPlaylists(db, 'tokB', 'wsA')).map(r => r.id);
   assert.deepEqual(b, ['p2'], 'tokB sees ONLY p2');
 });

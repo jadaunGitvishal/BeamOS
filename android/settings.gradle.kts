@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RemoteDisplay"
+rootProject.name = "BeamOS"
 include(":app")

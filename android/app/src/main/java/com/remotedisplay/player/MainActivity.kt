@@ -93,16 +93,9 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("remote_display", MODE_PRIVATE)
 
         // Show setup wizard if not completed yet
-        if (!prefs.getBoolean("setup_complete", false)) {
-            // Auto-mark complete if accessibility is already enabled (existing install)
-            if (isAccessibilityEnabled()) {
-                prefs.edit().putBoolean("setup_complete", true).apply()
-            } else {
-                startActivity(Intent(this, SetupActivity::class.java))
-                finish()
-                return
-            }
-        }
+        // Setup wizard permanently disabled for BeamOS - remote control features
+        // are intentionally not used, so no permissions need to be requested here.
+        prefs.edit().putBoolean("setup_complete", true).apply()
 
         // Check provisioning BEFORE inflating the heavy media layout
         if (!config.isProvisioned || !config.isPaired) {
@@ -132,8 +125,9 @@ class MainActivity : AppCompatActivity() {
         screenshotCapture = ScreenshotCapture()
         touchInjector = TouchInjector()
         // Constructed here (not just in WebSocketService) so a play event that happens before
-        // the service is bound still gets durably queued. Both instances point at the same
-        // underlying SQLite file.
+        // the service is bound - e.g. cached-playlist playback starting right below, before
+        // bindService() further down this method - still gets durably queued. Both instances
+        // point at the same underlying SQLite file.
         playEventQueue = PlayEventQueue(this)
 
         playerView = findViewById(R.id.playerView)
@@ -213,6 +207,7 @@ class MainActivity : AppCompatActivity() {
             imageView = imageView,
             youtubeWebView = youtubeWebView,
             onVideoComplete = { playlistController.onVideoComplete() },
+            onVideoError = { playlistController.onPlaybackError() },
             onImageError = {
                 Log.w("MainActivity", "Image failed to load, skipping to next item")
                 handler.postDelayed({ playlistController.next() }, 500)

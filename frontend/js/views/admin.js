@@ -19,9 +19,12 @@ const API = (url, opts = {}) =>
   fetch("/api" + url, { headers: headers(), ...opts }).then((r) => r.json());
 
 // #14: the platform user-management dropdown manages users.role (the
-// PLATFORM-level role) only - workspace/org roles are managed in the members
-// views. Options are the current model; the legacy 'admin'/'superadmin' strings
-// were normalized away. #13 adds 'platform_operator' (cross-org staff).
+// PLATFORM-level role) only. Workspace roles are managed in the workspace
+// members view; org roles (org_owner/org_admin) are managed in the
+// organization members view (views/org-members.js), reached from the
+// Organizations list below. Options are the current model; the legacy
+// 'admin'/'superadmin' strings were normalized away. #13 adds
+// 'platform_operator' (cross-org staff).
 const PLATFORM_ROLE_OPTIONS = ["user", "platform_operator", "platform_admin"];
 
 // Platform staff have cross-org access (no single workspace), so the Workspace
@@ -183,13 +186,23 @@ async function loadOrgs() {
               ${o.workspace_count} ${t("admin.orgs.workspaces")} · ${o.device_count} ${t("admin.orgs.devices")} · ${o.member_count} ${t("admin.orgs.members")}
             </div>
           </div>
-          <button class="btn btn-danger btn-sm" data-del-org="${esc(o.id)}" data-org-name="${esc(o.name)}">${t("admin.orgs.delete_org")}</button>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-secondary btn-sm" data-manage-org="${esc(o.id)}" data-org-name="${esc(o.name)}">${t("admin.orgs.manage_members")}</button>
+            <button class="btn btn-danger btn-sm" data-del-org="${esc(o.id)}" data-org-name="${esc(o.name)}">${t("admin.orgs.delete_org")}</button>
+          </div>
         </div>
         ${wsRows}
       </div>`;
     })
     .join("");
 
+  el.querySelectorAll("[data-manage-org]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.manageOrg,
+        name = btn.dataset.orgName;
+      location.hash = `#/organizations/${id}/members?name=${encodeURIComponent(name)}`;
+    }),
+  );
   el.querySelectorAll("[data-del-org]").forEach((btn) =>
     btn.addEventListener("click", () => {
       const id = btn.dataset.delOrg,
@@ -242,7 +255,7 @@ async function loadBranding() {
   const v = (x) => esc(x == null ? "" : x);
   el.innerHTML = `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:640px">
-      <div class="form-group" style="grid-column:1/-1"><label>${t("admin.branding.brand_name")}</label><input type="text" id="brBrandName" class="input" placeholder="ScreenTinker" value="${v(b.brand_name)}"></div>
+      <div class="form-group" style="grid-column:1/-1"><label>${t("admin.branding.brand_name")}</label><input type="text" id="brBrandName" class="input" placeholder="BeamOS" value="${v(b.brand_name)}"></div>
       <div class="form-group"><label>${t("admin.branding.primary_color")}</label><input type="text" id="brPrimary" class="input" placeholder="#3B82F6" value="${v(b.primary_color)}"></div>
       <div class="form-group"><label>${t("admin.branding.bg_color")}</label><input type="text" id="brBg" class="input" placeholder="#111827" value="${v(b.bg_color)}"></div>
       <div class="form-group" style="grid-column:1/-1"><label>${t("admin.branding.logo_url")}</label><input type="text" id="brLogo" class="input" placeholder="https://…/logo.png" value="${v(b.logo_url)}"></div>
@@ -258,7 +271,7 @@ async function loadBranding() {
     try {
       await api.adminSetBranding({
         brand_name:
-          document.getElementById("brBrandName").value.trim() || "ScreenTinker",
+          document.getElementById("brBrandName").value.trim() || "BeamOS",
         primary_color:
           document.getElementById("brPrimary").value.trim() || null,
         bg_color: document.getElementById("brBg").value.trim() || null,
@@ -331,6 +344,7 @@ async function loadUsers() {
             body: JSON.stringify({ role: select.value }),
           });
           showToast(t("admin.toast.role_updated"), "success");
+          loadUsers();
         } catch (err) {
           showToast(err.message, "error");
           loadUsers();
@@ -349,6 +363,7 @@ async function loadUsers() {
             }),
           });
           showToast(t("admin.toast.plan_updated"), "success");
+          loadUsers();
         } catch (err) {
           showToast(err.message, "error");
           loadUsers();
@@ -456,17 +471,39 @@ async function loadSystem() {
   const el = document.getElementById("systemInfo");
   try {
     const version = await fetch("/api/version").then((r) => r.json());
-    const token = localStorage.getItem("token");
     el.innerHTML = `
       <div class="info-grid">
         <div class="info-card"><div class="info-card-label">${t("admin.version")}</div><div class="info-card-value small">${version.version}</div></div>
         <div class="info-card"><div class="info-card-label">${t("admin.frontend_hash")}</div><div class="info-card-value small">${version.hash}</div></div>
       </div>
       <div style="display:flex;gap:8px;margin-top:16px">
-        <a href="/api/status/backup?token=${token}" class="btn btn-secondary btn-sm" style="text-decoration:none">${t("admin.download_db_backup")}</a>
+        <button id="downloadBackupBtn" class="btn btn-secondary btn-sm">${t("admin.download_db_backup")}</button>
         <a href="/api/status" target="_blank" class="btn btn-secondary btn-sm" style="text-decoration:none">${t("admin.server_status")}</a>
       </div>
     `;
+    document.getElementById("downloadBackupBtn").onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/status/backup", { headers: headers() });
+        if (!res.ok) {
+          const error = await res.json().catch(() => ({}));
+          showToast(error.error || "Backup failed", "error");
+          return;
+        }
+        const blob = await res.blob();
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = `beamos-backup-${new Date().toISOString().split("T")[0]}.sql`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+      } finally {
+        btn.disabled = false;
+      }
+    };
   } catch (err) {
     el.innerHTML = `<p style="color:var(--danger)">${esc(err.message)}</p>`;
   }

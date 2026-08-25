@@ -5,6 +5,7 @@ const { db } = require('../db/database');
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
 // Phase 2.2e: workspace-aware access. Same pattern as content/widgets/folders.
 const { accessContext } = require('../lib/tenancy');
+const { asyncHandler } = require('../lib/async-handler');
 
 // Escape HTML to prevent XSS
 function escapeHtml(str) {
@@ -29,29 +30,29 @@ function safeNumber(val, fallback) {
 // rows (workspace_id IS NULL) shared with all workspaces.
 // Phase 2.2e: workspace-scoped. Cross-workspace visibility comes from
 // switch-workspace, not a special list branch.
-router.get('/', (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.json([]);
-  const pages = db.prepare(
+  const pages = await db.prepare(
     'SELECT * FROM kiosk_pages WHERE (workspace_id = ? OR workspace_id IS NULL) ORDER BY created_at DESC'
   ).all(req.workspaceId);
   res.json(pages);
-});
+}));
 
 // Phase 2.2e: workspace-aware access. Mirrors widgets/content helpers.
 // Platform-template kiosks (workspace_id IS NULL) are readable by anyone
 // authenticated and writable only by platform_admin.
-function checkKioskRead(req, res) {
-  const page = db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id);
+async function checkKioskRead(req, res) {
+  const page = await db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id);
   if (!page) { res.status(404).json({ error: 'Page not found' }); return null; }
   if (!page.workspace_id) return page;
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(page.workspace_id);
-  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(page.workspace_id);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   return page;
 }
 
-function checkKioskWrite(req, res) {
-  const page = db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id);
+async function checkKioskWrite(req, res) {
+  const page = await db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id);
   if (!page) { res.status(404).json({ error: 'Page not found' }); return null; }
   if (!page.workspace_id) {
     if (!PLATFORM_ROLES.includes(req.user.role)) {
@@ -59,8 +60,8 @@ function checkKioskWrite(req, res) {
     }
     return page;
   }
-  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(page.workspace_id);
-  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(page.workspace_id);
+  const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
   if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
   if (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer') {
     res.status(403).json({ error: 'Read-only access' }); return null;
@@ -69,15 +70,15 @@ function checkKioskWrite(req, res) {
 }
 
 // Get kiosk page
-router.get('/:id', (req, res) => {
-  const page = checkKioskRead(req, res);
+router.get('/:id', asyncHandler(async (req, res) => {
+  const page = await checkKioskRead(req, res);
   if (!page) return;
   res.json(page);
-});
+}));
 
 // Render kiosk page (public - accessed by devices)
-router.get('/:id/render', (req, res) => {
-  const page = db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id);
+router.get('/:id/render', asyncHandler(async (req, res) => {
+  const page = await db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id);
   if (!page) return res.status(404).send('Page not found');
 
   const config = JSON.parse(page.config || '{}');
@@ -186,41 +187,41 @@ router.get('/:id/render', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'text/html');
   res.send(html);
-});
+}));
 
 // Create kiosk page in the caller's current workspace.
-router.post('/', (req, res) => {
+router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating kiosk pages.' });
   const { name, config: pageConfig } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
 
   const id = uuidv4();
-  db.prepare('INSERT INTO kiosk_pages (id, user_id, workspace_id, name, config) VALUES (?, ?, ?, ?, ?)')
+  await db.prepare('INSERT INTO kiosk_pages (id, user_id, workspace_id, name, config) VALUES (?, ?, ?, ?, ?)')
     .run(id, req.user.id, req.workspaceId, name, JSON.stringify(pageConfig || getDefaultKioskConfig()));
 
-  res.status(201).json(db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(id));
-});
+  res.status(201).json(await db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(id));
+}));
 
 // Update kiosk page
-router.put('/:id', (req, res) => {
-  const page = checkKioskWrite(req, res);
+router.put('/:id', asyncHandler(async (req, res) => {
+  const page = await checkKioskWrite(req, res);
   if (!page) return;
 
   const { name, config: pageConfig } = req.body;
-  if (name) db.prepare('UPDATE kiosk_pages SET name = ? WHERE id = ?').run(name, req.params.id);
-  if (pageConfig) db.prepare('UPDATE kiosk_pages SET config = ?, updated_at = strftime(\'%s\',\'now\') WHERE id = ?')
+  if (name) await db.prepare('UPDATE kiosk_pages SET name = ? WHERE id = ?').run(name, req.params.id);
+  if (pageConfig) await db.prepare('UPDATE kiosk_pages SET config = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?')
     .run(JSON.stringify(pageConfig), req.params.id);
 
-  res.json(db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id));
-});
+  res.json(await db.prepare('SELECT * FROM kiosk_pages WHERE id = ?').get(req.params.id));
+}));
 
 // Delete kiosk page
-router.delete('/:id', (req, res) => {
-  const page = checkKioskWrite(req, res);
+router.delete('/:id', asyncHandler(async (req, res) => {
+  const page = await checkKioskWrite(req, res);
   if (!page) return;
-  db.prepare('DELETE FROM kiosk_pages WHERE id = ?').run(req.params.id);
+  await db.prepare('DELETE FROM kiosk_pages WHERE id = ?').run(req.params.id);
   res.json({ success: true });
-});
+}));
 
 function getDefaultKioskConfig() {
   return {

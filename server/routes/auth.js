@@ -26,6 +26,7 @@ const {
   OrgHasOtherMembersError,
 } = require("../lib/user-deletion");
 const config = require("../config");
+const { asyncHandler } = require("../lib/async-handler");
 
 // Phase 2.1: find or create the user's default org+workspace. Returns the
 // workspace_id to embed in the JWT. Idempotent: if the user already has
@@ -35,8 +36,8 @@ const config = require("../config");
 // returned (idempotent). When allowCreate is false and the user has no
 // membership, returns null - the caller is created org-less and an admin /
 // operator assigns them to a workspace afterward.
-function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
-  const existing = db
+async function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
+  const existing = await db
     .prepare(
       `
     SELECT w.id FROM workspaces w
@@ -56,8 +57,10 @@ function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
     user.name && user.name.trim()
       ? `${user.name}'s organization`
       : `${user.email}'s organization`;
-  const tx = db.transaction(() => {
-    db.prepare(
+  // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
+  // must be prepared from it, not the outer db, to actually participate in the transaction.
+  const tx = db.transaction(async (t) => {
+    await t.prepare(
       `INSERT INTO organizations (
       id, name, owner_user_id, plan_id,
       stripe_customer_id, stripe_subscription_id,
@@ -73,44 +76,44 @@ function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
       user.subscription_status || "active",
       user.subscription_ends || null,
     );
-    db.prepare(
+    await t.prepare(
       `INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')`,
     ).run(orgId, user.id);
-    db.prepare(
+    await t.prepare(
       `INSERT INTO workspaces (id, organization_id, name, created_by) VALUES (?, ?, 'Default', ?)`,
     ).run(wsId, orgId, user.id);
-    db.prepare(
+    await t.prepare(
       `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')`,
     ).run(wsId, user.id);
   });
-  tx();
+  await tx();
   return wsId;
 }
 
-function logFailedLogin(email, ip, reason) {
+async function logFailedLogin(email, ip, reason) {
   try {
-    db.prepare(
+    await db.prepare(
       "INSERT INTO activity_log (user_id, action, details, ip_address) VALUES (NULL, ?, ?, ?)",
     ).run("auth:login_failed", `${email} - ${reason}`, ip);
   } catch {}
 }
 
-function logSuccessfulLogin(userId, email, ip) {
+async function logSuccessfulLogin(userId, email, ip) {
   try {
     // Phase 2.2 writer-leak fix: stamp the user's oldest workspace so this
     // login event is queryable in tenant-scoped activity views. Multi-workspace
     // users still land on one row; the activity dashboard already shows
     // per-user context separately from per-workspace context.
-    const ws = db
+    const ws = await db
       .prepare(
         "SELECT workspace_id FROM workspace_members WHERE user_id = ? ORDER BY joined_at ASC LIMIT 1",
       )
       .get(userId);
-    db.prepare(
+    await db.prepare(
       "INSERT INTO activity_log (user_id, action, details, ip_address, workspace_id) VALUES (?, ?, ?, ?, ?)",
     ).run(userId, "auth:login_success", email, ip, ws?.workspace_id || null);
-    db.prepare(
-      "UPDATE users SET last_login = strftime('%s','now') WHERE id = ?",
+    await db.prepare(
+      "UPDATE users SET last_login = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(userId);
   } catch {}
 }
@@ -119,17 +122,17 @@ function logSuccessfulLogin(userId, email, ip) {
 
 // Returns true if new account creation is allowed at this moment.
 // First-user setup (empty DB) is always allowed so a fresh install can be initialized.
-function canRegister() {
+async function canRegister() {
   if (!config.disableRegistration) return true;
-  const userCount = db
+  const userCount = (await db
     .prepare("SELECT COUNT(*) as count FROM users")
-    .get().count;
+    .get()).count;
   return userCount === 0;
 }
 
 // Register
-router.post("/register", (req, res) => {
-  if (!canRegister()) {
+router.post("/register", asyncHandler(async (req, res) => {
+  if (!await canRegister()) {
     return res.status(403).json({
       error: "Public registration is disabled. Contact your administrator.",
     });
@@ -142,7 +145,7 @@ router.post("/register", (req, res) => {
       .status(400)
       .json({ error: "Password must be at least 8 characters" });
 
-  const existing = db
+  const existing = await db
     .prepare("SELECT id FROM users WHERE email = ?")
     .get(email.toLowerCase());
   if (existing)
@@ -153,9 +156,9 @@ router.post("/register", (req, res) => {
 
   // First user becomes platform_admin with enterprise plan (self-hosted) or free plan with Pro trial.
   // Phase 1 renamed the legacy 'superadmin' role to 'platform_admin'; new bootstrap users get the new name directly.
-  const userCount = db
+  const userCount = (await db
     .prepare("SELECT COUNT(*) as count FROM users")
-    .get().count;
+    .get()).count;
   const role = userCount === 0 ? "platform_admin" : "user";
   const isFirstUser = userCount === 0;
   // const plan = isFirstUser && config.selfHosted ? "enterprise" : "pro"; // Start on Pro trial
@@ -164,7 +167,7 @@ router.post("/register", (req, res) => {
   //   isFirstUser && config.selfHosted ? null : Math.floor(Date.now() / 1000);
   const trialStarted = null; // BeamOS: no trial countdown, enterprise is permanent
 
-  db.prepare(
+  await db.prepare(
     `
     INSERT INTO users (id, email, name, password_hash, auth_provider, role, plan_id, trial_started, trial_plan)
     VALUES (?, ?, ?, ?, 'local', ?, ?, ?, ?)
@@ -180,7 +183,7 @@ router.post("/register", (req, res) => {
     trialStarted ? "pro" : null,
   );
 
-  const user = db
+  const user = await db
     .prepare(
       "SELECT id, email, name, role, auth_provider, avatar_url, plan_id, stripe_customer_id, stripe_subscription_id, subscription_status, subscription_ends FROM users WHERE id = ?",
     )
@@ -193,7 +196,7 @@ router.post("/register", (req, res) => {
   const createOrgForUser =
     isFirstUser ||
     (createOrg !== undefined ? !!createOrg : config.autoCreateOrgOnSignup);
-  const workspaceId = ensureDefaultOrgForUser(user, {
+  const workspaceId = await ensureDefaultOrgForUser(user, {
     allowCreate: createOrgForUser,
   });
   const token = generateToken(user, workspaceId);
@@ -202,15 +205,15 @@ router.post("/register", (req, res) => {
 
   // Welcome + admin-notify emails (hosted instance only, idempotent, async).
   sendSignupEmails(user, req);
-});
+}));
 
 // Login
-router.post("/login", (req, res) => {
+router.post("/login", asyncHandler(async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password)
     return res.status(400).json({ error: "Email and password required" });
 
-  const user = db
+  const user = await db
     .prepare("SELECT * FROM users WHERE email = ? AND auth_provider = ?")
     .get(email.toLowerCase(), "local");
   if (!user) {
@@ -233,14 +236,14 @@ router.post("/login", (req, res) => {
       mfa_token: generateMfaPendingToken(user),
     });
   }
-  issueSession(req, res, user);
-});
+  await issueSession(req, res, user);
+}));
 
 // #100: finish an interactive login - shared by /login (no TOTP) and /totp/verify
 // (after TOTP). Logs the successful login + issues the full session JWT.
-function issueSession(req, res, user, extra = {}) {
+async function issueSession(req, res, user, extra = {}) {
   logSuccessfulLogin(user.id, user.email, getClientIp(req));
-  const workspaceId = ensureDefaultOrgForUser(user, {
+  const workspaceId = await ensureDefaultOrgForUser(user, {
     allowCreate: config.autoCreateOrgOnSignup,
   });
   const token = generateToken(user, workspaceId);
@@ -263,59 +266,61 @@ function issueSession(req, res, user, extra = {}) {
 
 const RECOVERY_CODE_COUNT = 10;
 
-function recoveryCodesRemaining(userId) {
-  return db
+async function recoveryCodesRemaining(userId) {
+  return (await db
     .prepare(
       "SELECT COUNT(*) AS n FROM totp_recovery_codes WHERE user_id = ? AND used_at IS NULL",
     )
-    .get(userId).n;
+    .get(userId)).n;
 }
 
 // Atomically replace a user's recovery codes - no window where old + new both verify
-// (tightening #3). Returns the plaintext set (shown ONCE).
-function resetRecoveryCodes(userId) {
+// (tightening #3). Returns the plaintext set (shown ONCE). db.transaction()'s callback
+// gets a transaction-scoped handle (tx) - statements must be prepared from it, not the
+// outer db, to actually participate in the transaction.
+async function resetRecoveryCodes(userId) {
   const { plain, hashes } = totp.generateRecoveryCodes(RECOVERY_CODE_COUNT);
-  db.transaction(() => {
-    db.prepare("DELETE FROM totp_recovery_codes WHERE user_id = ?").run(userId);
-    const ins = db.prepare(
+  await db.transaction(async (tx) => {
+    await tx.prepare("DELETE FROM totp_recovery_codes WHERE user_id = ?").run(userId);
+    const ins = tx.prepare(
       "INSERT INTO totp_recovery_codes (id, user_id, code_hash) VALUES (?, ?, ?)",
     );
-    for (const h of hashes) ins.run(uuidv4(), userId, h);
+    for (const h of hashes) await ins.run(uuidv4(), userId, h);
   })();
   return plain;
 }
 
 // Consume one single-use recovery code (mark used). True if a fresh code matched.
-function consumeRecoveryCode(userId, input) {
+async function consumeRecoveryCode(userId, input) {
   if (!input) return false;
-  const row = db
+  const row = await db
     .prepare(
       "SELECT id FROM totp_recovery_codes WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
     )
     .get(userId, totp.hashRecoveryCode(input));
   if (!row) return false;
-  db.prepare(
-    "UPDATE totp_recovery_codes SET used_at = strftime('%s','now') WHERE id = ?",
+  await db.prepare(
+    "UPDATE totp_recovery_codes SET used_at = UNIX_TIMESTAMP() WHERE id = ?",
   ).run(row.id);
   return true;
 }
 
-router.get("/totp/status", requireAuth, (req, res) => {
-  const u = db
+router.get("/totp/status", requireAuth, asyncHandler(async (req, res) => {
+  const u = await db
     .prepare("SELECT totp_enabled, auth_provider FROM users WHERE id = ?")
     .get(req.user.id);
   res.json({
     enabled: !!u.totp_enabled,
     eligible: u.auth_provider === "local",
     recovery_codes_remaining: u.totp_enabled
-      ? recoveryCodesRemaining(req.user.id)
+      ? await recoveryCodesRemaining(req.user.id)
       : 0,
   });
-});
+}));
 
 // Step 1: mint a pending secret + return the otpauth:// URI (frontend renders the QR).
-router.post("/totp/setup", requireAuth, (req, res) => {
-  const u = db
+router.post("/totp/setup", requireAuth, asyncHandler(async (req, res) => {
+  const u = await db
     .prepare(
       "SELECT auth_provider, totp_enabled, email FROM users WHERE id = ?",
     )
@@ -330,15 +335,15 @@ router.post("/totp/setup", requireAuth, (req, res) => {
       .status(409)
       .json({ error: "TOTP already enabled. Disable it first to re-enroll." });
   const secret = totp.generateSecret();
-  db.prepare(
-    "UPDATE users SET totp_secret_enc = ?, totp_enabled = 0, updated_at = strftime('%s','now') WHERE id = ?",
+  await db.prepare(
+    "UPDATE users SET totp_secret_enc = ?, totp_enabled = 0, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
   ).run(totp.encryptSecret(secret), req.user.id);
   res.json({ otpauth_uri: totp.keyuri(u.email, secret), secret });
-});
+}));
 
 // Step 2: confirm a code from the user's app, THEN enable + issue recovery codes (once).
-router.post("/totp/enable", requireAuth, (req, res) => {
-  const u = db
+router.post("/totp/enable", requireAuth, asyncHandler(async (req, res) => {
+  const u = await db
     .prepare(
       "SELECT totp_secret_enc, totp_enabled, totp_last_step, auth_provider FROM users WHERE id = ?",
     )
@@ -359,16 +364,16 @@ router.post("/totp/enable", requireAuth, (req, res) => {
     u.totp_last_step,
   );
   if (!step) return res.status(400).json({ error: "Invalid code" });
-  db.prepare(
-    "UPDATE users SET totp_enabled = 1, totp_last_step = ?, updated_at = strftime('%s','now') WHERE id = ?",
+  await db.prepare(
+    "UPDATE users SET totp_enabled = 1, totp_last_step = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
   ).run(step, req.user.id);
-  res.json({ enabled: true, recovery_codes: resetRecoveryCodes(req.user.id) }); // shown ONCE
-});
+  res.json({ enabled: true, recovery_codes: await resetRecoveryCodes(req.user.id) }); // shown ONCE
+}));
 
 // Disable: re-auth with a current code (or a recovery code) so a hijacked session
 // can't silently strip MFA. Clears the secret + all recovery codes.
-router.post("/totp/disable", requireAuth, (req, res) => {
-  const u = db
+router.post("/totp/disable", requireAuth, asyncHandler(async (req, res) => {
+  const u = await db
     .prepare(
       "SELECT totp_secret_enc, totp_enabled, totp_last_step FROM users WHERE id = ?",
     )
@@ -380,22 +385,24 @@ router.post("/totp/disable", requireAuth, (req, res) => {
       req.body.code,
       totp.decryptSecret(u.totp_secret_enc),
       u.totp_last_step,
-    ) || consumeRecoveryCode(req.user.id, req.body.code);
+    ) || await consumeRecoveryCode(req.user.id, req.body.code);
   if (!ok) return res.status(400).json({ error: "Invalid code" });
-  db.transaction(() => {
-    db.prepare(
-      "UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = 0, updated_at = strftime('%s','now') WHERE id = ?",
+  // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
+  // must be prepared from it, not the outer db, to actually participate in the transaction.
+  await db.transaction(async (tx) => {
+    await tx.prepare(
+      "UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = 0, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(req.user.id);
-    db.prepare("DELETE FROM totp_recovery_codes WHERE user_id = ?").run(
+    await tx.prepare("DELETE FROM totp_recovery_codes WHERE user_id = ?").run(
       req.user.id,
     );
   })();
   res.json({ enabled: false });
-});
+}));
 
 // Regenerate recovery codes: re-auth (current code) + ATOMIC replace (tightening #3).
-router.post("/totp/recovery-codes/regenerate", requireAuth, (req, res) => {
-  const u = db
+router.post("/totp/recovery-codes/regenerate", requireAuth, asyncHandler(async (req, res) => {
+  const u = await db
     .prepare(
       "SELECT totp_secret_enc, totp_enabled, totp_last_step FROM users WHERE id = ?",
     )
@@ -408,16 +415,16 @@ router.post("/totp/recovery-codes/regenerate", requireAuth, (req, res) => {
     u.totp_last_step,
   );
   if (!step) return res.status(400).json({ error: "Invalid code" });
-  db.prepare("UPDATE users SET totp_last_step = ? WHERE id = ?").run(
+  await db.prepare("UPDATE users SET totp_last_step = ? WHERE id = ?").run(
     step,
     req.user.id,
   );
-  res.json({ recovery_codes: resetRecoveryCodes(req.user.id) });
-});
+  res.json({ recovery_codes: await resetRecoveryCodes(req.user.id) });
+}));
 
 // Second login step: exchange an mfa_pending token + a code (TOTP or recovery) for a
 // full session. Per-route 10/min rate-limit (server.js) + per-user lockout (#87 model).
-router.post("/totp/verify", (req, res) => {
+router.post("/totp/verify", asyncHandler(async (req, res) => {
   const { mfa_token, code } = req.body;
   if (!mfa_token || !code)
     return res.status(400).json({ error: "mfa_token and code required" });
@@ -434,7 +441,7 @@ router.post("/totp/verify", (req, res) => {
       .status(429)
       .json({ error: "Too many invalid codes. Try again later." });
 
-  const user = db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id);
+  const user = await db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id);
   if (!user || !user.totp_enabled)
     return res.status(401).json({ error: "invalid mfa token" });
 
@@ -446,11 +453,11 @@ router.post("/totp/verify", (req, res) => {
   );
   let viaRecovery = false;
   if (step) {
-    db.prepare("UPDATE users SET totp_last_step = ? WHERE id = ?").run(
+    await db.prepare("UPDATE users SET totp_last_step = ? WHERE id = ?").run(
       step,
       user.id,
     );
-  } else if (consumeRecoveryCode(user.id, code)) {
+  } else if (await consumeRecoveryCode(user.id, code)) {
     viaRecovery = true;
   } else {
     totpLockout.recordFailure(decoded.id);
@@ -458,11 +465,11 @@ router.post("/totp/verify", (req, res) => {
     return res.status(401).json({ error: "Invalid code" });
   }
   totpLockout.reset(decoded.id);
-  issueSession(req, res, user, {
+  await issueSession(req, res, user, {
     via_recovery: viaRecovery,
-    recovery_codes_remaining: recoveryCodesRemaining(user.id),
+    recovery_codes_remaining: await recoveryCodesRemaining(user.id),
   });
-});
+}));
 
 // ==================== Google OAuth ====================
 
@@ -480,21 +487,21 @@ router.post("/google", async (req, res) => {
     const { email, name, picture, sub: googleId } = payload;
 
     // Find or create user
-    let user = db
+    let user = await db
       .prepare("SELECT * FROM users WHERE email = ?")
       .get(email.toLowerCase());
     const isNewUser = !user;
 
     if (!user) {
-      if (!canRegister()) {
+      if (!await canRegister()) {
         return res.status(403).json({
           error: "Public registration is disabled. Contact your administrator.",
         });
       }
       const id = uuidv4();
-      const userCount = db
+      const userCount = (await db
         .prepare("SELECT COUNT(*) as count FROM users")
-        .get().count;
+        .get()).count;
       const role = userCount === 0 ? "platform_admin" : "user";
       const isFirst = userCount === 0;
       // const plan = isFirst && config.selfHosted ? "enterprise" : "pro";
@@ -502,7 +509,7 @@ router.post("/google", async (req, res) => {
       // const trialStarted = isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
       const trialStarted = null; // BeamOS: no trial countdown, enterprise is permanent
 
-      db.prepare(
+      await db.prepare(
         `
         INSERT INTO users (id, email, name, auth_provider, provider_id, avatar_url, role, plan_id, trial_started, trial_plan)
         VALUES (?, ?, ?, 'google', ?, ?, ?, ?, ?, ?)
@@ -519,7 +526,7 @@ router.post("/google", async (req, res) => {
         trialStarted ? "pro" : null,
       );
 
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+      user = await db.prepare("SELECT * FROM users WHERE id = ?").get(id);
     } else if (user.auth_provider !== "google") {
       // Existing account with different provider — do NOT silently overwrite auth_provider.
       // If they have a local password, require them to log in locally and link from settings.
@@ -530,13 +537,13 @@ router.post("/google", async (req, res) => {
         });
       }
       // No password (e.g. Microsoft → Google switch) — allow linking
-      db.prepare(
+      await db.prepare(
         "UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?",
       ).run("google", googleId, picture || user.avatar_url, user.id);
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+      user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
     }
 
-    const workspaceId = ensureDefaultOrgForUser(user, {
+    const workspaceId = await ensureDefaultOrgForUser(user, {
       allowCreate: config.autoCreateOrgOnSignup,
     });
     const token = generateToken(user, workspaceId);
@@ -592,19 +599,19 @@ router.post("/microsoft", async (req, res) => {
     const microsoftId = profile.id;
 
     // Find or create user
-    let user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+    let user = await db.prepare("SELECT * FROM users WHERE email = ?").get(email);
     const isNewUser = !user;
 
     if (!user) {
-      if (!canRegister()) {
+      if (!await canRegister()) {
         return res.status(403).json({
           error: "Public registration is disabled. Contact your administrator.",
         });
       }
       const id = uuidv4();
-      const userCount = db
+      const userCount = (await db
         .prepare("SELECT COUNT(*) as count FROM users")
-        .get().count;
+        .get()).count;
       const role = userCount === 0 ? "platform_admin" : "user";
       const isFirst = userCount === 0;
       // const plan = isFirst && config.selfHosted ? "enterprise" : "pro";
@@ -613,7 +620,7 @@ router.post("/microsoft", async (req, res) => {
       //   isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
       const trialStarted = null; // BeamOS: no trial countdown, enterprise is permanent
 
-      db.prepare(
+      await db.prepare(
         `
         INSERT INTO users (id, email, name, auth_provider, provider_id, role, plan_id, trial_started, trial_plan)
         VALUES (?, ?, ?, 'microsoft', ?, ?, ?, ?, ?)
@@ -629,7 +636,7 @@ router.post("/microsoft", async (req, res) => {
         trialStarted ? "pro" : null,
       );
 
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+      user = await db.prepare("SELECT * FROM users WHERE id = ?").get(id);
     } else if (user.auth_provider !== "microsoft") {
       // Existing account with different provider — do NOT silently overwrite auth_provider.
       if (user.password_hash) {
@@ -638,13 +645,13 @@ router.post("/microsoft", async (req, res) => {
             "An account with this email already exists. Please log in with your password.",
         });
       }
-      db.prepare(
+      await db.prepare(
         "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
       ).run("microsoft", microsoftId, user.id);
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+      user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
     }
 
-    const workspaceId = ensureDefaultOrgForUser(user, {
+    const workspaceId = await ensureDefaultOrgForUser(user, {
       allowCreate: config.autoCreateOrgOnSignup,
     });
     const token = generateToken(user, workspaceId);
@@ -688,7 +695,7 @@ function getMicrosoftProfile(accessToken) {
 // Phase 2.1: response shape extended with current_workspace, current_organization,
 // roles, and the list of accessible workspaces. Legacy fields (user object at
 // the top level) are preserved so existing frontend code continues to work.
-router.get("/me", requireAuth, resolveTenancy, (req, res) => {
+router.get("/me", requireAuth, resolveTenancy, asyncHandler(async (req, res) => {
   // Platform admins see every workspace in the system (via the LEFT JOIN they
   // still get their own workspace_role for direct memberships; NULL elsewhere,
   // matching accessContext's actingAs semantics). Regular users see every
@@ -714,7 +721,7 @@ router.get("/me", requireAuth, resolveTenancy, (req, res) => {
   const isPlatformStaffUser = isPlatformStaff(req.user.role);
   const isPlatformAdmin = isPlatformRole(req.user.role);
   const accessible = isPlatformStaffUser
-    ? db
+    ? await db
         .prepare(
           `
         SELECT w.id, w.name, w.organization_id, o.name AS organization_name,
@@ -728,7 +735,7 @@ router.get("/me", requireAuth, resolveTenancy, (req, res) => {
       `,
         )
         .all(req.user.id, req.user.id)
-    : db
+    : await db
         .prepare(
           `
         SELECT w.id, w.name, w.organization_id, o.name AS organization_name,
@@ -757,7 +764,7 @@ router.get("/me", requireAuth, resolveTenancy, (req, res) => {
   }
 
   const currentOrg = req.organizationId
-    ? db
+    ? await db
         .prepare("SELECT id, name FROM organizations WHERE id = ?")
         .get(req.organizationId)
     : null;
@@ -780,29 +787,29 @@ router.get("/me", requireAuth, resolveTenancy, (req, res) => {
     acting_as: req.actingAs,
     accessible_workspaces: accessible,
   });
-});
+}));
 
 // Switch the active workspace. Validates the user has access (direct
 // workspace_member, org-level admin in the parent org, or platform_admin),
 // then mints a fresh JWT with the new current_workspace_id.
-router.post("/switch-workspace", requireAuth, (req, res) => {
+router.post("/switch-workspace", requireAuth, asyncHandler(async (req, res) => {
   const { workspace_id } = req.body || {};
   if (!workspace_id)
     return res.status(400).json({ error: "workspace_id required" });
 
-  const ws = db
+  const ws = await db
     .prepare("SELECT * FROM workspaces WHERE id = ?")
     .get(workspace_id);
   if (!ws) return res.status(404).json({ error: "Workspace not found" });
 
   // #13: platform staff (admin OR operator) can switch into any workspace.
   const isPlatformStaffUser = isPlatformStaff(req.user.role);
-  const wsMember = db
+  const wsMember = await db
     .prepare(
       "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
     )
     .get(ws.id, req.user.id);
-  const orgMember = db
+  const orgMember = await db
     .prepare(
       `
     SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?
@@ -820,19 +827,19 @@ router.post("/switch-workspace", requireAuth, (req, res) => {
 
   const token = generateToken(req.user, ws.id);
   res.json({ token, current_workspace_id: ws.id });
-});
+}));
 
 // Update current user
-router.put("/me", requireAuth, (req, res) => {
+router.put("/me", requireAuth, asyncHandler(async (req, res) => {
   const { name, password, current_password, email_alerts } = req.body;
   if (name) {
-    db.prepare(
-      "UPDATE users SET name = ?, updated_at = strftime('%s','now') WHERE id = ?",
+    await db.prepare(
+      "UPDATE users SET name = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(name, req.user.id);
   }
   if (email_alerts !== undefined) {
-    db.prepare(
-      "UPDATE users SET email_alerts = ?, updated_at = strftime('%s','now') WHERE id = ?",
+    await db.prepare(
+      "UPDATE users SET email_alerts = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(email_alerts ? 1 : 0, req.user.id);
   }
   if (password) {
@@ -840,7 +847,7 @@ router.put("/me", requireAuth, (req, res) => {
       return res
         .status(400)
         .json({ error: "Password must be at least 8 characters" });
-    const row = db
+    const row = await db
       .prepare("SELECT password_hash, auth_provider FROM users WHERE id = ?")
       .get(req.user.id);
     if (!row) return res.status(404).json({ error: "User not found" });
@@ -860,27 +867,27 @@ router.put("/me", requireAuth, (req, res) => {
     const hash = bcrypt.hashSync(password, 10);
     // #10: a successful password change clears must_change_password, releasing
     // the first-login change-password gate.
-    db.prepare(
-      "UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = strftime('%s','now') WHERE id = ?",
+    await db.prepare(
+      "UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(hash, req.user.id);
   }
-  const user = db
+  const user = await db
     .prepare(
       "SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?",
     )
     .get(req.user.id);
   res.json(user);
-});
+}));
 
 // List users - platform admins see all, admins see team members only
-router.get("/users", requireAuth, requireAdmin, (req, res) => {
+router.get("/users", requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   if (PLATFORM_ROLES.includes(req.user.role)) {
     // One aggregate query (no N+1): each user carries workspace_count, and for
     // an exactly-one membership the single workspace id/name + org name (used by
     // the admin Users page Workspace column). MAX() over a single grouped row
     // yields that row's values; the CASE blanks them when count != 1 so we never
     // surface a single workspace name for a multi-membership user.
-    const users = db
+    const users = await db
       .prepare(
         `
       SELECT u.id, u.email, u.name, u.role, u.auth_provider, u.avatar_url, u.plan_id, u.created_at, u.last_login,
@@ -900,7 +907,7 @@ router.get("/users", requireAuth, requireAdmin, (req, res) => {
     res.json(users);
   } else {
     // Admin sees themselves + users in their teams
-    const users = db
+    const users = await db
       .prepare(
         `
       SELECT DISTINCT u.id, u.email, u.name, u.role, u.auth_provider, u.avatar_url, u.plan_id, u.created_at
@@ -913,13 +920,13 @@ router.get("/users", requireAuth, requireAdmin, (req, res) => {
       .all(req.user.id, req.user.id);
     res.json(users);
   }
-});
+}));
 
 // Delete user (superadmin only)
-router.delete("/users/:id", requireAuth, requireSuperAdmin, (req, res) => {
+router.delete("/users/:id", requireAuth, requireSuperAdmin, asyncHandler(async (req, res) => {
   if (req.params.id === req.user.id)
     return res.status(400).json({ error: "Cannot delete yourself" });
-  const target = db
+  const target = await db
     .prepare("SELECT id, email FROM users WHERE id = ?")
     .get(req.params.id);
   if (!target) return res.status(404).json({ error: "User not found" });
@@ -928,7 +935,7 @@ router.delete("/users/:id", requireAuth, requireSuperAdmin, (req, res) => {
   // orgs the user solely owns, preserves (unlinks/reassigns) resources in orgs
   // they don't own, and refuses if they own a shared org.
   try {
-    deleteUserCascade(db, { targetId: target.id, actingAdminId: req.user.id });
+    await deleteUserCascade(db, { targetId: target.id, actingAdminId: req.user.id });
   } catch (e) {
     if (e instanceof OrgHasOtherMembersError)
       return res.status(409).json({ error: e.message });
@@ -942,19 +949,23 @@ router.delete("/users/:id", requireAuth, requireSuperAdmin, (req, res) => {
     getClientIp(req),
   );
   res.json({ success: true });
-});
+}));
 
 // Update user platform role (platform admin only).
-// #14: this manages users.role (the PLATFORM-level role) only - workspace and
-// org roles are managed in the members views. Whitelist is the current model:
-// 'user' and 'platform_admin' (the legacy 'admin'/'superadmin' strings are gone
-// after normalization and are no longer accepted here).
+// #14: this manages users.role (the PLATFORM-level role) only. Workspace roles
+// are managed in workspace-members.js / routes/workspaces.js; org roles
+// (org_owner/org_admin) are managed in routes/organizations.js (added after
+// the RBAC audit found org-level membership had no route or UI at all - the
+// "members views" this comment used to point to never actually covered org
+// roles). Whitelist is the current model: 'user' and 'platform_admin' (the
+// legacy 'admin'/'superadmin' strings are gone after normalization and are no
+// longer accepted here).
 const ASSIGNABLE_PLATFORM_ROLES = [
   "user",
   "platform_operator",
   "platform_admin",
 ];
-router.put("/users/:id/role", requireAuth, requireSuperAdmin, (req, res) => {
+router.put("/users/:id/role", requireAuth, requireSuperAdmin, asyncHandler(async (req, res) => {
   const { role } = req.body;
   if (!ASSIGNABLE_PLATFORM_ROLES.includes(role))
     return res.status(400).json({ error: "Invalid role" });
@@ -962,15 +973,15 @@ router.put("/users/:id/role", requireAuth, requireSuperAdmin, (req, res) => {
   // (would lock themselves out of platform admin actions).
   if (req.params.id === req.user.id && !isPlatformRole(role))
     return res.status(400).json({ error: "Cannot demote yourself" });
-  db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
+  await db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
   res.json({ success: true });
-});
+}));
 
 // Admin password reset for another user.
 // Superadmins: can reset any local user. Admins: can reset members of teams
 // they own (and never a superadmin). Self-reset routes through PUT /me with
 // current_password — this endpoint is the override path.
-router.put("/users/:id/password", requireAuth, requireAdmin, (req, res) => {
+router.put("/users/:id/password", requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { password } = req.body;
   if (!password || password.length < 8) {
     return res
@@ -982,7 +993,7 @@ router.put("/users/:id/password", requireAuth, requireAdmin, (req, res) => {
       .status(400)
       .json({ error: "Use Settings > Change Password for your own account" });
   }
-  const target = db
+  const target = await db
     .prepare("SELECT id, email, role, auth_provider FROM users WHERE id = ?")
     .get(req.params.id);
   if (!target) return res.status(404).json({ error: "User not found" });
@@ -1001,7 +1012,7 @@ router.put("/users/:id/password", requireAuth, requireAdmin, (req, res) => {
         .status(403)
         .json({ error: "Admins can only reset passwords for regular users" });
     }
-    const sharedOwnedTeam = db
+    const sharedOwnedTeam = await db
       .prepare(
         `
       SELECT 1 FROM team_members tm_admin
@@ -1020,8 +1031,8 @@ router.put("/users/:id/password", requireAuth, requireAdmin, (req, res) => {
   }
 
   const hash = bcrypt.hashSync(password, 10);
-  db.prepare(
-    "UPDATE users SET password_hash = ?, updated_at = strftime('%s','now') WHERE id = ?",
+  await db.prepare(
+    "UPDATE users SET password_hash = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
   ).run(hash, req.params.id);
 
   // Explicit audit entry — the generic activity logger captures the route
@@ -1035,13 +1046,13 @@ router.put("/users/:id/password", requireAuth, requireAdmin, (req, res) => {
     getClientIp(req),
   );
   res.json({ success: true });
-});
+}));
 
 // Get auth config (public - tells frontend which providers are available)
-router.get("/config", (req, res) => {
-  const userCount = db
+router.get("/config", asyncHandler(async (req, res) => {
+  const userCount = (await db
     .prepare("SELECT COUNT(*) as count FROM users")
-    .get().count;
+    .get()).count;
   res.json({
     googleEnabled: !!config.googleClientId,
     googleClientId: config.googleClientId,
@@ -1052,7 +1063,7 @@ router.get("/config", (req, res) => {
     needsSetup: userCount === 0,
     registration_enabled: !config.disableRegistration || userCount === 0,
   });
-});
+}));
 
 // Accept a workspace invite. Mounted here (under /api/auth) rather than in
 // routes/workspaces.js because the invite id is the only thing the caller
@@ -1061,15 +1072,15 @@ router.get("/config", (req, res) => {
 // invite's email is matched against the authenticated user's email
 // case-insensitively, so a logged-in account can only accept invites
 // addressed to its own email.
-router.post("/accept-invite/:inviteId", requireAuth, (req, res) => {
-  const invite = db
+router.post("/accept-invite/:inviteId", requireAuth, asyncHandler(async (req, res) => {
+  const invite = await db
     .prepare("SELECT * FROM workspace_invites WHERE id = ?")
     .get(req.params.inviteId);
   if (!invite) return res.status(404).json({ error: "Invite not found" });
 
   const now = Math.floor(Date.now() / 1000);
   if (invite.expires_at <= now) {
-    db.prepare("DELETE FROM workspace_invites WHERE id = ?").run(invite.id);
+    await db.prepare("DELETE FROM workspace_invites WHERE id = ?").run(invite.id);
     return res.status(410).json({ error: "Invite has expired" });
   }
 
@@ -1081,16 +1092,16 @@ router.post("/accept-invite/:inviteId", requireAuth, (req, res) => {
       .json({ error: "This invite is for a different email address" });
   }
 
-  const ws = db
+  const ws = await db
     .prepare("SELECT id, name, organization_id FROM workspaces WHERE id = ?")
     .get(invite.workspace_id);
   if (!ws) {
     // Workspace was deleted between invite creation and accept. Clean up.
-    db.prepare("DELETE FROM workspace_invites WHERE id = ?").run(invite.id);
+    await db.prepare("DELETE FROM workspace_invites WHERE id = ?").run(invite.id);
     return res.status(410).json({ error: "Workspace no longer exists" });
   }
 
-  const org = db
+  const org = await db
     .prepare("SELECT name FROM organizations WHERE id = ?")
     .get(ws.organization_id);
 
@@ -1098,24 +1109,26 @@ router.post("/accept-invite/:inviteId", requireAuth, (req, res) => {
   // success without changing the role (don't silently demote/upgrade), and
   // still consume the invite. The invitee's intent ("I want access") is
   // already satisfied either way.
-  const existing = db
+  const existing = await db
     .prepare(
       "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
     )
     .get(ws.id, req.user.id);
 
-  const txn = db.transaction(() => {
+  // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
+  // must be prepared from it, not the outer db, to actually participate in the transaction.
+  const txn = db.transaction(async (tx) => {
     if (!existing) {
-      db.prepare(
+      await tx.prepare(
         `
         INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
         VALUES (?, ?, ?, ?)
       `,
       ).run(ws.id, req.user.id, invite.role, invite.invited_by);
     }
-    db.prepare("DELETE FROM workspace_invites WHERE id = ?").run(invite.id);
+    await tx.prepare("DELETE FROM workspace_invites WHERE id = ?").run(invite.id);
   });
-  txn();
+  await txn();
 
   // Stamp workspaceId so activityLogger captures tenant attribution.
   req.workspaceId = ws.id;
@@ -1127,6 +1140,6 @@ router.post("/accept-invite/:inviteId", requireAuth, (req, res) => {
     role: existing ? existing.role : invite.role,
     already_member: !!existing,
   });
-});
+}));
 
 module.exports = router;

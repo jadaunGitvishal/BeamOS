@@ -7,7 +7,7 @@
 //   (JOIN api_token_targets) -> only allowlisted playlists, never one outside the allowlist
 //   p.workspace_id = ?  -> only the bound workspace, never cross-workspace
 // db is passed in (not module-required) so the confinement is unit-testable in isolation.
-function listDesignatedPlaylists(db, tokenId, workspaceId) {
+async function listDesignatedPlaylists(db, tokenId, workspaceId) {
   return db.prepare(`
     SELECT p.id, p.name, p.status
     FROM api_token_targets t
@@ -22,8 +22,8 @@ function listDesignatedPlaylists(db, tokenId, workspaceId) {
 // with an agency. Checked at BOTH designation (reject the grant) AND upload (block the add) -
 // the upload check is mandatory because auto-publish has no draft step to catch a playlist
 // that becomes zoned after designation.
-function isZonedPlaylist(db, playlistId) {
-  return !!db.prepare('SELECT 1 FROM playlist_items WHERE playlist_id = ? AND zone_id IS NOT NULL LIMIT 1').get(playlistId);
+async function isZonedPlaylist(db, playlistId) {
+  return !!(await db.prepare('SELECT 1 FROM playlist_items WHERE playlist_id = ? AND zone_id IS NOT NULL LIMIT 1').get(playlistId));
 }
 
 module.exports = { listDesignatedPlaylists, isZonedPlaylist };

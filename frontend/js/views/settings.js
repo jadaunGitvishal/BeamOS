@@ -79,6 +79,19 @@ export async function render(container) {
       }
     </div>
 
+    ${
+      user.current_org_role === "org_owner" ||
+      user.current_org_role === "org_admin"
+        ? `
+    <div class="settings-section">
+      <h3>${t("settings.organization")}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${t("settings.organization_desc", { org: esc(user.current_organization?.name || "") })}</p>
+      <a href="#/organizations/${esc(user.current_organization?.id || "")}/members?name=${encodeURIComponent(user.current_organization?.name || "")}" class="btn btn-secondary btn-sm" style="text-decoration:none">${t("settings.manage_org_members")}</a>
+    </div>
+    `
+        : ""
+    }
+
     <div class="settings-section">
       <h3>${t("apitoken.title")}</h3>
       <p style="color:var(--text-muted);font-size:12px;margin-bottom:8px">${t("apitoken.desc")}</p>
@@ -270,11 +283,27 @@ export async function render(container) {
   }
 
   // Export data handler
-  document.getElementById("exportDataBtn")?.addEventListener("click", () => {
+  document.getElementById("exportDataBtn")?.addEventListener("click", async () => {
     const includeFiles = document.getElementById("exportIncludeFiles")?.checked;
     const token = localStorage.getItem("token");
-    const url = `/api/status/export?token=${token}${includeFiles ? "&include_files=true" : ""}`;
-    window.location.href = url;
+    const url = `/api/status/export${includeFiles ? "?include_files=true" : ""}`;
+
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      showToast(error.error || "Export failed", "error");
+      return;
+    }
+
+    const blob = await res.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.download = `screentinker-export-${new Date().toISOString().split("T")[0]}.${includeFiles ? "zip" : "json"}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(downloadUrl);
   });
 
   // Import data handler

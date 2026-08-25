@@ -8,6 +8,10 @@ node_modules/
 *.db-shm
 *.db.*
 
+# mysqldump backups produced by scripts/migrate-sqlite-to-mysql.js - same
+# "never commit a database" intent as above, just a different file extension.
+server/db/backups/*.sql
+
 # Uploads (user content)
 server/uploads/
 

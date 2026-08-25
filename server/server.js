@@ -1,47 +1,77 @@
-const express = require('express');
-const http = require('http');
-const https = require('https');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
-const config = require('./config');
-const VERSION = require('./version');
+const express = require("express");
+const http = require("http");
+const https = require("https");
+const { Server } = require("socket.io");
+const cors = require("cors");
+const path = require("path");
+const fs = require("fs");
+const config = require("./config");
+const VERSION = require("./version");
+const { asyncHandler } = require("./lib/async-handler");
 
-// #114: last-resort crash safety net. better-sqlite3 is SYNCHRONOUS, so a constraint
-// violation (e.g. a FK write) inside a socket.io handler with no local try/catch
-// propagates to uncaughtException; Node's default then prints a bare message and exits
-// with NO stack — which is exactly why #114's "FOREIGN KEY constraint failed" couldn't
-// be root-caused. This handler logs the FULL STACK (the file:line of the offending
-// write) then exits(1) so systemd restarts a fresh process. It is NOT catch-and-
-// continue: after an uncaught throw the process state is undefined, so we never keep
-// serving. Registered before everything else so it's in place during startup too.
-// (Verified: uncaughtException does catch a synchronous socket.io-handler throw.)
-function logFatalAndExit(kind, err) {
+// #114: last-resort crash safety net. A constraint violation (e.g. an FK write) inside
+// a socket.io handler with no local try/catch propagates to uncaughtException; Node's
+// default then prints a bare message and exits with NO stack — which is exactly why
+// #114's "FOREIGN KEY constraint failed" couldn't be root-caused. This handler logs the
+// FULL STACK (the file:line of the offending write) then exits(1) so systemd restarts a
+// fresh process. It is NOT catch-and-continue: after an uncaught throw the process state
+// is undefined, so we never keep serving. Registered before everything else so it's in
+// place during startup too. (Verified: uncaughtException does catch a synchronous
+// socket.io-handler throw.)
+//
+// status-log-writer.flush() and db.close() are async (mysql2/promise) - unlike the old
+// synchronous better-sqlite3 close, we have to actually await them or they never run
+// before process.exit(). A short timeout guard caps how long a hung MySQL connection can
+// delay the exit, so the crash-restart path can't itself hang.
+async function logFatalAndExit(kind, err) {
   try {
-    const e = err instanceof Error ? err : new Error('Non-error thrown: ' + require('util').inspect(err));
-    process.stderr.write(`\n[FATAL ${kind}] ${new Date().toISOString()}\n${e.stack || e.message}\n`);
-  } catch (_) { /* the death handler must never throw */ }
-  try { require('./lib/status-log-writer').flush(); } catch (_) { /* #146 best-effort: drain buffered audit rows before close */ }
-  try { require('./db/database').db.close(); } catch (_) { /* best-effort WAL flush */ }
+    const e =
+      err instanceof Error
+        ? err
+        : new Error("Non-error thrown: " + require("util").inspect(err));
+    process.stderr.write(
+      `\n[FATAL ${kind}] ${new Date().toISOString()}\n${e.stack || e.message}\n`,
+    );
+  } catch (_) {
+    /* the death handler must never throw */
+  }
+  const cleanup = (async () => {
+    try {
+      await require("./lib/status-log-writer").flush();
+    } catch (_) {
+      /* #146 best-effort: drain buffered audit rows before close */
+    }
+    try {
+      await require("./db/database").db.close();
+    } catch (_) {
+      /* best-effort pool drain */
+    }
+  })();
+  try {
+    await Promise.race([cleanup, new Promise((r) => setTimeout(r, 3000))]);
+  } catch (_) {}
   process.exit(1);
 }
-process.on('uncaughtException', (err) => logFatalAndExit('uncaughtException', err));
-process.on('unhandledRejection', (reason) => logFatalAndExit('unhandledRejection', reason));
+process.on("uncaughtException", (err) => {
+  logFatalAndExit("uncaughtException", err);
+});
+process.on("unhandledRejection", (reason) => {
+  logFatalAndExit("unhandledRejection", reason);
+});
 
 // Ensure upload directories exist
-[config.contentDir, config.screenshotsDir].forEach(dir => {
+[config.contentDir, config.screenshotsDir].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
 const app = express();
-const { trustedProxies } = require('./config/cloudflareIps');
-const { getClientIp } = require('./services/activity');
+const { trustedProxies } = require("./config/cloudflareIps");
+const { getClientIp } = require("./services/activity");
 // Trust loopback / link-local / unique-local (local dev, LAN reverse proxies)
 // and Cloudflare's published edge ranges. With this list, req.ip resolves to
 // the original client when fronted by Cloudflare; X-Forwarded-For from any
 // non-trusted source is ignored, so the value can't be spoofed.
-app.set('trust proxy', trustedProxies);
+app.set("trust proxy", trustedProxies);
 
 // Determine if SSL certs are available
 const hasSsl = fs.existsSync(config.sslCert) && fs.existsSync(config.sslKey);
@@ -58,7 +88,7 @@ if (hasSsl) {
 }
 
 // #148 Item 4: TCP SO_KEEPALIVE on every accepted connection (lib/tcp-keepalive.js).
-require('./lib/tcp-keepalive').applyTcpKeepAlive(server, config.tcpKeepAliveMs);
+require("./lib/tcp-keepalive").applyTcpKeepAlive(server, config.tcpKeepAliveMs);
 
 // Socket.IO CORS is checked via the same corsOriginCheck function defined below
 // (after config is loaded). Hoisted into a closure so we can reference it before
@@ -74,7 +104,7 @@ const io = new Server(server, {
 });
 
 // Middleware
-const helmet = require('helmet');
+const helmet = require("helmet");
 
 // CSP applies to the dashboard / app pages only. Widget and kiosk renders are
 // publicly accessed by devices and intentionally use inline scripts/styles —
@@ -94,11 +124,17 @@ const dashboardCsp = helmet.contentSecurityPolicy({
     scriptSrcAttr: ["'unsafe-inline'"],
     styleSrc: ["'self'", "'unsafe-inline'"],
     styleSrcAttr: ["'unsafe-inline'"],
-    imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
-    mediaSrc: ["'self'", 'blob:', 'https:'],
-    connectSrc: ["'self'", 'wss:', 'ws:', 'https:'],
-    fontSrc: ["'self'", 'data:'],
-    frameSrc: ["'self'", 'https://www.youtube.com', 'https://youtube.com'],
+    imgSrc: ["'self'", "data:", "blob:", "https:"],
+    mediaSrc: ["'self'", "blob:", "https:"],
+    connectSrc: ["'self'", "wss:", "ws:", "https:"],
+    fontSrc: ["'self'", "data:"],
+    frameSrc: [
+      "'self'",
+      "https://www.youtube.com",
+      "https://youtube.com",
+      "https://script.google.com",
+      "https://script.googleusercontent.com",
+    ],
     objectSrc: ["'none'"],
     baseUri: ["'self'"],
     formAction: ["'self'"],
@@ -109,11 +145,13 @@ const dashboardCsp = helmet.contentSecurityPolicy({
   },
 });
 
-app.use(helmet({
-  contentSecurityPolicy: false,        // we apply our own below, scoped to non-render paths
-  crossOriginEmbedderPolicy: false,    // allow loading external widget content
-  hsts: { maxAge: 31536000, includeSubDomains: true },
-}));
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // we apply our own below, scoped to non-render paths
+    crossOriginEmbedderPolicy: false, // allow loading external widget content
+    hsts: { maxAge: 31536000, includeSubDomains: true },
+  }),
+);
 
 // Apply CSP everywhere except routes that legitimately need inline scripts:
 // - widget/kiosk renders (public, fetched by devices, intentionally inline)
@@ -121,11 +159,13 @@ app.use(helmet({
 // - /         (landing page has inline JSON-LD + a pricing fetch script)
 // The dashboard at /app uses ES modules only and gets the strict policy.
 app.use((req, res, next) => {
-  if (req.path === '/' || req.path === '/landing.html') return next();
-  if (req.path.startsWith('/player')) return next();
-  if (req.path === '/docs') return next(); // Redoc API reference needs a relaxed CSP
-  if (req.path.startsWith('/api/widgets/') && req.path.endsWith('/render')) return next();
-  if (req.path.startsWith('/api/kiosk/') && req.path.endsWith('/render')) return next();
+  if (req.path === "/" || req.path === "/landing.html") return next();
+  if (req.path.startsWith("/player")) return next();
+  if (req.path === "/docs") return next(); // Redoc API reference needs a relaxed CSP
+  if (req.path.startsWith("/api/widgets/") && req.path.endsWith("/render"))
+    return next();
+  if (req.path.startsWith("/api/kiosk/") && req.path.endsWith("/render"))
+    return next();
   return dashboardCsp(req, res, next);
 });
 // CORS policy.
@@ -135,12 +175,12 @@ app.use((req, res, next) => {
 // Auth is JWT in Authorization header — credentials:true is kept for any cookie-based
 // future flows but the JWT stays in localStorage and is sent via fetch() explicitly,
 // so an attacker origin can't ride a session.
-const isProd = process.env.NODE_ENV === 'production';
+const isProd = process.env.NODE_ENV === "production";
 const allowedHostsProd = [
-  'screentinker.com',
-  'www.screentinker.com',
-  'localhost',
-  '127.0.0.1',
+  "screentinker.com",
+  "www.screentinker.com",
+  "localhost",
+  "127.0.0.1",
 ];
 
 function corsOriginCheck(origin, callback) {
@@ -149,34 +189,46 @@ function corsOriginCheck(origin, callback) {
   if (config.selfHosted) return callback(null, true);
   if (!isProd) return callback(null, true);
   let host;
-  try { host = new URL(origin).hostname; } catch { return callback(null, false); }
-  const allowed = allowedHostsProd.some(h => host === h || host.endsWith('.' + h));
+  try {
+    host = new URL(origin).hostname;
+  } catch {
+    return callback(null, false);
+  }
+  const allowed = allowedHostsProd.some(
+    (h) => host === h || host.endsWith("." + h),
+  );
   if (allowed) return callback(null, true);
   callback(null, false);
 }
 
-app.use(cors({
-  origin: corsOriginCheck,
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: corsOriginCheck,
+    credentials: true,
+  }),
+);
 // Stripe webhook needs raw body (before express.json parses it)
-const stripeRouter = require('./routes/stripe');
-app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeRouter);
+const stripeRouter = require("./routes/stripe");
+app.post(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  stripeRouter,
+);
 
 // 12mb so AI-designed signs with embedded generated images (base64 data URLs)
 // can be published. #41 follow-up: upload generated images to the content store
 // and reference by URL instead of embedding, to keep widget configs small.
-app.use(express.json({ limit: '12mb' }));
-const { sanitizeBody } = require('./middleware/sanitize');
+app.use(express.json({ limit: "12mb" }));
+const { sanitizeBody } = require("./middleware/sanitize");
 app.use(sanitizeBody);
 
 // Landing page BEFORE static middleware (so / doesn't serve index.html).
 // When DISABLE_HOMEPAGE is set, redirect to the app instead - for self-hosted
 // internal deployments that don't want the public marketing page. 302 (not
 // 301) so flipping the var back later isn't hard-cached by browsers.
-app.get('/', (req, res) => {
-  if (config.disableHomepage) return res.redirect(302, '/app');
-  res.sendFile(path.join(config.frontendDir, 'landing.html'));
+app.get("/", (req, res) => {
+  if (config.disableHomepage) return res.redirect(302, "/app");
+  res.sendFile(path.join(config.frontendDir, "landing.html"));
 });
 
 // Dashboard app. Inject the resolved instance / custom-domain branding into the
@@ -184,51 +236,63 @@ app.get('/', (req, res) => {
 // per-workspace brand is not cached yet - no ScreenTinker flash on a never-visited
 // org. CSP blocks inline <script>, so the brand rides in a <meta> that brand-prime
 // reads. Falls back to a plain send of the shell if anything goes wrong.
-app.get('/app', (req, res) => {
-  const file = path.join(config.frontendDir, 'index.html');
-  try {
-    const { db } = require('./db/database');
-    const { resolveBranding, publicBranding } = require('./lib/branding');
-    const brand = publicBranding(resolveBranding(db, { domain: (req.hostname || '').toString() }));
-    const attr = JSON.stringify(brand)
-      .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const html = fs.readFileSync(file, 'utf8')
-      .replace('</head>', '  <meta name="ssr-brand" content="' + attr + '">\n</head>');
-    res.type('html').send(html);
-  } catch (e) {
-    res.sendFile(file);
-  }
-});
+app.get(
+  "/app",
+  asyncHandler(async (req, res) => {
+    const file = path.join(config.frontendDir, "index.html");
+    try {
+      const { db } = require("./db/database");
+      const { resolveBranding, publicBranding } = require("./lib/branding");
+      const brand = publicBranding(
+        await resolveBranding(db, { domain: (req.hostname || "").toString() }),
+      );
+      const attr = JSON.stringify(brand)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      const html = fs
+        .readFileSync(file, "utf8")
+        .replace(
+          "</head>",
+          '  <meta name="ssr-brand" content="' + attr + '">\n</head>',
+        );
+      res.type("html").send(html);
+    } catch (e) {
+      res.sendFile(file);
+    }
+  }),
+);
 
 // Sitemap and robots — served explicitly so the Content-Type is guaranteed
 // and these endpoints are immune to any future static-middleware reshuffle.
-app.get('/sitemap.xml', (req, res) => {
-  res.type('application/xml');
-  res.setHeader('Cache-Control', 'public, max-age=3600'); // 1h, sitemap rarely changes
-  res.sendFile(path.join(config.frontendDir, 'sitemap.xml'));
+app.get("/sitemap.xml", (req, res) => {
+  res.type("application/xml");
+  res.setHeader("Cache-Control", "public, max-age=3600"); // 1h, sitemap rarely changes
+  res.sendFile(path.join(config.frontendDir, "sitemap.xml"));
 });
-app.get('/robots.txt', (req, res) => {
-  res.type('text/plain');
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.sendFile(path.join(config.frontendDir, 'robots.txt'));
+app.get("/robots.txt", (req, res) => {
+  res.type("text/plain");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.sendFile(path.join(config.frontendDir, "robots.txt"));
 });
 
 // Public API reference. /openapi.yaml is the machine-readable contract (served from
 // docs/); /docs is the Redoc viewer (frontend/api-docs.html + the vendored standalone
 // bundle under /vendor, no CDN so it works air-gapped). /docs is CSP-exempt above
 // because Redoc needs a relaxed policy.
-app.get('/openapi.yaml', (req, res) => {
-  res.type('text/yaml');
-  res.setHeader('Cache-Control', 'public, max-age=300');
-  res.sendFile(path.join(__dirname, '..', 'docs', 'openapi.yaml'));
+app.get("/openapi.yaml", (req, res) => {
+  res.type("text/yaml");
+  res.setHeader("Cache-Control", "public, max-age=300");
+  res.sendFile(path.join(__dirname, "..", "docs", "openapi.yaml"));
 });
-app.get('/docs', (req, res) => {
-  res.sendFile(path.join(config.frontendDir, 'api-docs.html'));
+app.get("/docs", (req, res) => {
+  res.sendFile(path.join(config.frontendDir, "api-docs.html"));
 });
 // #73: the standalone agency portal (token-auth, NOT the JWT dashboard SPA). Served as its
 // own page so the agency never touches the dashboard login.
-app.get('/agency', (req, res) => {
-  res.sendFile(path.join(config.frontendDir, 'agency.html'));
+app.get("/agency", (req, res) => {
+  res.sendFile(path.join(config.frontendDir, "agency.html"));
 });
 
 // BeamOS Dashboard (merged in from the standalone BeamOS-Dashboard app): a
@@ -245,13 +309,28 @@ app.get(["/dashboard", "/dashboard.html"], (req, res) => {
 // Serve frontend static files
 // JS/CSS/HTML: no-cache (always revalidate, uses ETag/304)
 // Images/fonts/icons: long cache for Cloudflare + browser
-app.use(express.static(config.frontendDir, { index: false, etag: true, lastModified: true, setHeaders: (res, filePath) => {
-  if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
-    res.setHeader('Cache-Control', 'no-cache');
-  } else if (/\.(png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|webp|mp4|webm)$/i.test(filePath)) {
-    res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
-  }
-}}));
+app.use(
+  express.static(config.frontendDir, {
+    index: false,
+    etag: true,
+    lastModified: true,
+    setHeaders: (res, filePath) => {
+      if (
+        filePath.endsWith(".js") ||
+        filePath.endsWith(".css") ||
+        filePath.endsWith(".html")
+      ) {
+        res.setHeader("Cache-Control", "no-cache");
+      } else if (
+        /\.(png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|webp|mp4|webm)$/i.test(
+          filePath,
+        )
+      ) {
+        res.setHeader("Cache-Control", "public, max-age=2592000"); // 30 days
+      }
+    },
+  }),
+);
 
 // Player HTML: dynamic route. Injects a small inline window.__playerConfig
 // script before the debug-overlay.js tag so the client knows whether to send
@@ -260,24 +339,32 @@ app.use(express.static(config.frontendDir, { index: false, etag: true, lastModif
 // server-side endpoint defends in depth, but the kill switch saves network
 // traffic on the device too). Other player assets (JS, sw.js, etc) are still
 // served by the static middleware below; only index.html is dynamic.
-app.get(['/player', '/player/', '/player/index.html'], (req, res) => {
-  const playerHtmlPath = path.join(__dirname, 'player', 'index.html');
-  fs.readFile(playerHtmlPath, 'utf8', (err, html) => {
-    if (err) return res.status(500).type('text/plain').send('player HTML unavailable');
-    const reportingEnabled = String(process.env.PLAYER_DEBUG_REPORTING || 'on').toLowerCase() !== 'off';
+app.get(["/player", "/player/", "/player/index.html"], (req, res) => {
+  const playerHtmlPath = path.join(__dirname, "player", "index.html");
+  fs.readFile(playerHtmlPath, "utf8", (err, html) => {
+    if (err)
+      return res.status(500).type("text/plain").send("player HTML unavailable");
+    const reportingEnabled =
+      String(process.env.PLAYER_DEBUG_REPORTING || "on").toLowerCase() !==
+      "off";
     const inject =
-      '  <script>window.__playerConfig = window.__playerConfig || {}; ' +
-      'window.__playerConfig.debugReporting = ' + JSON.stringify(reportingEnabled) + ';</script>\n';
+      "  <script>window.__playerConfig = window.__playerConfig || {}; " +
+      "window.__playerConfig.debugReporting = " +
+      JSON.stringify(reportingEnabled) +
+      ";</script>\n";
     // Inject right before the debug-overlay.js script tag. If for any reason
     // the tag isn't present (e.g. file edited out), fall back to injecting
     // before </head> so the flag still lands.
     let modified;
     if (html.indexOf('<script src="/player/debug-overlay.js"') >= 0) {
-      modified = html.replace('<script src="/player/debug-overlay.js"', inject + '  <script src="/player/debug-overlay.js"');
+      modified = html.replace(
+        '<script src="/player/debug-overlay.js"',
+        inject + '  <script src="/player/debug-overlay.js"',
+      );
     } else {
-      modified = html.replace('</head>', inject + '</head>');
+      modified = html.replace("</head>", inject + "</head>");
     }
-    res.type('html').setHeader('Cache-Control', 'no-cache');
+    res.type("html").setHeader("Cache-Control", "no-cache");
     res.send(modified);
   });
 });
@@ -285,34 +372,48 @@ app.get(['/player', '/player/', '/player/index.html'], (req, res) => {
 // #74/#75: serve the canonical schedule evaluator to the web player from the
 // single source (server/lib/schedule-eval.js) so it can never drift from the
 // server/Node-test copy. Registered before the static handler so it wins.
-app.get('/player/schedule-eval.js', (req, res) => {
-  res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, 'lib', 'schedule-eval.js'));
+app.get("/player/schedule-eval.js", (req, res) => {
+  res.type("application/javascript").setHeader("Cache-Control", "no-cache");
+  res.sendFile(path.join(__dirname, "lib", "schedule-eval.js"));
 });
 
 // #146 web-player fix: serve the media-surface health decision from its single source
 // (server/lib/player-media-health.js) so the player and the Node test can't drift.
-app.get('/player/player-media-health.js', (req, res) => {
-  res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, 'lib', 'player-media-health.js'));
+app.get("/player/player-media-health.js", (req, res) => {
+  res.type("application/javascript").setHeader("Cache-Control", "no-cache");
+  res.sendFile(path.join(__dirname, "lib", "player-media-health.js"));
 });
 
 // Serve web player at /player (same no-cache for JS/HTML). The index.html
 // route above intercepts the HTML requests; everything else still falls
 // through to this static handler (debug-overlay.js, sw.js, manifest, etc).
-app.use('/player', express.static(path.join(__dirname, 'player'), { etag: true, lastModified: true, setHeaders: (res, filePath) => {
-  if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
-    res.setHeader('Cache-Control', 'no-cache');
-  }
-}}));
+app.use(
+  "/player",
+  express.static(path.join(__dirname, "player"), {
+    etag: true,
+    lastModified: true,
+    setHeaders: (res, filePath) => {
+      if (
+        filePath.endsWith(".js") ||
+        filePath.endsWith(".css") ||
+        filePath.endsWith(".html")
+      ) {
+        res.setHeader("Cache-Control", "no-cache");
+      }
+    },
+  }),
+);
 
 // Serve setup scripts
-app.use('/scripts', express.static(path.join(__dirname, '..', 'scripts')));
+app.use("/scripts", express.static(path.join(__dirname, "..", "scripts")));
 
 // Serve socket.io client
-app.use('/socket.io-client', express.static(
-  path.join(__dirname, 'node_modules', 'socket.io', 'client-dist')
-));
+app.use(
+  "/socket.io-client",
+  express.static(
+    path.join(__dirname, "node_modules", "socket.io", "client-dist"),
+  ),
+);
 
 // Simple rate limiter for auth endpoints
 const rateLimits = new Map();
@@ -323,111 +424,144 @@ function rateLimit(windowMs, maxRequests) {
     // req.path was '/' for ALL of them - i.e. /login, /register, /totp/verify shared
     // ONE per-IP counter (coupled limits; the /totp/verify brute-force limit wasn't
     // actually independent). originalUrl keeps each endpoint's limit separate.
-    const key = getClientIp(req) + (req.originalUrl || req.url || req.path).split('?')[0];
+    const key =
+      getClientIp(req) + (req.originalUrl || req.url || req.path).split("?")[0];
     const now = Date.now();
     const windowStart = now - windowMs;
     let hits = rateLimits.get(key) || [];
-    hits = hits.filter(t => t > windowStart);
+    hits = hits.filter((t) => t > windowStart);
     if (hits.length >= maxRequests) {
-      return res.status(429).json({ error: 'Too many requests, try again later' });
+      return res
+        .status(429)
+        .json({ error: "Too many requests, try again later" });
     }
     hits.push(now);
     rateLimits.set(key, hits);
     // Cleanup old entries periodically
     if (rateLimits.size > 10000) {
-      for (const [k, v] of rateLimits) { if (v.every(t => t < windowStart)) rateLimits.delete(k); }
+      for (const [k, v] of rateLimits) {
+        if (v.every((t) => t < windowStart)) rateLimits.delete(k);
+      }
     }
     next();
   };
 }
 
 // Auth routes (public, rate limited)
-app.use('/api/auth/login', rateLimit(60000, 10)); // 10 attempts per minute
-app.use('/api/auth/register', rateLimit(60000, 5)); // 5 registrations per minute
+app.use("/api/auth/login", rateLimit(60000, 10)); // 10 attempts per minute
+app.use("/api/auth/register", rateLimit(60000, 5)); // 5 registrations per minute
 // #100 (tightening #2): the TOTP verify endpoint is the brute-force surface for a
 // 6-digit code. Cap attempts/min here; the per-user lockout (lib/totp-lockout) sits
 // on top in the handler.
-app.use('/api/auth/totp/verify', rateLimit(60000, 10));
+app.use("/api/auth/totp/verify", rateLimit(60000, 10));
 // Admin password-reset endpoint: even if an admin's session is compromised,
 // cap the blast radius to 20 resets/min/IP. Express matches the longest
 // path prefix first, so this fires before /api/auth catches the request.
-app.use('/api/auth/users', rateLimit(60000, 20));
-app.use('/api/auth', require('./routes/auth'));
+app.use("/api/auth/users", rateLimit(60000, 20));
+app.use("/api/auth", require("./routes/auth"));
 // Rate limit pairing to prevent brute force (5 attempts per minute per IP).
 // #88: bind this to the whole /api/provision surface, not just /pair - the bare
 // POST /api/provision (routes/provisioning.js) is a second pairing endpoint that
 // was unthrottled, letting an authed user brute-force pairing codes. /api/provision
 // matches both /api/provision and /api/provision/pair.
-app.use('/api/provision', rateLimit(60000, 5));
+app.use("/api/provision", rateLimit(60000, 5));
 // Rate limit expensive operations
-app.use('/api/status/export', rateLimit(60000, 5)); // 5 exports per minute
-app.use('/api/status/import', rateLimit(60000, 3)); // 3 imports per minute
-app.use('/api/content', rateLimit(60000, 30)); // 30 content operations per minute
+app.use("/api/status/export", rateLimit(60000, 5)); // 5 exports per minute
+app.use("/api/status/import", rateLimit(60000, 3)); // 3 imports per minute
+app.use("/api/content", rateLimit(60000, 30)); // 30 content operations per minute
 
 // Subscription routes (mixed auth)
-app.use('/api/subscription', require('./routes/subscription'));
+app.use("/api/subscription", require("./routes/subscription"));
 
 // Public contact form (enterprise inquiries from landing page). Rate limited
 // to 5 submissions per minute per IP; honeypot enforced inside the route.
-app.use('/api/contact', rateLimit(60000, 5));
-app.use('/api/contact', require('./routes/contact'));
+app.use("/api/contact", rateLimit(60000, 5));
+app.use("/api/contact", require("./routes/contact"));
 
 // Public player debug-log sink. Smart TVs and other embedded browsers
 // without devtools POST captured errors here. Rate limited to 10 req/min
 // per IP+path. Body is JSON (express.json() is global at line 140).
-app.use('/api/player-debug', rateLimit(60000, 10));
-app.use('/api/player-debug', require('./routes/player-debug'));
+app.use("/api/player-debug", rateLimit(60000, 10));
+app.use("/api/player-debug", require("./routes/player-debug"));
 
 // Public branding resolver (#15). Pre-login / pre-workspace contexts (the login
 // page especially) need branding without a token. Resolves custom-domain match
 // -> platform default -> hardcoded ScreenTinker. Domain comes from ?domain= or
 // the request hostname (trust-proxy resolves the forwarded Host behind CF/Nginx).
-app.get('/api/branding', (req, res) => {
-  const { db } = require('./db/database');
-  const { resolveBranding, publicBranding } = require('./lib/branding');
-  const domain = (req.query.domain || req.hostname || '').toString();
-  // publicBranding strips internal columns (id/user_id/workspace_id/custom_domain
-  // /timestamps) so this unauthenticated endpoint only exposes presentational fields.
-  res.json(publicBranding(resolveBranding(db, { domain })));
-});
+app.get(
+  "/api/branding",
+  asyncHandler(async (req, res) => {
+    const { db } = require("./db/database");
+    const { resolveBranding, publicBranding } = require("./lib/branding");
+    const domain = (req.query.domain || req.hostname || "").toString();
+    // publicBranding strips internal columns (id/user_id/workspace_id/custom_domain
+    // /timestamps) so this unauthenticated endpoint only exposes presentational fields.
+    res.json(publicBranding(await resolveBranding(db, { domain })));
+  }),
+);
 
 // Stripe billing routes (checkout, portal)
-app.use('/api/stripe', stripeRouter);
-
+app.use("/api/stripe", stripeRouter);
 
 // Screenshot route (before protected routes - needs custom auth for img tags)
-const { verifyToken } = require('./middleware/auth');
-app.get('/api/devices/:id/screenshot', (req, res) => {
-  let user = null;
-  const authHeader = req.headers.authorization;
-  const tokenParam = req.query.token;
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : tokenParam;
-  if (!token) return res.status(401).json({ error: 'Authentication required' });
-  try {
-    const decoded = verifyToken(token);
-    const { db } = require('./db/database');
-    user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(401).json({ error: 'User not found' });
-  } catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
-  const { db: sdb } = require('./db/database');
-  const device = sdb.prepare('SELECT user_id FROM devices WHERE id = ?').get(req.params.id);
-  if (!device) return res.status(404).json({ error: 'Device not found' });
-  if (!['admin','superadmin'].includes(user.role) && device.user_id && device.user_id !== user.id) return res.status(403).json({ error: 'Access denied' });
-  // Serve from memory if available (device online), otherwise from disk (offline snapshot)
-  const deviceSocket = require('./ws/deviceSocket');
-  const memScreenshot = deviceSocket.lastScreenshots?.[req.params.id];
-  if (memScreenshot) {
-    const buffer = Buffer.from(memScreenshot, 'base64');
-    res.set('Content-Type', 'image/jpeg');
-    res.set('Cache-Control', 'no-cache');
-    return res.send(buffer);
-  }
-  const screenshot = sdb.prepare('SELECT * FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1').get(req.params.id);
-  if (!screenshot) return res.status(404).json({ error: 'No screenshot available' });
-  const safePath = path.resolve(config.screenshotsDir, path.basename(screenshot.filepath));
-  if (!safePath.startsWith(path.resolve(config.screenshotsDir))) return res.status(403).json({ error: 'Invalid path' });
-  res.sendFile(safePath);
-});
+const { verifyToken } = require("./middleware/auth");
+app.get(
+  "/api/devices/:id/screenshot",
+  asyncHandler(async (req, res) => {
+    let user = null;
+    const authHeader = req.headers.authorization;
+    const tokenParam = req.query.token;
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.split(" ")[1]
+      : tokenParam;
+    if (!token)
+      return res.status(401).json({ error: "Authentication required" });
+    try {
+      const decoded = verifyToken(token);
+      const { db } = require("./db/database");
+      user = await db
+        .prepare("SELECT id, role FROM users WHERE id = ?")
+        .get(decoded.id);
+      if (!user) return res.status(401).json({ error: "User not found" });
+    } catch {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+    const { db: sdb } = require("./db/database");
+    const device = await sdb
+      .prepare("SELECT user_id FROM devices WHERE id = ?")
+      .get(req.params.id);
+    if (!device) return res.status(404).json({ error: "Device not found" });
+    if (
+      !["admin", "superadmin"].includes(user.role) &&
+      device.user_id &&
+      device.user_id !== user.id
+    )
+      return res.status(403).json({ error: "Access denied" });
+    // Serve from memory if available (device online), otherwise from disk (offline snapshot)
+    const deviceSocket = require("./ws/deviceSocket");
+    const memScreenshot = deviceSocket.lastScreenshots?.[req.params.id];
+    if (memScreenshot) {
+      const buffer = Buffer.from(memScreenshot, "base64");
+      res.set("Content-Type", "image/jpeg");
+      res.set("Cache-Control", "no-cache");
+      return res.send(buffer);
+    }
+    const screenshot = await sdb
+      .prepare(
+        "SELECT * FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1",
+      )
+      .get(req.params.id);
+    if (!screenshot)
+      return res.status(404).json({ error: "No screenshot available" });
+    const safePath = path.resolve(
+      config.screenshotsDir,
+      path.basename(screenshot.filepath),
+    );
+    if (!safePath.startsWith(path.resolve(config.screenshotsDir)))
+      return res.status(403).json({ error: "Invalid path" });
+    res.sendFile(safePath);
+  }),
+);
 
 // A logged-in user who can access the content's workspace may view its file /
 // thumbnail even when it isn't referenced by a playlist/widget yet (e.g. the
@@ -435,38 +569,70 @@ app.get('/api/devices/:id/screenshot', (req, res) => {
 // send an Authorization header, so the dashboard fetches these with the Bearer
 // token; this verifies it and checks workspace membership. Anonymous players
 // (no token) still fall back to the playlist/widget reference gate. (#39)
-function requesterCanAccessContent(req, content) {
+async function requesterCanAccessContent(req, content) {
   try {
-    const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
+    const m = (req.headers.authorization || "").match(/^Bearer (.+)$/);
     if (!m) return false;
-    const jwt = require('jsonwebtoken');
-    const decoded = jwt.verify(m[1], config.jwtSecret, { algorithms: ['HS256'] });
+    const jwt = require("jsonwebtoken");
+    const decoded = jwt.verify(m[1], config.jwtSecret, {
+      algorithms: ["HS256"],
+    });
     if (!decoded || !decoded.id) return false;
-    if (decoded.role === 'platform_admin') return true;
-    const { db } = require('./db/database');
-    return !!db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
-      .get(content.workspace_id, decoded.id);
-  } catch { return false; }
+    if (decoded.role === "platform_admin") return true;
+    const { db } = require("./db/database");
+    return !!(await db
+      .prepare(
+        "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+      )
+      .get(content.workspace_id, decoded.id));
+  } catch {
+    return false;
+  }
 }
 
 // Public content file serving (must be BEFORE protected routes)
-app.get('/api/content/:id/file', (req, res) => {
-  const { db } = require('./db/database');
-  const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
-  if (!content) return res.status(404).json({ error: 'Content not found' });
-  if (!content.filepath) return res.status(404).json({ error: 'No file (remote URL content)' });
-  const inPlaylist = db.prepare('SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1').get(req.params.id);
-  // Scope widget lookup to widgets in the content's workspace — prevents a user
-  // in another workspace from unlocking this content by creating a widget that
-  // references the UUID. Phase 2.2d: keyed off content.workspace_id (was user_id).
-  // Perf note: LIKE scan on widgets.config is O(n) per request. Fine at current scale
-  // (<100 widgets); revisit with a content_widget_refs join table if this grows.
-  const inWidget = inPlaylist ? null : db.prepare('SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1').get(content.workspace_id, `%/api/content/${req.params.id}/%`);
-  if (!inPlaylist && !inWidget && !requesterCanAccessContent(req, content)) return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
-  const safePath = path.resolve(config.contentDir, path.basename(content.filepath));
-  if (!safePath.startsWith(path.resolve(config.contentDir))) return res.status(403).json({ error: 'Invalid path' });
-  res.sendFile(safePath);
-});
+app.get(
+  "/api/content/:id/file",
+  asyncHandler(async (req, res) => {
+    const { db } = require("./db/database");
+    const content = await db
+      .prepare("SELECT * FROM content WHERE id = ?")
+      .get(req.params.id);
+    if (!content) return res.status(404).json({ error: "Content not found" });
+    if (!content.filepath)
+      return res.status(404).json({ error: "No file (remote URL content)" });
+    const inPlaylist = await db
+      .prepare("SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1")
+      .get(req.params.id);
+    // Scope widget lookup to widgets in the content's workspace — prevents a user
+    // in another workspace from unlocking this content by creating a widget that
+    // references the UUID. Phase 2.2d: keyed off content.workspace_id (was user_id).
+    // Perf note: LIKE scan on widgets.config is O(n) per request. Fine at current scale
+    // (<100 widgets); revisit with a content_widget_refs join table if this grows.
+    const inWidget = inPlaylist
+      ? null
+      : await db
+          .prepare(
+            "SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1",
+          )
+          .get(content.workspace_id, `%/api/content/${req.params.id}/%`);
+    if (
+      !inPlaylist &&
+      !inWidget &&
+      !(await requesterCanAccessContent(req, content))
+    )
+      return res
+        .status(403)
+        .json({ error: "Content not assigned to any playlist or widget" });
+    const safePath = path.resolve(
+      config.contentDir,
+      path.basename(content.filepath),
+    );
+    if (!safePath.startsWith(path.resolve(config.contentDir)))
+      return res.status(403).json({ error: "Invalid path" });
+    res.sendFile(safePath);
+  }),
+);
 
 // Proxy a remote thumbnail (e.g. YouTube's img.youtube.com/.../hqdefault.jpg, which
 // content.js stores as thumbnail_path) server-side, SAME-ORIGIN, so the dashboard CSP
@@ -476,51 +642,89 @@ app.get('/api/content/:id/file', (req, res) => {
 // is fine and avoids partial-stream error handling.
 async function proxyRemoteThumbnail(url, res) {
   try {
-    const upstream = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
-    if (upstream.status === 404) return res.status(404).json({ error: 'Thumbnail not found' });
-    if (!upstream.ok) return res.status(502).json({ error: 'Thumbnail upstream error' });
-    const ct = upstream.headers.get('content-type') || 'image/jpeg';
-    if (!/^image\//i.test(ct)) return res.status(502).json({ error: 'Thumbnail upstream is not an image' });
+    const upstream = await fetch(url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(8000),
+    });
+    if (upstream.status === 404)
+      return res.status(404).json({ error: "Thumbnail not found" });
+    if (!upstream.ok)
+      return res.status(502).json({ error: "Thumbnail upstream error" });
+    const ct = upstream.headers.get("content-type") || "image/jpeg";
+    if (!/^image\//i.test(ct))
+      return res
+        .status(502)
+        .json({ error: "Thumbnail upstream is not an image" });
     const buf = Buffer.from(await upstream.arrayBuffer());
-    res.set('Content-Type', ct);
-    res.set('Cache-Control', 'public, max-age=86400');
+    res.set("Content-Type", ct);
+    res.set("Cache-Control", "public, max-age=86400");
     return res.send(buf);
   } catch (e) {
-    return res.status(502).json({ error: 'Thumbnail fetch failed' });
+    return res.status(502).json({ error: "Thumbnail fetch failed" });
   }
 }
 
 // Public thumbnail serving (must be BEFORE protected routes)
-app.get('/api/content/:id/thumbnail', (req, res) => {
-  const { db } = require('./db/database');
-  const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
-  if (!content || !content.thumbnail_path) return res.status(404).json({ error: 'Thumbnail not found' });
-  // Security: gate the same way as /file - only serve when the content is
-  // referenced by a playlist or by a widget IN THE CONTENT'S WORKSPACE. Without
-  // this, any anonymous caller holding a content UUID could pull any tenant's
-  // thumbnail (the /file route already had this check; the thumbnail route did not).
-  const inPlaylist = db.prepare('SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1').get(req.params.id);
-  const inWidget = inPlaylist ? null : db.prepare('SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1').get(content.workspace_id, `%/api/content/${req.params.id}/%`);
-  if (!inPlaylist && !inWidget && !requesterCanAccessContent(req, content)) return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
-  // YouTube (and any future remote-sourced) content stores thumbnail_path as a remote
-  // http(s) URL, not a local file. Proxy it instead of resolving it to a local path that
-  // doesn't exist (contentDir/hqdefault.jpg -> ENOENT spam). Local thumbnails are
-  // unchanged. Access gating above already ran identically for both branches.
-  if (/^https?:\/\//i.test(content.thumbnail_path)) return proxyRemoteThumbnail(content.thumbnail_path, res);
-  const safePath = path.resolve(config.contentDir, path.basename(content.thumbnail_path));
-  if (!safePath.startsWith(path.resolve(config.contentDir))) return res.status(403).json({ error: 'Invalid path' });
-  res.sendFile(safePath);
-});
+app.get(
+  "/api/content/:id/thumbnail",
+  asyncHandler(async (req, res) => {
+    const { db } = require("./db/database");
+    const content = await db
+      .prepare("SELECT * FROM content WHERE id = ?")
+      .get(req.params.id);
+    if (!content || !content.thumbnail_path)
+      return res.status(404).json({ error: "Thumbnail not found" });
+    // Security: gate the same way as /file - only serve when the content is
+    // referenced by a playlist or by a widget IN THE CONTENT'S WORKSPACE. Without
+    // this, any anonymous caller holding a content UUID could pull any tenant's
+    // thumbnail (the /file route already had this check; the thumbnail route did not).
+    const inPlaylist = await db
+      .prepare("SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1")
+      .get(req.params.id);
+    const inWidget = inPlaylist
+      ? null
+      : await db
+          .prepare(
+            "SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1",
+          )
+          .get(content.workspace_id, `%/api/content/${req.params.id}/%`);
+    if (
+      !inPlaylist &&
+      !inWidget &&
+      !(await requesterCanAccessContent(req, content))
+    )
+      return res
+        .status(403)
+        .json({ error: "Content not assigned to any playlist or widget" });
+    // YouTube (and any future remote-sourced) content stores thumbnail_path as a remote
+    // http(s) URL, not a local file. Proxy it instead of resolving it to a local path that
+    // doesn't exist (contentDir/hqdefault.jpg -> ENOENT spam). Local thumbnails are
+    // unchanged. Access gating above already ran identically for both branches.
+    if (/^https?:\/\//i.test(content.thumbnail_path))
+      return proxyRemoteThumbnail(content.thumbnail_path, res);
+    const safePath = path.resolve(
+      config.contentDir,
+      path.basename(content.thumbnail_path),
+    );
+    if (!safePath.startsWith(path.resolve(config.contentDir)))
+      return res.status(403).json({ error: "Invalid path" });
+    res.sendFile(safePath);
+  }),
+);
 
 // Protected API Routes.
 // Phase 2.1: resolveTenancy runs right after requireAuth on every resource
 // route. It attaches req.workspaceId, req.workspaceRole, req.orgRole,
 // req.isPlatformAdmin, req.actingAs. Route handlers in 2.1 don't read these
 // yet (they still filter by user_id); 2.2 will migrate them one route at a time.
-const { requireAuth } = require('./middleware/auth');
-const { resolveTenancy } = require('./lib/tenancy');
+const { requireAuth } = require("./middleware/auth");
+const { resolveTenancy } = require("./lib/tenancy");
 // Public API token front door (Phase 1). Attached ONLY to the public routers below.
-const { bearerAuth, tokenScopeGate, agencyGate } = require('./middleware/apiToken');
+const {
+  bearerAuth,
+  tokenScopeGate,
+  agencyGate,
+} = require("./middleware/apiToken");
 
 // activityLogger wraps res.json on every subsequent route to auto-log
 // successful POST/PUT/DELETE mutations. Mount it BEFORE the workspace routes
@@ -528,7 +732,7 @@ const { bearerAuth, tokenScopeGate, agencyGate } = require('./middleware/apiToke
 // silently never fired). Auth / subscription / stripe routes are already
 // mounted above and stay opt-out from the auto-logger (login has its own
 // inline writers; payment webhooks don't belong in activity_log).
-const { activityLogger } = require('./services/activity');
+const { activityLogger } = require("./services/activity");
 app.use(activityLogger);
 
 // #public-api Phase 1: the router partition is data-driven from config/api-surface.js
@@ -538,18 +742,31 @@ app.use(activityLogger);
 // their jwt.verify and is unreachable (secure by exclusion). Tokens act as a workspace
 // member with platform powers stripped, so in-handler ELEVATED/PLATFORM checks (e.g.
 // GET /api/devices/unassigned) still deny.
-const { PUBLIC_ROUTERS, JWT_ONLY_ROUTERS, AGENCY_ROUTERS } = require('./config/api-surface');
+const {
+  PUBLIC_ROUTERS,
+  JWT_ONLY_ROUTERS,
+  AGENCY_ROUTERS,
+} = require("./config/api-surface");
 
 // Public device-render endpoints + the memory-heavy preview limiter must be registered
 // BEFORE their parent router mount so the _skipAuth bypass / the limiter fire first.
-app.get('/api/widgets/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
-app.use('/api/widgets/preview', rateLimit(60000, 30)); // base64 inline = memory-intensive
-app.get('/api/kiosk/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
+app.get("/api/widgets/:id/render", (req, res, next) => {
+  req._skipAuth = true;
+  next();
+});
+app.use("/api/widgets/preview", rateLimit(60000, 30)); // base64 inline = memory-intensive
+app.get("/api/kiosk/:id/render", (req, res, next) => {
+  req._skipAuth = true;
+  next();
+});
 
 for (const r of PUBLIC_ROUTERS) {
   // renderBypass routers let the public /:id/render through (req._skipAuth) before bearerAuth.
   const front = r.renderBypass
-    ? (req, res, next) => { if (req._skipAuth) return next(); bearerAuth(req, res, next); }
+    ? (req, res, next) => {
+        if (req._skipAuth) return next();
+        bearerAuth(req, res, next);
+      }
     : bearerAuth;
   app.use(r.path, front, resolveTenancy, tokenScopeGate, require(r.mod));
 }
@@ -567,58 +784,103 @@ for (const r of AGENCY_ROUTERS) {
 }
 
 // Frontend version hash (changes when files are modified, triggers soft reload)
-const crypto = require('crypto');
-let frontendHash = '';
+const crypto = require("crypto");
+let frontendHash = "";
 function updateFrontendHash() {
   try {
-    const files = ['index.html', 'js/app.js', 'js/api.js', 'js/socket.js', 'css/main.css',
-      'js/views/dashboard.js', 'js/views/device-detail.js', 'js/views/content-library.js',
-      'js/views/settings.js', 'js/views/login.js', 'js/views/billing.js',
-      'js/views/layout-editor.js', 'js/views/schedule.js', 'js/views/widgets.js',
-      'js/views/video-wall.js', 'js/views/reports.js', 'js/views/designer.js',
-      'js/views/activity.js', 'js/views/kiosk.js'].map(f => {
-      try { return fs.readFileSync(path.join(config.frontendDir, f)); } catch { return ''; }
+    const files = [
+      "index.html",
+      "js/app.js",
+      "js/api.js",
+      "js/socket.js",
+      "css/main.css",
+      "js/views/dashboard.js",
+      "js/views/device-detail.js",
+      "js/views/content-library.js",
+      "js/views/settings.js",
+      "js/views/login.js",
+      "js/views/billing.js",
+      "js/views/layout-editor.js",
+      "js/views/schedule.js",
+      "js/views/widgets.js",
+      "js/views/video-wall.js",
+      "js/views/reports.js",
+      "js/views/designer.js",
+      "js/views/activity.js",
+      "js/views/kiosk.js",
+    ].map((f) => {
+      try {
+        return fs.readFileSync(path.join(config.frontendDir, f));
+      } catch {
+        return "";
+      }
     });
     // Include player files in hash so web players detect code updates
-    try { files.push(fs.readFileSync(path.join(__dirname, 'player', 'index.html'))); } catch {}
-    try { files.push(fs.readFileSync(path.join(__dirname, 'player', 'sw.js'))); } catch {}
-    try { files.push(fs.readFileSync(path.join(__dirname, 'player', 'debug-overlay.js'))); } catch {}
-    frontendHash = crypto.createHash('md5').update(Buffer.concat(files.map(f => Buffer.from(f)))).digest('hex').slice(0, 8);
-  } catch { frontendHash = Date.now().toString(36); }
+    try {
+      files.push(fs.readFileSync(path.join(__dirname, "player", "index.html")));
+    } catch {}
+    try {
+      files.push(fs.readFileSync(path.join(__dirname, "player", "sw.js")));
+    } catch {}
+    try {
+      files.push(
+        fs.readFileSync(path.join(__dirname, "player", "debug-overlay.js")),
+      );
+    } catch {}
+    frontendHash = crypto
+      .createHash("md5")
+      .update(Buffer.concat(files.map((f) => Buffer.from(f))))
+      .digest("hex")
+      .slice(0, 8);
+  } catch {
+    frontendHash = Date.now().toString(36);
+  }
 }
 updateFrontendHash();
 // Recheck every 30 seconds
 setInterval(updateFrontendHash, 30000);
-app.get('/api/version', (req, res) => {
+app.get("/api/version", (req, res) => {
   res.json({ hash: frontendHash, version: VERSION });
 });
 
 // Public status page
-app.use('/api/status', require('./routes/status'));
+app.use("/api/status", require("./routes/status"));
 
 // #146 BILLING: Usage Report on its OWN route (NOT part of /api/status — billing is revenue
 // data and a heavier aggregate than the hot status path). bearerAuth is the dual front door:
 // a 'billing:read' API token (Bearer st_...) OR a JWT session both reach it; the route's
 // requireBillingRead then authorizes a billing:read token OR a platform-admin session.
 // No tenancy — billing is platform-global.
-app.use('/api/billing', bearerAuth, require('./routes/billing'));
+app.use("/api/billing", bearerAuth, require("./routes/billing"));
 
 // Activity logging middleware now mounted earlier (just before the workspace
 // route block) - leaving this comment here as a breadcrumb for the move.
 
 // APK version check endpoint (public, used by devices to check for updates)
-const otaBreaker = require('./lib/ota-breaker');
-otaBreaker.startSweep();   // #144: periodically evict idle breaker buckets so keyed state stays bounded
-require('./lib/reconnect-throttle').startSweep();   // #146: same, for the reconnect throttle's per-device buckets
-require('./lib/flap-limiter').startSweep();          // #146 Item B: evict idle flap-limiter buckets
-require('./lib/session-settle').startSweep();        // #148 patch2: evict idle session-settle entries
-require('./lib/content-ack-limiter').startSweep();   // #146 Item E: evict idle content-ack buckets
-const apkCache = require('./lib/apk-cache');
-apkCache.start();                                    // #146 Item C: resolve APK path/size/mtime once + refresh on interval (no per-request fs)
-const { getBand } = require('./services/loop-lag');  // #146 Item C: critical-band download shed
-app.get('/api/update/check', (req, res) => {
+const otaBreaker = require("./lib/ota-breaker");
+otaBreaker.startSweep(); // #144: periodically evict idle breaker buckets so keyed state stays bounded
+require("./lib/reconnect-throttle").startSweep(); // #146: same, for the reconnect throttle's per-device buckets
+require("./lib/flap-limiter").startSweep(); // #146 Item B: evict idle flap-limiter buckets
+require("./lib/session-settle").startSweep(); // #148 patch2: evict idle session-settle entries
+require("./lib/content-ack-limiter").startSweep(); // #146 Item E: evict idle content-ack buckets
+const apkCache = require("./lib/apk-cache");
+apkCache.start(); // #146 Item C: resolve APK path/size/mtime once + refresh on interval (no per-request fs)
+const { getBand } = require("./services/loop-lag"); // #146 Item C: critical-band download shed
+
+// #146 Item C/E: OTA update-check log — COALESCED (one summarized line per reason per
+// window) so a poll flood can't turn synchronous stdout writes into a loop hog. Never
+// keys on IP for any decision (SNAT).
+const logCoalescer = require("./lib/log-coalescer");
+function logOtaCheck(deviceId, client, latest, available, reason) {
+  logCoalescer.record(
+    `ota-check:${reason}:${available}`,
+    `[ota] update check: latest=${latest} update_available=${available} reason=${reason}`,
+  );
+}
+
+app.get("/api/update/check", (req, res) => {
   const currentVersion = req.query.version;
-  const deviceId = req.query.device_id || null;   // #144: optional; beta4+ clients send it for per-device keying
+  const deviceId = req.query.device_id || null; // #144: optional; beta4+ clients send it for per-device keying
   const latestVersion = VERSION;
 
   // #144: circuit-breaker + phantom-version guard. Keys per device_id when present, else
@@ -632,10 +894,16 @@ app.get('/api/update/check', (req, res) => {
     if (verdict.log) console.log(verdict.log);
     logOtaCheck(deviceId, currentVersion, latestVersion, false, verdict.reason);
     return res.json({
-      latest_version: latestVersion, current_version: currentVersion || 'unknown',
-      update_available: false, reason: verdict.reason, download_url: '/download/apk',
-      apk_size: 0, apk_modified: 0,
-      ...(verdict.retry_after_seconds ? { retry_after_seconds: verdict.retry_after_seconds } : {}),
+      latest_version: latestVersion,
+      current_version: currentVersion || "unknown",
+      update_available: false,
+      reason: verdict.reason,
+      download_url: "/download/apk",
+      apk_size: 0,
+      apk_modified: 0,
+      ...(verdict.retry_after_seconds
+        ? { retry_after_seconds: verdict.retry_after_seconds }
+        : {}),
     });
   }
 
@@ -644,11 +912,19 @@ app.get('/api/update/check', (req, res) => {
   const apk = apkCache.get();
   const updateAvailable = apk.exists;
   if (verdict.log) console.log(verdict.log);
-  logOtaCheck(deviceId, currentVersion, latestVersion, updateAvailable, updateAvailable ? verdict.reason : 'apk-missing');
+  logOtaCheck(
+    deviceId,
+    currentVersion,
+    latestVersion,
+    updateAvailable,
+    updateAvailable ? verdict.reason : "apk-missing",
+  );
   res.json({
-    latest_version: latestVersion, current_version: currentVersion || 'unknown',
-    update_available: updateAvailable, reason: updateAvailable ? verdict.reason : 'apk-missing',
-    download_url: '/download/apk',
+    latest_version: latestVersion,
+    current_version: currentVersion || "unknown",
+    update_available: updateAvailable,
+    reason: updateAvailable ? verdict.reason : "apk-missing",
+    download_url: "/download/apk",
     apk_size: updateAvailable ? apk.size : 0,
     apk_modified: updateAvailable ? apk.mtime : 0,
   });
@@ -660,192 +936,273 @@ app.get('/api/update/check', (req, res) => {
 
 // Serve uploaded content files directly (with CORS for web player canvas capture)
 // Long cache for media files — Cloudflare and browsers can cache these aggressively
-app.use('/uploads/content', (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-  res.setHeader('Cache-Control', 'public, max-age=2592000, immutable'); // 30 days
-  next();
-}, express.static(config.contentDir));
+app.use(
+  "/uploads/content",
+  (req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Cache-Control", "public, max-age=2592000, immutable"); // 30 days
+    next();
+  },
+  express.static(config.contentDir),
+);
 
-// Setup WebSockets
-const setupWebSockets = require('./ws');
-const { deviceNs, dashboardNs } = setupWebSockets(io);
-app.set('io', io);
-
-// Start heartbeat checker
-const { startHeartbeatChecker } = require('./services/heartbeat');
-startHeartbeatChecker(io);
-
-// #142: start event-loop lag sampling (feeds /api/status + the reconnect throttle)
-const { startLoopLagMonitor } = require('./services/loop-lag');
-startLoopLagMonitor();
-
-// Start command-queue sweep (prunes expired entries for offline devices)
-const commandQueue = require('./lib/command-queue');
-commandQueue.startSweep();
-
-// Start scheduler
-const { startScheduler } = require('./services/scheduler');
-startScheduler(io);
-
-// Start alert service
-const { startAlertService } = require('./services/alerts');
-startAlertService(io);
-
-// Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
-const { startActivationNudge } = require('./services/activationNudge');
-startActivationNudge();
-
-// #73: agency-upload digest flush (batched draft/published notifications to admins + owner)
-const { startAgencyDigest } = require('./services/agency-digest');
-startAgencyDigest();
-
-// Off-main-thread WAL checkpointer: disables inline auto-checkpoint on the main connection
-// (the ~60s p99 spike = a synchronous fsync-heavy checkpoint on the loop) and runs PASSIVE
-// (escalating to TRUNCATE if starved) from a worker thread. Started AFTER the DB is open+migrated.
-const { startWalCheckpointer, stopWalCheckpointer } = require('./db/wal-checkpointer');
-startWalCheckpointer(require('./db/database').db, config.dbPath);
-
-// Graceful shutdown: stop the checkpointer worker (closes its own DB handle) + flush + close.
+// Graceful shutdown: flush buffered audit rows, then drain + close the MySQL pool.
 let _shuttingDown = false;
-function gracefulShutdown(sig) {
-  if (_shuttingDown) return; _shuttingDown = true;
-  console.log(`[shutdown] ${sig} — stopping WAL checkpointer + closing DB`);
-  Promise.resolve(stopWalCheckpointer()).catch(() => {}).finally(() => {
-    try { require('./lib/status-log-writer').flush(); } catch (_) {}
-    try { require('./db/database').db.close(); } catch (_) {}
-    process.exit(0);
+async function gracefulShutdown(sig) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log(`[shutdown] ${sig} — flushing + closing DB pool`);
+  try {
+    await require("./lib/status-log-writer").flush();
+  } catch (_) {}
+  try {
+    await require("./db/database").db.close();
+  } catch (_) {}
+  process.exit(0);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// Everything below registers WebSocket handlers, the remaining routes, starts background
+// services, and opens the listening socket. All of it is deferred inside boot() until AFTER
+// initDb() resolves - unlike the old synchronous better-sqlite3 open (schema ready the instant
+// the module was required), MySQL's schema setup is async, and several of the service starters
+// below (heartbeat, scheduler, alerts) run DB queries on their very first tick. Nothing before
+// this point in the file touches the DB or accepts connections, so deferring this tail is safe:
+// route/middleware registration above (PUBLIC_ROUTERS/JWT_ONLY_ROUTERS/AGENCY_ROUTERS, /app,
+// /api/branding, etc.) already happened synchronously, and the process can't receive any HTTP
+// traffic until server.listen() inside boot() actually runs.
+async function boot() {
+  const { db, initDb } = require("./db/database");
+  await initDb();
+
+  // Setup WebSockets
+  const setupWebSockets = require("./ws");
+  const { deviceNs, dashboardNs } = setupWebSockets(io);
+  app.set("io", io);
+
+  // Start heartbeat checker
+  const { startHeartbeatChecker } = require("./services/heartbeat");
+  startHeartbeatChecker(io);
+
+  // #142: start event-loop lag sampling (feeds /api/status + the reconnect throttle)
+  const { startLoopLagMonitor } = require("./services/loop-lag");
+  startLoopLagMonitor();
+
+  // Start command-queue sweep (prunes expired entries for offline devices)
+  const commandQueue = require("./lib/command-queue");
+  commandQueue.startSweep();
+
+  // Start scheduler
+  const { startScheduler } = require("./services/scheduler");
+  startScheduler(io);
+
+  // Start alert service
+  const { startAlertService } = require("./services/alerts");
+  startAlertService(io);
+
+  // Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
+  const { startActivationNudge } = require("./services/activationNudge");
+  startActivationNudge();
+
+  // #73: agency-upload digest flush (batched draft/published notifications to admins + owner)
+  const { startAgencyDigest } = require("./services/agency-digest");
+  startAgencyDigest();
+
+  // Handle provisioning via WebSocket notification (kept as a require for its
+  // registration side effect on the /api/provision router mounted earlier).
+  require("./routes/provisioning");
+
+  // Override provision to also notify device via WS
+  const { checkDeviceLimit } = require("./middleware/subscription");
+  const pairLockout = require("./lib/pair-lockout");
+  app.post(
+    "/api/provision/pair",
+    requireAuth,
+    resolveTenancy,
+    checkDeviceLimit,
+    asyncHandler(async (req, res) => {
+      // #87: lock out an IP after repeated failed pairing-code guesses (brute-force defense
+      // beyond the 5/min rate-limit on /api/provision).
+      const ip = getClientIp(req);
+      if (pairLockout.isLocked(ip)) {
+        return res.status(429).json({
+          error:
+            "Too many failed pairing attempts. Try again in a few minutes.",
+        });
+      }
+      const { pairing_code, name } = req.body;
+      if (!pairing_code)
+        return res.status(400).json({ error: "pairing_code required" });
+      // Phase 2.2a: pair into the caller's current workspace. Refusing on no
+      // context prevents the regression window where a newly-paired device
+      // would have workspace_id NULL and be invisible to workspace-filtered lists.
+      if (!req.workspaceId)
+        return res.status(403).json({
+          error: "No workspace context. Switch to a workspace before pairing.",
+        });
+
+      const device = await db
+        .prepare("SELECT * FROM devices WHERE pairing_code = ?")
+        .get(pairing_code);
+      // #87: an UNKNOWN code is a brute-force guess - count it toward the per-IP lockout.
+      if (!device) {
+        pairLockout.recordFailure(ip);
+        return res
+          .status(404)
+          .json({ error: "No device found with that pairing code" });
+      }
+      // An EXPIRED code is a legitimate-but-stale code (a slow rollout, not an attack), so it
+      // does NOT count toward the lockout - it just asks the display to regenerate. This keeps
+      // a bulk rollout from one office/NAT IP from locking itself out on expired codes.
+      if (pairLockout.isCodeExpired(device.created_at)) {
+        return res.status(410).json({
+          error: "Pairing code expired - restart the display to get a new code",
+        });
+      }
+      pairLockout.reset(ip); // a valid claim forgives prior failed attempts from this IP
+
+      const countRow = await db
+        .prepare("SELECT COUNT(*) as count FROM devices WHERE user_id = ?")
+        .get(req.user.id);
+      const deviceName = name || "Display " + (countRow.count + 1);
+      await db
+        .prepare(
+          "UPDATE devices SET pairing_code = NULL, name = ?, user_id = ?, workspace_id = ?, status = 'online', updated_at = UNIX_TIMESTAMP() WHERE id = ?",
+        )
+        .run(deviceName, req.user.id, req.workspaceId, device.id);
+
+      // Link fingerprint to user
+      await db
+        .prepare(
+          "UPDATE device_fingerprints SET user_id = ?, device_id = ? WHERE device_id = ?",
+        )
+        .run(req.user.id, device.id, device.id);
+
+      // Notify the device via WebSocket
+      deviceNs
+        .to(device.id)
+        .emit("device:paired", { device_id: device.id, name: deviceName });
+
+      const updated = await db
+        .prepare("SELECT * FROM devices WHERE id = ?")
+        .get(device.id);
+      require("./lib/device-sanitize").stripDeviceSecrets(updated); // never leak device_token to clients
+      // Phase 2.3: scope to the workspace the device was just claimed into.
+      const { workspaceRoom, emitToWorkspace } = require("./lib/socket-rooms");
+      emitToWorkspace(
+        dashboardNs,
+        workspaceRoom(updated.workspace_id),
+        "dashboard:device-added",
+        updated,
+      );
+
+      res.json(updated);
+    }),
+  );
+
+  // #146 Item C: GLOBAL download admission (lib/ota-download-guard) — concurrency + rate
+  // caps + critical-band shed, NEVER per-IP (SNAT). Single bounded rolling state.
+  const otaDownloadGuard = require("./lib/ota-download-guard");
+  const otaDownloadState = otaDownloadGuard.prodState(); // #146 P3.8: shared singleton so /api/status can read stats
+
+  app.get("/download/apk", (req, res) => {
+    const apk = apkCache.get();
+    if (!apk.exists) {
+      return res
+        .status(404)
+        .send(
+          `<!DOCTYPE html><html><head><title>APK Not Found</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}div{text-align:center;max-width:500px;padding:24px}h1{color:#f87171;font-size:24px}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}p{line-height:1.6;color:#94a3b8}</style></head><body><div><h1>APK Not Available</h1><p>The Android APK has not been compiled yet. In Docker, mount a built APK at <code>/data/BeamOS.apk</code>, or use the <a href="/player" style="color:#3b82f6">web player</a>.</p></div></body></html>`,
+        );
+    }
+
+    const verdict = otaDownloadGuard.admit(otaDownloadState, getBand());
+    if (verdict.summary) {
+      console.log(
+        `[ota] downloads last ${Math.round(config.otaDownloadWindowMs / 1000)}s: ${verdict.summary.served} served, ${verdict.summary.shed} shed (in-flight ${verdict.summary.inFlight})`,
+      );
+    }
+    if (!verdict.allow) {
+      res.setHeader("Retry-After", String(verdict.retryAfter));
+      return res.status(verdict.status).json({
+        error: "download capacity reached, retry shortly",
+        retry_after: verdict.retryAfter,
+      });
+    }
+
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      otaDownloadGuard.release(otaDownloadState);
+    };
+    res.on("finish", release);
+    res.on("close", release);
+    res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader("Content-Disposition", 'attachment; filename="BeamOS.apk"');
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(apk.path, (err) => {
+      if (err) release();
+    });
   });
-}
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle provisioning via WebSocket notification
-const { db } = require('./db/database');
-const originalProvisionRoute = require('./routes/provisioning');
+  // SPA fallback for app routes. Unmatched /api/ paths return 404 so misrouted
+  // clients fail fast instead of hanging until Cloudflare's 15s upstream timeout.
+  app.get("*", (req, res) => {
+    if (req.path.startsWith("/api/")) {
+      return res.status(404).json({ error: "Not found" });
+    }
+    res.sendFile(path.join(config.frontendDir, "index.html"));
+  });
 
-// Override provision to also notify device via WS
-const { checkDeviceLimit } = require('./middleware/subscription');
-const pairLockout = require('./lib/pair-lockout');
-app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (req, res) => {
-  // #87: lock out an IP after repeated failed pairing-code guesses (brute-force defense
-  // beyond the 5/min rate-limit on /api/provision).
-  const ip = getClientIp(req);
-  if (pairLockout.isLocked(ip)) {
-    return res.status(429).json({ error: 'Too many failed pairing attempts. Try again in a few minutes.' });
-  }
-  const { pairing_code, name } = req.body;
-  if (!pairing_code) return res.status(400).json({ error: 'pairing_code required' });
-  // Phase 2.2a: pair into the caller's current workspace. Refusing on no
-  // context prevents the regression window where a newly-paired device
-  // would have workspace_id NULL and be invisible to workspace-filtered lists.
-  if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before pairing.' });
+  // JSON error-handling middleware. Registered last (Express requires error middleware -
+  // 4 args - to come after all other app.use/routes). asyncHandler forwards every rejected
+  // promise from route handlers/middleware to next(err), which lands here instead of
+  // Express's default HTML error page or an uncaught-exception crash.
+  app.use((err, req, res, next) => {
+    console.error(`[error] ${req.method} ${req.originalUrl}:`, err);
+    if (res.headersSent) return next(err);
+    res
+      .status(err.status || 500)
+      .json({ error: err.expose ? err.message : "Internal server error" });
+  });
 
-  const device = db.prepare('SELECT * FROM devices WHERE pairing_code = ?').get(pairing_code);
-  // #87: an UNKNOWN code is a brute-force guess - count it toward the per-IP lockout.
-  if (!device) {
-    pairLockout.recordFailure(ip);
-    return res.status(404).json({ error: 'No device found with that pairing code' });
-  }
-  // An EXPIRED code is a legitimate-but-stale code (a slow rollout, not an attack), so it
-  // does NOT count toward the lockout - it just asks the display to regenerate. This keeps
-  // a bulk rollout from one office/NAT IP from locking itself out on expired codes.
-  if (pairLockout.isCodeExpired(device.created_at)) {
-    return res.status(410).json({ error: 'Pairing code expired - restart the display to get a new code' });
-  }
-  pairLockout.reset(ip); // a valid claim forgives prior failed attempts from this IP
+  const listenPort = hasSsl ? config.httpsPort : config.port;
+  const protocol = hasSsl ? "https" : "http";
 
-  const deviceName = name || 'Display ' + (db.prepare('SELECT COUNT(*) as count FROM devices WHERE user_id = ?').get(req.user.id).count + 1);
-  db.prepare("UPDATE devices SET pairing_code = NULL, name = ?, user_id = ?, workspace_id = ?, status = 'online', updated_at = strftime('%s','now') WHERE id = ?")
-    .run(deviceName, req.user.id, req.workspaceId, device.id);
-
-  // Link fingerprint to user
-  db.prepare("UPDATE device_fingerprints SET user_id = ?, device_id = ? WHERE device_id = ?")
-    .run(req.user.id, device.id, device.id);
-
-  // Notify the device via WebSocket
-  deviceNs.to(device.id).emit('device:paired', { device_id: device.id, name: deviceName });
-
-  const updated = db.prepare('SELECT * FROM devices WHERE id = ?').get(device.id);
-  require('./lib/device-sanitize').stripDeviceSecrets(updated); // never leak device_token to clients
-  // Phase 2.3: scope to the workspace the device was just claimed into.
-  const { workspaceRoom, emitToWorkspace } = require('./lib/socket-rooms');
-  emitToWorkspace(dashboardNs, workspaceRoom(updated.workspace_id), 'dashboard:device-added', updated);
-
-  res.json(updated);
-});
-
-// #146 Item C/E: OTA update-check log — COALESCED (one summarized line per reason per
-// window) so a poll flood can't turn synchronous stdout writes into a loop hog. Never
-// keys on IP for any decision (SNAT).
-const logCoalescer = require('./lib/log-coalescer');
-function logOtaCheck(deviceId, client, latest, available, reason) {
-  logCoalescer.record(`ota-check:${reason}:${available}`, `[ota] update check: latest=${latest} update_available=${available} reason=${reason}`);
-}
-
-// #146 Item C: GLOBAL download admission (lib/ota-download-guard) — concurrency + rate
-// caps + critical-band shed, NEVER per-IP (SNAT). Single bounded rolling state.
-const otaDownloadGuard = require('./lib/ota-download-guard');
-const otaDownloadState = otaDownloadGuard.prodState();   // #146 P3.8: shared singleton so /api/status can read stats
-
-app.get('/download/apk', (req, res) => {
-  const apk = apkCache.get();
-  if (!apk.exists) {
-    return res.status(404).send(`<!DOCTYPE html><html><head><title>APK Not Found</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}div{text-align:center;max-width:500px;padding:24px}h1{color:#f87171;font-size:24px}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}p{line-height:1.6;color:#94a3b8}</style></head><body><div><h1>APK Not Available</h1><p>The Android APK has not been compiled yet. In Docker, mount a built APK at <code>/data/ScreenTinker.apk</code>, or use the <a href="/player" style="color:#3b82f6">web player</a>.</p></div></body></html>`);
-  }
-
-  const verdict = otaDownloadGuard.admit(otaDownloadState, getBand());
-  if (verdict.summary) {
-    console.log(`[ota] downloads last ${Math.round(config.otaDownloadWindowMs / 1000)}s: ${verdict.summary.served} served, ${verdict.summary.shed} shed (in-flight ${verdict.summary.inFlight})`);
-  }
-  if (!verdict.allow) {
-    res.setHeader('Retry-After', String(verdict.retryAfter));
-    return res.status(verdict.status).json({ error: 'download capacity reached, retry shortly', retry_after: verdict.retryAfter });
-  }
-
-  let released = false;
-  const release = () => { if (released) return; released = true; otaDownloadGuard.release(otaDownloadState); };
-  res.on('finish', release); res.on('close', release);
-  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-  res.setHeader('Content-Disposition', 'attachment; filename="ScreenTinker.apk"');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(apk.path, (err) => { if (err) release(); });
-});
-
-// SPA fallback for app routes. Unmatched /api/ paths return 404 so misrouted
-// clients fail fast instead of hanging until Cloudflare's 15s upstream timeout.
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api/')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  res.sendFile(path.join(config.frontendDir, 'index.html'));
-});
-
-const listenPort = hasSsl ? config.httpsPort : config.port;
-const protocol = hasSsl ? 'https' : 'http';
-
-server.listen(listenPort, '0.0.0.0', () => {
-  console.log(`
+  server.listen(listenPort, "0.0.0.0", () => {
+    console.log(`
 ╔══════════════════════════════════════════════════╗
-║       ScreenTinker Server v${VERSION.padEnd(22).slice(0, 22)}║
+║       BeamOS Server v${VERSION.padEnd(22).slice(0, 22)}║
 ║──────────────────────────────────────────────────║
 ║  Dashboard: ${protocol}://localhost:${String(listenPort).padEnd(5)}              ║
 ║  API:       ${protocol}://localhost:${String(listenPort).padEnd(5)}/api          ║
-║  SSL:       ${hasSsl ? 'ENABLED ✓' : 'DISABLED (no certs found)'}${hasSsl ? '                       ' : '         '}║
+║  SSL:       ${hasSsl ? "ENABLED ✓" : "DISABLED (no certs found)"}${hasSsl ? "                       " : "         "}║
 ║──────────────────────────────────────────────────║
 ║  Listening on all interfaces (0.0.0.0)           ║
 ╚══════════════════════════════════════════════════╝
-  `);
-});
+    `);
+  });
 
-// If SSL is enabled, also start an HTTP server that redirects to HTTPS
-if (hasSsl) {
-  const redirectApp = express();
-  redirectApp.use((req, res) => {
-    const host = req.headers.host?.replace(`:${config.port}`, `:${config.httpsPort}`) || `localhost:${config.httpsPort}`;
-    res.redirect(301, `https://${host}${req.url}`);
-  });
-  http.createServer(redirectApp).listen(config.port, '0.0.0.0', () => {
-    console.log(`  HTTP redirect: http://localhost:${config.port} → https://localhost:${config.httpsPort}\n`);
-  });
+  // If SSL is enabled, also start an HTTP server that redirects to HTTPS
+  if (hasSsl) {
+    const redirectApp = express();
+    redirectApp.use((req, res) => {
+      const host =
+        req.headers.host?.replace(`:${config.port}`, `:${config.httpsPort}`) ||
+        `localhost:${config.httpsPort}`;
+      res.redirect(301, `https://${host}${req.url}`);
+    });
+    http.createServer(redirectApp).listen(config.port, "0.0.0.0", () => {
+      console.log(
+        `  HTTP redirect: http://localhost:${config.port} → https://localhost:${config.httpsPort}\n`,
+      );
+    });
+  }
 }
+
+boot().catch((err) => {
+  console.error("[boot] fatal error during startup:", err);
+  process.exit(1);
+});

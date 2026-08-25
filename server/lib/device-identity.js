@@ -34,7 +34,7 @@ function fpStmt() {
 // device_id) returns immediately with ZERO DB lookups. The device_fingerprints SELECT
 // runs ONLY when device_id is absent. Called on every register (block + flap gates), so
 // the hot path must stay lookup-free.
-function resolveIdentity(payload = {}) {
+async function resolveIdentity(payload = {}) {
   const { device_id, fingerprint, device_token } = payload;
 
   if (device_id) return { key: 'd:' + device_id, kind: 'device_id', deviceId: device_id };
@@ -43,7 +43,7 @@ function resolveIdentity(payload = {}) {
     let mapped = null;
     try {
       const st = fpStmt();
-      const row = st && st.get(fingerprint);
+      const row = st && (await st.get(fingerprint));
       mapped = row && row.device_id ? row.device_id : null;
     } catch (_) { /* table may not exist on a partially-migrated DB */ }
     if (mapped) return { key: 'd:' + mapped, kind: 'fingerprint->device_id', deviceId: mapped };

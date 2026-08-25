@@ -9,7 +9,9 @@ import android.webkit.WebViewClient
 import android.widget.ImageView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -23,7 +25,11 @@ class MediaPlayerManager(
     private val imageView: ImageView,
     private val youtubeWebView: WebView? = null,
     private val onVideoComplete: () -> Unit,
-    private val onImageError: (() -> Unit)? = null
+    private val onImageError: (() -> Unit)? = null,
+    // Player error (decode failure, etc). Distinct from onVideoComplete so callers can
+    // tell "finished normally" apart from "failed" and avoid retrying with zero delay.
+    // Falls back to onVideoComplete if not supplied.
+    private val onVideoError: (() -> Unit)? = null
 ) {
     private var exoPlayer: ExoPlayer? = null
     private var currentType: MediaType = MediaType.NONE
@@ -38,7 +44,7 @@ class MediaPlayerManager(
     }
 
     private fun setupExoPlayer() {
-        exoPlayer = ExoPlayer.Builder(context).build().also { player ->
+        exoPlayer = ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build().also { player ->
             playerView.player = player
             player.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
@@ -57,6 +63,11 @@ class MediaPlayerManager(
                     if (playbackState == Player.STATE_ENDED) {
                         onVideoComplete()
                     }
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    Log.e("MediaPlayerManager", "Player error: ${error.message}", error)
+                    (onVideoError ?: onVideoComplete)()
                 }
             })
         }

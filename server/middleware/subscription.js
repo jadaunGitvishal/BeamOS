@@ -1,10 +1,11 @@
 const { db } = require("../db/database");
 const config = require("../config");
+const { asyncHandler } = require("../lib/async-handler");
 
 const TRIAL_DAYS = 14;
 
-function getUserPlan(userId) {
-  const user = db
+async function getUserPlan(userId) {
+  const user = await db
     .prepare(
       `
     SELECT u.*, p.name as plan_name, p.display_name as plan_display_name,
@@ -41,14 +42,14 @@ function getUserPlan(userId) {
   return user;
 }
 
-function getUserDeviceCount(userId) {
-  return db
+async function getUserDeviceCount(userId) {
+  return (await db
     .prepare("SELECT COUNT(*) as count FROM devices WHERE user_id = ?")
-    .get(userId).count;
+    .get(userId)).count;
 }
 
-function getUserStorageMB(userId) {
-  const result = db
+async function getUserStorageMB(userId) {
+  const result = await db
     .prepare(
       "SELECT COALESCE(SUM(file_size), 0) as total FROM content WHERE user_id = ?",
     )
@@ -57,14 +58,14 @@ function getUserStorageMB(userId) {
 }
 
 // Check if user can add more devices
-function checkDeviceLimit(req, res, next) {
-  const plan = getUserPlan(req.user.id);
+const checkDeviceLimit = asyncHandler(async function checkDeviceLimit(req, res, next) {
+  const plan = await getUserPlan(req.user.id);
   if (!plan) return res.status(403).json({ error: "No plan found" });
 
   // -1 means unlimited
   if (plan.max_devices === -1) return next();
 
-  const deviceCount = getUserDeviceCount(req.user.id);
+  const deviceCount = await getUserDeviceCount(req.user.id);
   if (deviceCount >= plan.max_devices) {
     return res.status(403).json({
       error: `Device limit reached (${plan.max_devices} on ${plan.plan_display_name} plan). Upgrade to add more.`,
@@ -75,17 +76,17 @@ function checkDeviceLimit(req, res, next) {
     });
   }
   next();
-}
+});
 
 // Check if user can upload more content
-function checkStorageLimit(req, res, next) {
-  const plan = getUserPlan(req.user.id);
+const checkStorageLimit = asyncHandler(async function checkStorageLimit(req, res, next) {
+  const plan = await getUserPlan(req.user.id);
   if (!plan) return res.status(403).json({ error: "No plan found" });
 
   // -1 means unlimited
   if (plan.max_storage_mb === -1) return next();
 
-  const usedMB = getUserStorageMB(req.user.id);
+  const usedMB = await getUserStorageMB(req.user.id);
   if (usedMB >= plan.max_storage_mb) {
     return res.status(403).json({
       error: `Storage limit reached (${plan.max_storage_mb}MB on ${plan.plan_display_name} plan). Upgrade for more.`,
@@ -96,11 +97,11 @@ function checkStorageLimit(req, res, next) {
     });
   }
   next();
-}
+});
 
 // Check if user has remote control access
-function checkRemoteControl(req, res, next) {
-  const plan = getUserPlan(req.user.id);
+const checkRemoteControl = asyncHandler(async function checkRemoteControl(req, res, next) {
+  const plan = await getUserPlan(req.user.id);
   if (!plan || !plan.remote_control) {
     return res.status(403).json({
       error: "Remote control requires Starter plan or above.",
@@ -109,11 +110,11 @@ function checkRemoteControl(req, res, next) {
     });
   }
   next();
-}
+});
 
 // Check remote URL feature access
-function checkRemoteUrl(req, res, next) {
-  const plan = getUserPlan(req.user.id);
+const checkRemoteUrl = asyncHandler(async function checkRemoteUrl(req, res, next) {
+  const plan = await getUserPlan(req.user.id);
   if (!plan || !plan.remote_url) {
     return res.status(403).json({
       error: "Remote URL content requires Pro plan or above.",
@@ -122,11 +123,11 @@ function checkRemoteUrl(req, res, next) {
     });
   }
   next();
-}
+});
 
 // Check subscription is active (not expired)
-function checkActiveSubscription(req, res, next) {
-  const plan = getUserPlan(req.user.id);
+const checkActiveSubscription = asyncHandler(async function checkActiveSubscription(req, res, next) {
+  const plan = await getUserPlan(req.user.id);
   if (!plan) return res.status(403).json({ error: "No plan found" });
 
   // Free plan is always active
@@ -147,7 +148,7 @@ function checkActiveSubscription(req, res, next) {
     });
   }
   next();
-}
+});
 
 module.exports = {
   getUserPlan,

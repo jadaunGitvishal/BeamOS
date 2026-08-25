@@ -8,7 +8,7 @@ Thanks for your interest in contributing! Here's how to get started.
 2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/screentinker.git`
 3. Install dependencies: `cd server && npm install`
 4. Start the dev server: `npm run dev`
-5. Open `http://localhost:4001`
+5. Open `http://localhost:5001`
 
 ## Making Changes
 

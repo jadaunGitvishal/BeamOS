@@ -3,5 +3,5 @@
      Replace with native-reviewed translations before publicizing. -->
 <resources>
     <string name="app_name">BeamOS</string>
-    <string name="accessibility_description">RemoteDisplay uses accessibility to enable remote power controls and system navigation.</string>
+    <string name="accessibility_description">BeamOS uses accessibility to enable remote power controls and system navigation.</string>
 </resources>

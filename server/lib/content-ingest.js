@@ -66,7 +66,7 @@ async function ingestUploadedFile({ file, userId, workspaceId }) {
     console.warn('Thumbnail/metadata generation failed:', e.message);
   }
 
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, thumbnail_path, width, height)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, userId, workspaceId, safeFilename(file.originalname), filepath, file.mimetype, file.size, durationSec, thumbnailPath, width, height);

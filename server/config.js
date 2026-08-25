@@ -30,10 +30,20 @@ function parseBillingRateTable(raw) {
 }
 
 module.exports = {
-  port: process.env.PORT || 4001,
+  port: process.env.PORT || 5001,
   httpsPort: process.env.HTTPS_PORT || 3443,
   dataDir: DATA_DIR,
-  dbPath: process.env.DB_PATH || path.join(DATA_DIR, "db", "remote_display.db"),
+  // MySQL connection settings. mysqlSocketPath (MYSQL_SOCKET_PATH), when set,
+  // connects via a local Unix socket instead of host/port (common on managed
+  // MySQL installs) - mysql2 accepts socketPath instead of host/port in that case.
+
+  mysqlHost: process.env.MYSQL_HOST || "localhost",
+  mysqlPort: parseInt(process.env.MYSQL_PORT) || 3306,
+  mysqlUser: process.env.MYSQL_USER || "beamos_user",
+  mysqlPassword: process.env.MYSQL_PASSWORD || "",
+  mysqlDatabase: process.env.MYSQL_DATABASE || "beamos",
+  mysqlSocketPath: process.env.MYSQL_SOCKET_PATH || "",
+  mysqlPoolSize: parseInt(process.env.MYSQL_POOL_SIZE) || 10,
   uploadsDir,
   contentDir: path.join(uploadsDir, "content"),
   screenshotsDir: path.join(uploadsDir, "screenshots"),
@@ -100,7 +110,7 @@ module.exports = {
   graphClientId: process.env.GRAPH_CLIENT_ID || "",
   graphClientSecret: process.env.GRAPH_CLIENT_SECRET || "",
   graphSenderEmail: process.env.GRAPH_SENDER_EMAIL || "",
-  graphSenderName: process.env.GRAPH_SENDER_NAME || "ScreenTinker",
+  graphSenderName: process.env.GRAPH_SENDER_NAME || "BeamOS",
   // Dev safety net: comma-separated allow-list of recipient emails. When set,
   // sends to any address NOT in the list are suppressed (logged but not posted
   // to Graph). Intended for local dev that pulls fresh prod DB copies - keeps

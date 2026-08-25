@@ -308,6 +308,10 @@ body {
   gap: 6px;
 }
 
+#exportBtn {
+  cursor: pointer;
+}
+
 .btn-primary {
   background: var(--accent);
   color: white;
@@ -1100,12 +1104,24 @@ body {
   z-index: 1000;
 }
 
+/* .modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 440px;
+  max-width: 90vw;
+  box-shadow: var(--shadow);
+} */
+
 .modal {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   width: 440px;
   max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
   box-shadow: var(--shadow);
 }
 
@@ -1122,8 +1138,13 @@ body {
   font-weight: 600;
 }
 
+/* .modal-body {
+  padding: 20px;
+} */
+
 .modal-body {
   padding: 20px;
+  overflow-y: auto;
 }
 
 .modal-description {

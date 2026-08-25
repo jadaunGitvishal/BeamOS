@@ -1,29 +1,30 @@
 @echo off
-REM ScreenTinker - Windows Kiosk Setup
+REM BeamOS - Windows Kiosk Setup
 REM Run as Administrator
 
-set SERVER_URL=https://your-server-url
+@REM set SERVER_URL=https://your-server-url
+set /p SERVER_URL="Enter your BeamOS server URL (e.g. https://cxo1-ai.onrender.com): "
 set PLAYER_URL=%SERVER_URL%/player
 
 echo ==================================
-echo   ScreenTinker Windows Player
+echo   BeamOS Windows Player
 echo ==================================
 echo.
 
 REM Create startup shortcut
 set STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
-set SHORTCUT=%STARTUP%\ScreenTinker.url
+set SHORTCUT=%STARTUP%\BeamOS.url
 
 echo [InternetShortcut] > "%SHORTCUT%"
 echo URL=%PLAYER_URL% >> "%SHORTCUT%"
 
 REM Create a VBS launcher for kiosk mode (Chrome)
-set LAUNCHER=%USERPROFILE%\ScreenTinker.vbs
+set LAUNCHER=%USERPROFILE%\BeamOS.vbs
 echo Set WshShell = CreateObject("WScript.Shell") > "%LAUNCHER%"
 echo WshShell.Run """C:\Program Files\Google\Chrome\Application\chrome.exe"" --kiosk --autoplay-policy=no-user-gesture-required ""%PLAYER_URL%""", 1, False >> "%LAUNCHER%"
 
 REM Replace startup shortcut with VBS launcher
-copy /Y "%LAUNCHER%" "%STARTUP%\ScreenTinker.vbs" >nul
+copy /Y "%LAUNCHER%" "%STARTUP%\BeamOS.vbs" >nul
 
 echo.
 echo Setup complete!

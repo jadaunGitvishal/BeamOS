@@ -45,6 +45,7 @@ const JWT_ONLY_ROUTERS = [
   { path: '/api/teams',       mod: './routes/teams',        tenancy: true },
   { path: '/api/white-label', mod: './routes/white-label',  tenancy: true },
   { path: '/api/workspaces',  mod: './routes/workspaces' },
+  { path: '/api/organizations', mod: './routes/organizations' },
   { path: '/api/admin',       mod: './routes/admin' },
   { path: '/api/tokens',      mod: './routes/tokens',       tenancy: true },
   // Merged in from the standalone BeamOS-Dashboard app (read-only reporting:

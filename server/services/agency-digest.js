@@ -13,7 +13,7 @@ const defaultEmail = require('./email');
 const FLUSH_MS = 15 * 60 * 1000; // the digest window
 
 // Workspace owner/admins (via the org) + the playlist owner. UNION dedupes by email.
-function resolveRecipients(db, workspaceId, playlistId) {
+async function resolveRecipients(db, workspaceId, playlistId) {
   return db.prepare(`
     SELECT u.email FROM organization_members om
     JOIN workspaces w ON w.organization_id = om.organization_id
@@ -26,9 +26,9 @@ function resolveRecipients(db, workspaceId, playlistId) {
   `).all(workspaceId, playlistId);
 }
 
-function composeDigest(db, g) {
-  const agency = db.prepare('SELECT name FROM api_tokens WHERE id = ?').get(g.token_id)?.name || 'An agency';
-  const playlist = db.prepare('SELECT name FROM playlists WHERE id = ?').get(g.playlist_id)?.name || 'a playlist';
+async function composeDigest(db, g) {
+  const agency = (await db.prepare('SELECT name FROM api_tokens WHERE id = ?').get(g.token_id))?.name || 'An agency';
+  const playlist = (await db.prepare('SELECT name FROM playlists WHERE id = ?').get(g.playlist_id))?.name || 'a playlist';
   const n = g.n;
   if (g.action === 'draft') {
     return {
@@ -47,10 +47,13 @@ async function flushAgencyDigests(db = defaultDb, email = defaultEmail) {
   if (!email.isConfigured()) {
     // SMTP off -> drain-and-discard so the queue can't grow unbounded on self-hosters
     // who never set up email. (The endpoint also skips enqueue when off; this is the backstop.)
-    db.prepare('DELETE FROM agency_notifications WHERE sent_at IS NULL').run();
+    await db.prepare('DELETE FROM agency_notifications WHERE sent_at IS NULL').run();
     return;
   }
-  const groups = db.prepare(`
+  // GROUP_CONCAT's default max length (group_concat_max_len, 1024 bytes on a stock MySQL
+  // 8.0 install) could in principle truncate `ids` for a very large single-cycle batch of
+  // notification ids; not addressed here (a server-level setting), just flagged.
+  const groups = await db.prepare(`
     SELECT workspace_id, token_id, playlist_id, action, COUNT(*) AS n, GROUP_CONCAT(id) AS ids
     FROM agency_notifications WHERE sent_at IS NULL
     GROUP BY token_id, playlist_id, action
@@ -58,18 +61,22 @@ async function flushAgencyDigests(db = defaultDb, email = defaultEmail) {
 
   for (const g of groups) {
     try {
-      const recipients = resolveRecipients(db, g.workspace_id, g.playlist_id);
+      const recipients = await resolveRecipients(db, g.workspace_id, g.playlist_id);
       if (recipients.length) {
-        const { subject, text } = composeDigest(db, g);
+        const { subject, text } = await composeDigest(db, g);
         for (const r of recipients) {
           await email.sendEmail({ to: r.email, subject, text }); // throw -> caught below -> NOT stamped -> retried
         }
       }
       // Stamp sent_at ONLY after every send for this group succeeded (or there were no
       // recipients). A throw above skips this -> the rows stay unsent for the next cycle.
+      // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
+      // must be prepared from it to actually participate in the transaction.
       const now = Math.floor(Date.now() / 1000);
-      const stamp = db.prepare('UPDATE agency_notifications SET sent_at = ? WHERE id = ?');
-      db.transaction(() => { for (const id of g.ids.split(',')) stamp.run(now, id); })();
+      await db.transaction(async (tx) => {
+        const stamp = tx.prepare('UPDATE agency_notifications SET sent_at = ? WHERE id = ?');
+        for (const id of g.ids.split(',')) await stamp.run(now, id);
+      })();
     } catch (e) {
       console.warn('agency digest: send failed, will retry next cycle:', e.message);
     }

@@ -15,6 +15,7 @@ const {
   HARDCODED_BRANDING,
   PLATFORM_DEFAULT_ID,
 } = require("../lib/branding");
+const { asyncHandler } = require("../lib/async-handler");
 
 // Admin-provisioned user creation (#10). Operates on a target workspace
 // specified in the body, NOT the caller's active workspace - so this router is
@@ -39,7 +40,7 @@ const MIN_PASSWORD_LENGTH = 8;
 // POST /api/admin/users - create a user with an admin-set password and assign
 // them to a workspace + role. The result is indistinguishable from an
 // invite-accepted user (a global users row + a workspace_members row).
-router.post("/users", (req, res) => {
+router.post("/users", asyncHandler(async (req, res) => {
   const email = String(req.body?.email || "")
     .trim()
     .toLowerCase();
@@ -70,11 +71,11 @@ router.post("/users", (req, res) => {
     return res.status(400).json({ error: "workspaceId required" });
   }
 
-  const ws = db
+  const ws = await db
     .prepare("SELECT * FROM workspaces WHERE id = ?")
     .get(workspaceId);
   if (!ws) return res.status(404).json({ error: "Workspace not found" });
-  if (!canAdminWorkspace(db, req.user, ws)) {
+  if (!await canAdminWorkspace(db, req.user, ws)) {
     return res.status(403).json({ error: "Admin access required" });
   }
   // Stamp the target workspace so the activityLogger middleware (and our
@@ -82,7 +83,7 @@ router.post("/users", (req, res) => {
   req.workspaceId = ws.id;
 
   // Email uniqueness: clean 409, never overwrite an existing account.
-  const existing = db
+  const existing = await db
     .prepare("SELECT id FROM users WHERE email = ?")
     .get(email);
   if (existing) {
@@ -100,13 +101,15 @@ router.post("/users", (req, res) => {
   // nudge sweep already excludes them (they have a workspace_members row); we
   // additionally stamp both *_sent_at sentinels so any future sweep treats them
   // as already-handled. See services/signupEmails.js + services/activationNudge.js.
-  const txn = db.transaction(() => {
-    db.prepare(
+  // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
+  // must be prepared from it, not the outer db, to actually participate in the transaction.
+  const txn = db.transaction(async (tx) => {
+    await tx.prepare(
       `
       INSERT INTO users (
         id, email, name, password_hash, auth_provider, role, plan_id,
         must_change_password, welcome_email_sent_at, activation_nudge_sent_at
-      ) VALUES (?, ?, ?, ?, 'local', 'user', 'enterprise', ?, strftime('%s','now'), strftime('%s','now'))
+      ) VALUES (?, ?, ?, ?, 'local', 'user', 'enterprise', ?, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())
     `,
     ).run(
       id,
@@ -118,14 +121,14 @@ router.post("/users", (req, res) => {
 
     // Same membership footprint as an accepted invite: one workspace_members
     // row, invited_by = the admin who created them.
-    db.prepare(
+    await tx.prepare(
       `
       INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
       VALUES (?, ?, ?, ?)
     `,
     ).run(ws.id, id, role, req.user.id);
   });
-  txn();
+  await txn();
 
   // Explicit audit row - who created whom, where, with what role. Never the
   // plaintext password (and the generic activityLogger only summarizes name).
@@ -139,7 +142,7 @@ router.post("/users", (req, res) => {
   );
 
   // Response never includes password or hash.
-  const created = db
+  const created = await db
     .prepare(
       "SELECT id, email, name, role, auth_provider, plan_id, must_change_password, created_at FROM users WHERE id = ?",
     )
@@ -147,7 +150,7 @@ router.post("/users", (req, res) => {
   res
     .status(201)
     .json({ ...created, workspace_id: ws.id, workspace_role: role });
-});
+}));
 
 // POST /api/admin/orgs - create a new organization + its first ("Default")
 // workspace (#35). Platform-admin only. The MSP use case: provision a customer
@@ -158,7 +161,7 @@ router.post("/users", (req, res) => {
 // signup org-bootstrap in routes/auth.js), which also surfaces the org in their
 // switcher immediately. Customer users are then added via the Add User /
 // manage-memberships flow.
-router.post("/orgs", requirePlatformAdmin, (req, res) => {
+router.post("/orgs", requirePlatformAdmin, asyncHandler(async (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name)
     return res.status(400).json({ error: "Organization name required" });
@@ -170,21 +173,23 @@ router.post("/orgs", requirePlatformAdmin, (req, res) => {
   const orgId = uuidv4();
   const wsId = uuidv4();
   const ownerId = req.user.id;
-  const txn = db.transaction(() => {
-    db.prepare(
+  // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
+  // must be prepared from it, not the outer db, to actually participate in the transaction.
+  const txn = db.transaction(async (tx) => {
+    await tx.prepare(
       `INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')`,
     ).run(orgId, name, ownerId);
-    db.prepare(
+    await tx.prepare(
       `INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')`,
     ).run(orgId, ownerId);
-    db.prepare(
+    await tx.prepare(
       `INSERT INTO workspaces (id, organization_id, name, created_by) VALUES (?, ?, 'Default', ?)`,
     ).run(wsId, orgId, ownerId);
-    db.prepare(
+    await tx.prepare(
       `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')`,
     ).run(wsId, ownerId);
   });
-  txn();
+  await txn();
 
   req.workspaceId = wsId; // attribute the audit row to the new tenant
   logActivity(
@@ -202,12 +207,12 @@ router.post("/orgs", requirePlatformAdmin, (req, res) => {
     workspace_id: wsId,
     workspace_name: "Default",
   });
-});
+}));
 
 // GET /api/admin/orgs - list every organization with owner + resource counts and
 // its workspaces (#36, drives the Organizations admin section). Platform-admin only.
-router.get("/orgs", requirePlatformAdmin, (req, res) => {
-  const orgs = db
+router.get("/orgs", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const orgs = await db
     .prepare(
       `
     SELECT o.id, o.name, o.created_at, u.email AS owner_email, u.name AS owner_name,
@@ -221,7 +226,7 @@ router.get("/orgs", requirePlatformAdmin, (req, res) => {
     )
     .all();
   const wsByOrg = {};
-  for (const w of db
+  for (const w of await db
     .prepare(
       `
     SELECT w.id, w.name, w.organization_id,
@@ -234,18 +239,18 @@ router.get("/orgs", requirePlatformAdmin, (req, res) => {
     (wsByOrg[w.organization_id] = wsByOrg[w.organization_id] || []).push(w);
   }
   res.json(orgs.map((o) => ({ ...o, workspaces: wsByOrg[o.id] || [] })));
-});
+}));
 
 // DELETE /api/admin/orgs/:id - cascade-delete an org and everything in it (#36).
 // Platform-admin only. The frontend requires a type-the-name confirmation; this
 // is irreversible. Uses the shared cascade helper so no tenant resource is orphaned.
-router.delete("/orgs/:id", requirePlatformAdmin, (req, res) => {
-  const org = db
+router.delete("/orgs/:id", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const org = await db
     .prepare("SELECT id, name FROM organizations WHERE id = ?")
     .get(req.params.id);
   if (!org) return res.status(404).json({ error: "Organization not found" });
   try {
-    deleteOrgCascade(db, { orgId: org.id });
+    await deleteOrgCascade(db, { orgId: org.id });
   } catch (e) {
     return res.status(500).json({ error: "Failed to delete organization" });
   }
@@ -258,17 +263,17 @@ router.delete("/orgs/:id", requirePlatformAdmin, (req, res) => {
     null,
   );
   res.json({ deleted: true, id: org.id });
-});
+}));
 
 // DELETE /api/admin/workspaces/:id - cascade-delete a single workspace + its
 // tenant resources (#36); the parent org is left intact. Platform-admin only.
-router.delete("/workspaces/:id", requirePlatformAdmin, (req, res) => {
-  const ws = db
+router.delete("/workspaces/:id", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const ws = await db
     .prepare("SELECT id, name, organization_id FROM workspaces WHERE id = ?")
     .get(req.params.id);
   if (!ws) return res.status(404).json({ error: "Workspace not found" });
   try {
-    deleteWorkspaceCascade(db, { workspaceId: ws.id });
+    await deleteWorkspaceCascade(db, { workspaceId: ws.id });
   } catch (e) {
     return res.status(500).json({ error: "Failed to delete workspace" });
   }
@@ -281,7 +286,7 @@ router.delete("/workspaces/:id", requirePlatformAdmin, (req, res) => {
     null,
   );
   res.json({ deleted: true, id: ws.id });
-});
+}));
 
 // PUT /api/admin/users/:id/workspace - move/assign a SINGLE-workspace user to a
 // different workspace (platform Users admin page). Platform-admin only: this is
@@ -291,17 +296,17 @@ router.delete("/workspaces/:id", requirePlatformAdmin, (req, res) => {
 // Single-workspace model: refuses (400) a user who belongs to >1 workspace -
 // a single pick must never silently clobber multiple memberships; those are
 // managed in the workspace members view. Mirrors the frontend guard.
-router.put("/users/:id/workspace", requirePlatformAdmin, (req, res) => {
+router.put("/users/:id/workspace", requirePlatformAdmin, asyncHandler(async (req, res) => {
   const workspaceId = String(req.body?.workspaceId || "").trim();
   if (!workspaceId)
     return res.status(400).json({ error: "workspaceId required" });
 
-  const target = db
+  const target = await db
     .prepare("SELECT id, email FROM users WHERE id = ?")
     .get(req.params.id);
   if (!target) return res.status(404).json({ error: "User not found" });
 
-  const memberships = db
+  const memberships = await db
     .prepare("SELECT workspace_id FROM workspace_members WHERE user_id = ?")
     .all(target.id);
   if (memberships.length > 1) {
@@ -311,18 +316,18 @@ router.put("/users/:id/workspace", requirePlatformAdmin, (req, res) => {
     });
   }
 
-  const ws = db
+  const ws = await db
     .prepare("SELECT id, name, organization_id FROM workspaces WHERE id = ?")
     .get(workspaceId);
   if (!ws) return res.status(404).json({ error: "Workspace not found" });
 
-  const org = db
+  const org = await db
     .prepare("SELECT name FROM organizations WHERE id = ?")
     .get(ws.organization_id);
 
   // No-op if the chosen workspace is already their sole membership (preserve role).
   if (memberships.length === 1 && memberships[0].workspace_id === ws.id) {
-    const cur = db
+    const cur = await db
       .prepare(
         "SELECT role FROM workspace_members WHERE user_id = ? AND workspace_id = ?",
       )
@@ -340,16 +345,18 @@ router.put("/users/:id/workspace", requirePlatformAdmin, (req, res) => {
   req.workspaceId = ws.id; // audit attribution
   // Move (drop the existing single membership) or assign (none to drop), then
   // add the chosen one at the default role. Guarded above to <=1 membership, so
-  // the DELETE removes at most one row.
-  const txn = db.transaction(() => {
-    db.prepare("DELETE FROM workspace_members WHERE user_id = ?").run(
+  // the DELETE removes at most one row. db.transaction()'s callback gets a
+  // transaction-scoped handle (tx) - statements must be prepared from it, not the
+  // outer db, to actually participate in the transaction.
+  const txn = db.transaction(async (tx) => {
+    await tx.prepare("DELETE FROM workspace_members WHERE user_id = ?").run(
       target.id,
     );
-    db.prepare(
+    await tx.prepare(
       "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
     ).run(ws.id, target.id, "workspace_viewer", req.user.id);
   });
-  txn();
+  await txn();
 
   logActivity(
     req.user.id,
@@ -367,7 +374,7 @@ router.put("/users/:id/workspace", requirePlatformAdmin, (req, res) => {
     organization_name: org?.name || null,
     role: "workspace_viewer",
   });
-});
+}));
 
 // ===================== Per-user workspace membership management =====================
 // Platform-admin only (cross-org, platform-level). Unlike the single-workspace
@@ -376,7 +383,7 @@ router.put("/users/:id/workspace", requirePlatformAdmin, (req, res) => {
 // page "Manage workspaces" modal. requirePlatformAdmin excludes platform_operator
 // (no user/role management, #13).
 
-function userMembershipList(userId) {
+async function userMembershipList(userId) {
   return db
     .prepare(
       `
@@ -392,16 +399,16 @@ function userMembershipList(userId) {
 }
 
 // GET - list every workspace the user belongs to (with role + org/workspace name).
-router.get("/users/:id/workspaces", requirePlatformAdmin, (req, res) => {
-  const target = db
+router.get("/users/:id/workspaces", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const target = await db
     .prepare("SELECT id FROM users WHERE id = ?")
     .get(req.params.id);
   if (!target) return res.status(404).json({ error: "User not found" });
-  res.json(userMembershipList(req.params.id));
-});
+  res.json(await userMembershipList(req.params.id));
+}));
 
 // POST - add the user to a workspace (or update their role if already a member).
-router.post("/users/:id/workspaces", requirePlatformAdmin, (req, res) => {
+router.post("/users/:id/workspaces", requirePlatformAdmin, asyncHandler(async (req, res) => {
   const role = String(req.body?.role || "").trim();
   const workspaceId = String(req.body?.workspaceId || "").trim();
   if (!workspaceId)
@@ -412,27 +419,27 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, (req, res) => {
         "Role must be workspace_admin, workspace_editor, or workspace_viewer",
     });
   }
-  const target = db
+  const target = await db
     .prepare("SELECT id, email FROM users WHERE id = ?")
     .get(req.params.id);
   if (!target) return res.status(404).json({ error: "User not found" });
-  const ws = db
+  const ws = await db
     .prepare("SELECT id, name, organization_id FROM workspaces WHERE id = ?")
     .get(workspaceId);
   if (!ws) return res.status(404).json({ error: "Workspace not found" });
   req.workspaceId = ws.id;
 
-  const existing = db
+  const existing = await db
     .prepare(
       "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
     )
     .get(ws.id, target.id);
   if (existing) {
-    db.prepare(
+    await db.prepare(
       "UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?",
     ).run(role, ws.id, target.id);
   } else {
-    db.prepare(
+    await db.prepare(
       "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
     ).run(ws.id, target.id, role, req.user.id);
   }
@@ -444,7 +451,7 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, (req, res) => {
     getClientIp(req),
     ws.id,
   );
-  const org = db
+  const org = await db
     .prepare("SELECT name FROM organizations WHERE id = ?")
     .get(ws.organization_id);
   res.status(existing ? 200 : 201).json({
@@ -453,13 +460,13 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, (req, res) => {
     organization_name: org?.name || null,
     role,
   });
-});
+}));
 
 // PUT - change the user's role in a specific workspace.
 router.put(
   "/users/:id/workspaces/:workspaceId",
   requirePlatformAdmin,
-  (req, res) => {
+  asyncHandler(async (req, res) => {
     const role = String(req.body?.role || "").trim();
     if (!WORKSPACE_ROLES.includes(role)) {
       return res.status(400).json({
@@ -467,17 +474,17 @@ router.put(
           "Role must be workspace_admin, workspace_editor, or workspace_viewer",
       });
     }
-    const member = db
+    const member = await db
       .prepare(
         "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
       )
       .get(req.params.workspaceId, req.params.id);
     if (!member) return res.status(404).json({ error: "Membership not found" });
-    db.prepare(
+    await db.prepare(
       "UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?",
     ).run(role, req.params.workspaceId, req.params.id);
     req.workspaceId = req.params.workspaceId;
-    const target = db
+    const target = await db
       .prepare("SELECT email FROM users WHERE id = ?")
       .get(req.params.id);
     logActivity(
@@ -489,7 +496,7 @@ router.put(
       req.params.workspaceId,
     );
     res.json({ workspace_id: req.params.workspaceId, role });
-  },
+  }),
 );
 
 // DELETE - remove the user from a workspace. Allowed even if it's their last one
@@ -497,18 +504,18 @@ router.put(
 router.delete(
   "/users/:id/workspaces/:workspaceId",
   requirePlatformAdmin,
-  (req, res) => {
-    const member = db
+  asyncHandler(async (req, res) => {
+    const member = await db
       .prepare(
         "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
       )
       .get(req.params.workspaceId, req.params.id);
     if (!member) return res.status(404).json({ error: "Membership not found" });
-    db.prepare(
+    await db.prepare(
       "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
     ).run(req.params.workspaceId, req.params.id);
     req.workspaceId = req.params.workspaceId;
-    const target = db
+    const target = await db
       .prepare("SELECT email FROM users WHERE id = ?")
       .get(req.params.id);
     logActivity(
@@ -520,7 +527,7 @@ router.delete(
       req.params.workspaceId,
     );
     res.json({ success: true });
-  },
+  }),
 );
 
 // ===================== Instance-level default branding (#15) =====================
@@ -541,13 +548,13 @@ const BRANDING_FIELDS = [
 
 // GET - the current platform-default branding (falls back to hardcoded so the
 // admin form always has values to show).
-router.get("/branding", requirePlatformAdmin, (req, res) => {
-  res.json(platformDefaultRow(db) || { ...HARDCODED_BRANDING });
-});
+router.get("/branding", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  res.json((await platformDefaultRow(db)) || { ...HARDCODED_BRANDING });
+}));
 
 // PUT - upsert the single platform-default row (workspace_id IS NULL).
-router.put("/branding", requirePlatformAdmin, (req, res) => {
-  const existing = platformDefaultRow(db);
+router.put("/branding", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const existing = await platformDefaultRow(db);
   if (existing) {
     const updates = [];
     const values = [];
@@ -560,16 +567,16 @@ router.put("/branding", requirePlatformAdmin, (req, res) => {
       }
     }
     if (updates.length) {
-      updates.push("updated_at = strftime('%s','now')");
+      updates.push("updated_at = UNIX_TIMESTAMP()");
       values.push(existing.id);
-      db.prepare(
+      await db.prepare(
         `UPDATE white_labels SET ${updates.join(", ")} WHERE id = ?`,
       ).run(...values);
     }
   } else {
     // Fixed id sentinel (not workspace_id IS NULL - see lib/branding.js).
     // user_id is NOT NULL on the legacy table; stamp the acting admin.
-    db.prepare(
+    await db.prepare(
       `
       INSERT INTO white_labels (id, user_id, workspace_id, brand_name, logo_url, favicon_url, primary_color, secondary_color, bg_color, custom_css, hide_branding)
       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -595,8 +602,8 @@ router.put("/branding", requirePlatformAdmin, (req, res) => {
     getClientIp(req),
     null,
   );
-  res.json(platformDefaultRow(db));
-});
+  res.json(await platformDefaultRow(db));
+}));
 
 // ===================== /api/status debug exposure (#146) =====================
 // Platform-admin only. Toggles whether /api/status includes the internal `debug` block
@@ -613,9 +620,9 @@ router.get("/status-debug", requirePlatformAdmin, (req, res) => {
     ),
   });
 });
-router.put("/status-debug", requirePlatformAdmin, (req, res) => {
+router.put("/status-debug", requirePlatformAdmin, asyncHandler(async (req, res) => {
   const enabled = !!req.body.enabled;
-  appSettings.setBool("status_debug_enabled", enabled); // persists + refreshes the cache
+  await appSettings.setBool("status_debug_enabled", enabled); // persists + refreshes the cache
   logActivity(
     req.user.id,
     "admin_set_status_debug",
@@ -625,6 +632,6 @@ router.put("/status-debug", requirePlatformAdmin, (req, res) => {
     null,
   );
   res.json({ enabled });
-});
+}));
 
 module.exports = router;

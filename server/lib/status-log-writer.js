@@ -23,11 +23,6 @@ const pending = new Map();      // deviceId -> latest desired status (net state)
 const lastWritten = new Map();  // deviceId -> last status actually inserted
 let timer = null;
 
-const insertStmt = () => db.prepare('INSERT INTO device_status_log (device_id, status) VALUES (?, ?)');
-// Per-device age prune — the #146 fix for the old hardcoded 7-day window in
-// deviceSocket.js (now a single source of truth: config.statusLogRetentionDays).
-const pruneDeviceStmt = () =>
-  db.prepare("DELETE FROM device_status_log WHERE device_id = ? AND timestamp < strftime('%s','now') - ?");
 
 // Record a transition. Cheap and allocation-light: just remembers the latest state.
 function record(deviceId, status) {
@@ -37,7 +32,7 @@ function record(deviceId, status) {
 
 // Write all buffered transitions whose net state differs from what's on disk.
 // Returns the number of rows actually inserted (for tests/observability).
-function flush() {
+async function flush() {
   if (pending.size === 0) return 0;
   const batch = [];
   for (const [deviceId, status] of pending) {
@@ -47,17 +42,20 @@ function flush() {
   if (batch.length === 0) return 0;
 
   try {
-    const ins = insertStmt();
-    const prune = pruneDeviceStmt();
     const ageSec = Math.round(config.statusLogRetentionDays * 86400);
-    const writeAll = db.transaction((rows) => {
+    // db.transaction()'s callback gets a TRANSACTION-SCOPED handle (tx) - every statement
+    // must be prepared from tx, not the outer db, or it would run on a different pooled
+    // connection and NOT be part of this transaction (see db/database.js's transaction()).
+    const writeAll = db.transaction(async (tx, rows) => {
+      const ins = tx.prepare('INSERT INTO device_status_log (device_id, status) VALUES (?, ?)');
+      const prune = tx.prepare("DELETE FROM device_status_log WHERE device_id = ? AND timestamp < UNIX_TIMESTAMP() - ?");
       for (const [deviceId, status] of rows) {
-        ins.run(deviceId, status);
+        await ins.run(deviceId, status);
         lastWritten.set(deviceId, status);
-        prune.run(deviceId, ageSec);
+        await prune.run(deviceId, ageSec);
       }
     });
-    writeAll(batch);
+    await writeAll(batch);
     // #146 Item E: bound lastWritten so it can't grow unbounded over churned device_ids.
     // It only suppresses a redundant consecutive same-status row, so evicting the oldest
     // entries is safe (worst case: one extra row later). Keep it to the newest ~5k ids.
@@ -75,13 +73,17 @@ function flush() {
 
 function start() {
   if (timer) return timer;
-  timer = setInterval(flush, config.statusLogFlushMs);
+  // flush() is async; setInterval doesn't await its callback, so a rejection would
+  // otherwise become an unhandled rejection (server.js's crash handler treats that as
+  // fatal). flush() already catches its own errors internally, but wrap defensively in
+  // case that ever changes.
+  timer = setInterval(() => { flush().catch((e) => console.error('[status-log-writer] flush failed:', e.message)); }, config.statusLogFlushMs);
   if (timer.unref) timer.unref();  // don't keep the process alive on the flush timer
   return timer;
 }
 
-// Test-only: force a synchronous flush and clear coalescing memory.
-function flushNow() { return flush(); }
+// Test-only: force a flush and clear coalescing memory.
+async function flushNow() { return flush(); }
 function __reset() { pending.clear(); lastWritten.clear(); }
 
 module.exports = { record, flush, flushNow, start, __reset };
