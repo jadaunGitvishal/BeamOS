@@ -29,6 +29,16 @@
 const { db } = require('../db/database');
 const { isPlatformRole, isPlatformStaff } = require('../middleware/auth');
 
+// Org roles that get cross-workspace ("acting as") access to every workspace
+// in their org, not just ones they're directly a member of. Single source of
+// truth for the org_owner/org_admin check that accessContext (below) and
+// routes/dashboard.js's org-wide rollup gate both need, so they can't drift
+// to different role sets independently.
+const ORG_WIDE_ROLES = ['org_owner', 'org_admin'];
+function isOrgWideRole(role) {
+  return ORG_WIDE_ROLES.includes(role);
+}
+
 function membershipOf(userId, workspaceId) {
   return db.prepare(
     'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?'
@@ -186,4 +196,6 @@ module.exports = {
   orgMembershipOf,
   firstAccessibleWorkspace,
   accessibleWorkspaceIds,
+  isOrgWideRole,
+  ORG_WIDE_ROLES,
 };

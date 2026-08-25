@@ -49,3 +49,8 @@ Thumbs.db
 
 # Local-only marketing assets
 video/
+
+# Dashboard build output (frontend/dashboard-src -> here via `npm run
+# build:dashboard` in server/). Build artifact, not source - regenerated at
+# deploy/CI time, same reasoning as node_modules/ above.
+frontend/dashboard/

@@ -7,6 +7,8 @@
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",
     "build": "node build.js",
+    "build:dashboard": "node scripts/link-dashboard-deps.js && vite build --config vite.dashboard.config.js",
+    "dev:dashboard": "node scripts/link-dashboard-deps.js && vite --config vite.dashboard.config.js",
     "test": "node --test"
   },
   "dependencies": {
@@ -22,15 +24,20 @@
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
     "otplib": "^12.0.1",
-    "sharp": "^0.33.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "sharp": "^0.35.3",
     "socket.io": "^4.7.2",
     "stripe": "^20.4.1",
     "unzipper": "^0.12.3",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
     "esbuild": "^0.28.1",
     "js-yaml": "^4.2.0",
-    "socket.io-client": "^4.8.3"
+    "socket.io-client": "^4.8.3",
+    "vite": "^5.4.0"
   }
 }

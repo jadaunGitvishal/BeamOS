@@ -42,6 +42,18 @@ class MediaPlayerManager(
             playerView.player = player
             player.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    // TEMP DEBUG (bug: 2-item fullscreen playlist stuck on item 1): logs every
+                    // state transition with the current position/duration so we can tell
+                    // whether STATE_ENDED is a real completion (position ~= duration) or an
+                    // instant/spurious one (position ~0). Remove once root cause is confirmed.
+                    val stateName = when (playbackState) {
+                        Player.STATE_IDLE -> "IDLE"
+                        Player.STATE_BUFFERING -> "BUFFERING"
+                        Player.STATE_READY -> "READY"
+                        Player.STATE_ENDED -> "ENDED"
+                        else -> "UNKNOWN($playbackState)"
+                    }
+                    com.remotedisplay.player.util.DebugLog.i("MediaPlayerManager", "TEMP_DEBUG onPlaybackStateChanged: $stateName pos=${player.currentPosition}ms dur=${player.duration}ms item=${player.currentMediaItem?.localConfiguration?.uri}")
                     if (playbackState == Player.STATE_ENDED) {
                         onVideoComplete()
                     }

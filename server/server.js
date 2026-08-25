@@ -231,6 +231,17 @@ app.get('/agency', (req, res) => {
   res.sendFile(path.join(config.frontendDir, 'agency.html'));
 });
 
+// BeamOS Dashboard (merged in from the standalone BeamOS-Dashboard app): a
+// read-only reporting SPA (Overview / Devices / Content delivery / Issues)
+// built separately with Vite+React (frontend/dashboard-src -> frontend/dashboard).
+// Uses HashRouter, so all of its client-side routing (#/overview, #/devices,
+// ...) happens after this one page load - no server-side path routing needed,
+// unlike the main app's own hash-routed index.html. Its static JS/CSS assets
+// fall through to the express.static mount below like any other frontend file.
+app.get(["/dashboard", "/dashboard.html"], (req, res) => {
+  res.sendFile(path.join(config.frontendDir, "dashboard", "dashboard.html"));
+});
+
 // Serve frontend static files
 // JS/CSS/HTML: no-cache (always revalidate, uses ETag/304)
 // Images/fonts/icons: long cache for Cloudflare + browser

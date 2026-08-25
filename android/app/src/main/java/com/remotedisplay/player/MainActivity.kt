@@ -22,7 +22,9 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.ui.PlayerView
 import com.remotedisplay.player.data.ContentCache
+import com.remotedisplay.player.data.PlayEventQueue
 import com.remotedisplay.player.data.ServerConfig
+import com.remotedisplay.player.player.IntroScreen
 import com.remotedisplay.player.player.MediaPlayerManager
 import com.remotedisplay.player.player.PlaylistController
 import com.remotedisplay.player.player.PlaylistItem
@@ -40,6 +42,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var config: ServerConfig
     private lateinit var contentCache: ContentCache
+    private lateinit var playEventQueue: PlayEventQueue
     private lateinit var screenshotCapture: ScreenshotCapture
     private lateinit var touchInjector: TouchInjector
 
@@ -54,6 +57,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var playerView: PlayerView
     private lateinit var imageView: ImageView
+    private lateinit var introImageView: ImageView
+    private lateinit var introScreen: IntroScreen // org-branded intro shown before every video play/loop
     private lateinit var statusOverlay: View
     private lateinit var statusText: TextView
     private lateinit var rootView: View
@@ -126,9 +131,17 @@ class MainActivity : AppCompatActivity() {
         contentCache = ContentCache(this)
         screenshotCapture = ScreenshotCapture()
         touchInjector = TouchInjector()
+        // Constructed here (not just in WebSocketService) so a play event that happens before
+        // the service is bound still gets durably queued. Both instances point at the same
+        // underlying SQLite file.
+        playEventQueue = PlayEventQueue(this)
 
         playerView = findViewById(R.id.playerView)
         imageView = findViewById(R.id.imageView)
+        introImageView = findViewById(R.id.introImageView)
+        introScreen = IntroScreen(introImageView).apply {
+            organizationName = config.organizationName.ifEmpty { null }
+        }
         statusOverlay = findViewById(R.id.statusOverlay)
         statusText = findViewById(R.id.statusText)
         rootView = findViewById(R.id.rootLayout)
@@ -169,9 +182,28 @@ class MainActivity : AppCompatActivity() {
         playlistController = PlaylistController(
             onItemChanged = { item -> item?.let { playItem(it) } },
             // #74/#75: clear the last frame when going idle (else a now-filtered item lingers on screen)
-            onPlaylistEmpty = { if (::mediaPlayer.isInitialized) mediaPlayer.stop(); showStatus(getString(R.string.waiting_for_content)) },
+            onPlaylistEmpty = { introScreen.cancel(); if (::mediaPlayer.isInitialized) mediaPlayer.stop(); showStatus(getString(R.string.waiting_for_content)) },
             onRequestRefresh = { wsService?.requestPlaylistRefresh() },
-            onNothingScheduled = { if (::mediaPlayer.isInitialized) mediaPlayer.stop(); showStatus(getString(R.string.nothing_scheduled)) }
+            onNothingScheduled = { introScreen.cancel(); if (::mediaPlayer.isInitialized) mediaPlayer.stop(); showStatus(getString(R.string.nothing_scheduled)) },
+            // Offline-resilient proof-of-play: always persist locally first (works even before
+            // wsService is bound), then opportunistically try to drain the queue. The service's
+            // own reconnect/periodic flush (WebSocketService.flushPendingPlayEvents) is what
+            // guarantees delivery if this particular attempt can't go out right now.
+            onPlayStart = { item, sessionId, startedAtMs ->
+                playEventQueue.enqueuePlayStart(sessionId, item.contentId.ifEmpty { null }, item.filename, item.durationSec, startedAtMs)
+                wsService?.flushPendingPlayEvents()
+            },
+            onPlayEnd = { item, sessionId, startedAtMs, endedAtMs ->
+                playEventQueue.enqueuePlayEnd(sessionId, item.contentId.ifEmpty { null }, item.filename, startedAtMs, endedAtMs)
+                wsService?.flushPendingPlayEvents()
+            },
+            // Consecutive playback errors exhausted the retry cap and there's nothing
+            // else schedule-active to fall back to.
+            onContentUnavailable = { item ->
+                Log.w("MainActivity", "Content unavailable after repeated playback errors: ${item.filename}")
+                if (::mediaPlayer.isInitialized) mediaPlayer.stop()
+                showStatus(getString(R.string.content_unavailable))
+            }
         )
 
         // Setup media player
@@ -258,6 +290,7 @@ class MainActivity : AppCompatActivity() {
     // the same rootView). Values mirror the dashboard: landscape / portrait /
     // landscape-flipped / portrait-flipped.
     private fun applyOrientation(orientation: String) {
+        com.remotedisplay.player.util.DebugLog.i("Player", "TEMP_DEBUG applyOrientation(): received orientation=$orientation (current=$currentOrientation)")
         if (orientation == currentOrientation) return
         currentOrientation = orientation
         val m = resources.displayMetrics
@@ -370,6 +403,12 @@ class MainActivity : AppCompatActivity() {
     private fun setupServiceCallbacks() {
         wsService?.onPlaylistUpdate = { data ->
             try {
+            // Organization name for the video intro screen - present regardless of
+            // suspended state. Persisted so an offline restart still has it.
+            val orgName = if (data.isNull("organization_name")) null else data.optString("organization_name", "").ifEmpty { null }
+            if (orgName != null && orgName != config.organizationName) config.organizationName = orgName
+            if (::introScreen.isInitialized) introScreen.organizationName = orgName ?: config.organizationName.ifEmpty { null }
+
             // Orientation is applied in the non-wall branch below; wall mode owns the
             // root-view transform itself and must not be rotated.
             // Check if device is suspended (trial expired / over limit)
@@ -377,6 +416,7 @@ class MainActivity : AppCompatActivity() {
                 val message = data.optString("message", "Account Suspended")
                 val detail = data.optString("detail", "Please upgrade your plan.")
                 handler.post {
+                    introScreen.cancel()
                     showStatus("$message\n$detail")
                     if (::mediaPlayer.isInitialized) mediaPlayer.stop()
                 }
@@ -663,7 +703,7 @@ class MainActivity : AppCompatActivity() {
         // YouTube content - play in WebView
         if (item.mimeType == "video/youtube" && !item.remoteUrl.isNullOrEmpty()) {
             Log.i("MainActivity", "Playing YouTube: ${item.remoteUrl}")
-            mediaPlayer.playYoutube(item.remoteUrl!!, item.durationSec, item.muted)
+            introScreen.show { mediaPlayer.playYoutube(item.remoteUrl!!, item.durationSec, item.muted) }
             wsService?.sendPlaybackState(item.contentId, 0f)
             return
         }
@@ -672,11 +712,23 @@ class MainActivity : AppCompatActivity() {
         if (item.isRemote) {
             Log.i("MainActivity", "Playing remote content: ${item.remoteUrl}")
             if (item.mimeType.startsWith("video/")) {
-                mediaPlayer.playVideoFromUrl(item.remoteUrl!!, item.muted)
+                introScreen.show { mediaPlayer.playVideoFromUrl(item.remoteUrl!!, item.muted) }
             } else if (item.mimeType.startsWith("image/")) {
                 mediaPlayer.showImageFromUrl(item.remoteUrl!!)
             }
             wsService?.sendPlaybackState(item.contentId, 0f)
+            return
+        }
+
+        // Local content requires a real content_id to look up or download - a null/
+        // empty one from the server (e.g. a bad content record) would otherwise 404
+        // against /api/content//file, or silently resolve to whatever unrelated file
+        // ContentCache happens to have cached for a different item. Fail loudly and
+        // skip instead of misplaying or retry-looping on a doomed request.
+        if (item.contentId.isEmpty()) {
+            Log.e("MainActivity", "Skipping ${item.filename}: empty content_id from server")
+            showStatus("Content error: ${item.filename}")
+            handler.postDelayed({ playlistController.next() }, 3000)
             return
         }
 
@@ -704,7 +756,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun playFile(item: PlaylistItem, file: java.io.File) {
         if (item.mimeType.startsWith("video/")) {
-            mediaPlayer.playVideo(file, item.muted)
+            introScreen.show { if (::mediaPlayer.isInitialized) mediaPlayer.playVideo(file, item.muted) }
         } else if (item.mimeType.startsWith("image/")) {
             mediaPlayer.showImage(file)
         }

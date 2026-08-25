@@ -1,20 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../db/database');
-
-// Phase 2.2g: scope reports to the caller's current workspace.
-// No platform_admin bypass - cross-workspace reporting comes from
-// switch-workspace, not a magic role-based "see all" path. This matches
-// the precedent set in devices.js.
-function getWorkspaceDeviceFilter(req) {
-  if (!req.workspaceId) return { sql: ' AND 1=0', params: [] }; // no workspace -> empty result
-  return { sql: ' AND d.workspace_id = ?', params: [req.workspaceId] };
-}
-
-function getWorkspaceDeviceSubquery(req) {
-  if (!req.workspaceId) return { sql: ' AND device_id IN (SELECT id FROM devices WHERE 1=0)', params: [] };
-  return { sql: ' AND device_id IN (SELECT id FROM devices WHERE workspace_id = ?)', params: [req.workspaceId] };
-}
+const {
+  getWorkspaceDeviceFilter,
+  getWorkspaceDeviceSubquery,
+} = require('../lib/workspace-scope');
 
 // Query play logs
 router.get('/plays', (req, res) => {

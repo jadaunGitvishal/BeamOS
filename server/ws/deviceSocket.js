@@ -103,7 +103,7 @@ function logDeviceStatus(deviceId, status) {
 // Build playlist payload with layout and zones
 // Reads from published_snapshot (Phase 3) so draft edits don't affect live devices
 function buildPlaylistPayload(deviceId) {
-  const device = db.prepare('SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
+  const device = db.prepare('SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone, workspace_id FROM devices WHERE id = ?').get(deviceId);
 
   let assignments = [];
   if (device?.playlist_id) {
@@ -187,9 +187,21 @@ function buildPlaylistPayload(deviceId) {
   // last OS-reported zone; otherwise null = the player trusts its own OS clock.
   const tzOverride = (device?.timezone && device.timezone !== 'UTC') ? device.timezone : null;
   const timezone = tzOverride || device?.reported_timezone || null;
+
+  // Organization name for the per-org video intro screen (Android player). Resolved
+  // via the device's workspace, not req.workspace (there's no request here) - a device
+  // socket only has its own row to key off.
+  let organizationName = null;
+  if (device?.workspace_id) {
+    const org = db.prepare(`
+      SELECT o.name FROM workspaces w JOIN organizations o ON o.id = w.organization_id WHERE w.id = ?
+    `).get(device.workspace_id);
+    organizationName = org?.name || null;
+  }
+
   // #104: shared shape + zone-reset tail so the device payload and the dashboard
   // preview payload (GET /api/playlists/:id/preview-payload) can never drift.
-  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', wall_config, timezone });
+  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', wall_config, timezone, organization_name: organizationName });
 }
 
 // #104: the canonical player payload shape, shared by the device path
@@ -197,7 +209,7 @@ function buildPlaylistPayload(deviceId) {
 // Zone reset: if this isn't a real multi-zone layout (single zone or no layout),
 // strip any leftover zone_id so content falls back to the fullscreen renderer
 // instead of binding to a now-gone left/right zone and never playing.
-function assemblePayload({ assignments, layout, orientation, wall_config, timezone }) {
+function assemblePayload({ assignments, layout, orientation, wall_config, timezone, organization_name }) {
   let a = Array.isArray(assignments) ? assignments : [];
   const zoneCount = layout?.zones?.length || 0;
   if (zoneCount < 2) a = a.map(x => (x && x.zone_id != null ? { ...x, zone_id: null } : x));
@@ -207,6 +219,7 @@ function assemblePayload({ assignments, layout, orientation, wall_config, timezo
     orientation: orientation || 'landscape',
     wall_config: wall_config || null,
     timezone: timezone || null,
+    organization_name: organization_name || null,
   };
 }
 
@@ -290,7 +303,7 @@ module.exports = function setupDeviceSocket(io) {
 
     // Device registers with a pairing code (first time) or device_id + device_token (reconnect)
     socket.on('device:register', (data) => {
-      const { pairing_code, device_id, device_token, device_info, fingerprint } = data;
+      const { pairing_code, device_id, device_token, device_info, fingerprint, refresh_gen } = data;
 
       // #146: resolve identity ONCE via the SNAT-safe chain (device_id -> fingerprint
       // -> token -> global anon), used by BOTH the operator block and the flap limiter.
@@ -575,9 +588,15 @@ module.exports = function setupDeviceSocket(io) {
           // Check subscription/trial status before sending playlist
           const access = checkDeviceAccess(device_id);
           if (!access.allowed) {
-            socket.emit('device:playlist-update', { assignments: [], suspended: true, message: access.message, detail: access.detail });
+            const suspendedPayload = { assignments: [], suspended: true, message: access.message, detail: access.detail };
+            // Echo back the requesting refresh's generation (client-side race guard) - only
+            // set on a requestPlaylistRefresh() call, absent on a plain register/reconnect.
+            if (refresh_gen !== undefined) suspendedPayload.refresh_gen = refresh_gen;
+            socket.emit('device:playlist-update', suspendedPayload);
           } else {
-            socket.emit('device:playlist-update', buildPlaylistPayload(device_id));
+            const payload = buildPlaylistPayload(device_id);
+            if (refresh_gen !== undefined) payload.refresh_gen = refresh_gen;
+            socket.emit('device:playlist-update', payload);
           }
 
           emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:device-status', { device_id, status: 'online' });

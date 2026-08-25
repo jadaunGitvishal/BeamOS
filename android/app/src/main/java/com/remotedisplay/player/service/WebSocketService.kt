@@ -12,8 +12,11 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.remotedisplay.player.MainActivity
 import com.remotedisplay.player.RemoteDisplayApp
+import com.remotedisplay.player.data.PlayEventQueue
+import com.remotedisplay.player.data.PlayEventRecord
 import com.remotedisplay.player.data.ServerConfig
 import com.remotedisplay.player.telemetry.DeviceInfo
+import io.socket.client.Ack
 import io.socket.client.IO
 import io.socket.client.Socket
 import org.json.JSONObject
@@ -31,20 +34,40 @@ class WebSocketService : Service() {
     private var reopenRunnable: Runnable? = null
     private lateinit var config: ServerConfig
     private lateinit var deviceInfo: DeviceInfo
+    // Same underlying SQLite file as MainActivity's instance (data/PlayEventQueue.kt) - this
+    // one is only ever used to flush (read + delete), MainActivity's is what enqueues.
+    private lateinit var playEventQueue: PlayEventQueue
     private val handler = Handler(Looper.getMainLooper())
     private var heartbeatRunnable: Runnable? = null
     private val binder = LocalBinder()
+
+    // Playlist-refresh race guard: requestPlaylistRefresh() is called both on every
+    // playlist advance (PlaylistController.next()) and every 4th heartbeat (~60s) - close
+    // together those become two overlapping device:register calls. The server has no
+    // per-device serialization on that handler, so their device:playlist-update responses
+    // can arrive out of send order. refreshGeneration tags each refresh request;
+    // lastAppliedGeneration + refreshInFlight let us drop stale responses and collapse
+    // overlapping requests into one, instead of PlaylistController blindly applying
+    // whatever update lands last.
+    private val refreshGeneration = java.util.concurrent.atomic.AtomicLong(0)
+    @Volatile private var lastAppliedGeneration = 0L
+    @Volatile private var refreshInFlight = false
+    private var refreshTimeoutRunnable: Runnable? = null
 
     companion object {
         // #148: backoff before re-opening the single socket after a disconnect that Socket.IO
         // does NOT auto-reconnect (io server/client disconnect) — never a blind immediate re-open.
         private const val RECONNECT_AFTER_EVICT_MS = 3000L
+        // Safety net for refreshInFlight: if the server never answers (dropped connection,
+        // server hang) don't wedge every future refresh forever.
+        private const val REFRESH_TIMEOUT_MS = 10_000L
     }
 
     // Callbacks
     var onPaired: ((String, String) -> Unit)? = null
     var onUnpaired: (() -> Unit)? = null
     var onRegistered: ((String) -> Unit)? = null
+    var onConnectionFailed: ((String) -> Unit)? = null
     var onPlaylistUpdate: ((JSONObject) -> Unit)? = null
     var onContentDelete: ((String) -> Unit)? = null
     var onScreenshotRequest: (() -> Unit)? = null
@@ -71,6 +94,7 @@ class WebSocketService : Service() {
         super.onCreate()
         config = ServerConfig(this)
         deviceInfo = DeviceInfo(this)
+        playEventQueue = PlayEventQueue(this)
         // #5: claim ONLY the mediaPlayback FGS type. The 2-arg startForeground
         // claims every manifest-declared type, and on Android 14+ claiming
         // mediaProjection without a consent token throws and kills the service at
@@ -161,6 +185,9 @@ class WebSocketService : Service() {
                     Log.w("WebSocketService", "Disconnected from server: $reason")
                     // Stop heartbeat while disconnected; player keeps showing cached content.
                     stopHeartbeat()
+                    // A refresh in flight when the socket drops will never get its response —
+                    // don't leave requestPlaylistRefresh() wedged until the watchdog fires.
+                    clearRefreshInFlight()
                     // #148 reconnect discipline: Socket.IO auto-reconnects the SAME socket on a
                     // transport drop (reconnection=true) — leave socketActive true so connect()
                     // keeps reusing it. But on a server- or client-initiated disconnect it does
@@ -173,7 +200,9 @@ class WebSocketService : Service() {
                 }
 
                 safeOn(Socket.EVENT_CONNECT_ERROR) { args ->
-                    Log.e("WebSocketService", "Connection error: ${args.firstOrNull()}")
+                    val msg = args.firstOrNull()?.toString() ?: "Unknown connection error"
+                    Log.e("WebSocketService", "Connection error: $msg")
+                    handler.post { try { onConnectionFailed?.invoke(msg) } catch (e: Throwable) { Log.e("WebSocketService", "onConnectionFailed cb: ${e.message}") } }
                 }
 
                 safeOn("device:registered") { args ->
@@ -191,6 +220,8 @@ class WebSocketService : Service() {
                     Log.i("WebSocketService", "Registered as: $newDeviceId")
                     handler.post { try { onRegistered?.invoke(newDeviceId) } catch (e: Throwable) { Log.e("WebSocketService", "onRegistered cb: ${e.message}") } }
                     startHeartbeat()
+                    // Reconnect: drain any proof-of-play events queued while we were offline.
+                    flushPendingPlayEvents()
                 }
 
                 safeOn("device:unpaired") {
@@ -221,6 +252,28 @@ class WebSocketService : Service() {
                         Log.w("WebSocketService", "playlist-update with non-JSONObject payload: ${args.firstOrNull()}")
                         return@safeOn
                     }
+                    // Any playlist-update, stale or not, means the request that's currently
+                    // marked in-flight has been resolved (or superseded) - unblock the next
+                    // requestPlaylistRefresh() regardless of what happens below.
+                    clearRefreshInFlight()
+
+                    // #<race fix>: only a direct response to our own requestPlaylistRefresh()
+                    // carries refresh_gen (unsolicited pushes - wall reassignment, queued-command
+                    // flush - never set it and always apply). The server has no per-device
+                    // serialization on device:register, so two overlapping refreshes can have
+                    // their responses arrive out of send order; drop anything older than the
+                    // newest one we've already applied instead of regressing playback state.
+                    if (data.has("refresh_gen")) {
+                        val gen = data.optLong("refresh_gen", -1)
+                        if (gen >= 0) {
+                            if (gen < lastAppliedGeneration) {
+                                Log.w("WebSocketService", "Dropping stale playlist-update (gen=$gen < lastApplied=$lastAppliedGeneration)")
+                                return@safeOn
+                            }
+                            lastAppliedGeneration = gen
+                        }
+                    }
+
                     Log.i("WebSocketService", "Playlist update received, assignments=${data.optJSONArray("assignments")?.length() ?: "null"}")
                     handler.post { try { onPlaylistUpdate?.invoke(data) } catch (e: Throwable) { Log.e("WebSocketService", "onPlaylistUpdate cb: ${e.message}") } }
                 }
@@ -367,6 +420,8 @@ class WebSocketService : Service() {
             }
         } catch (e: Throwable) {
             Log.e("WebSocketService", "Socket setup error: ${e.message}", e)
+            val msg = e.message ?: "Socket setup failed"
+            handler.post { try { onConnectionFailed?.invoke(msg) } catch (t: Throwable) { Log.e("WebSocketService", "onConnectionFailed cb: ${t.message}") } }
         }
     }
 
@@ -409,9 +464,12 @@ class WebSocketService : Service() {
             override fun run() {
                 sendHeartbeat()
                 heartbeatCount++
-                // Every 4th heartbeat (60s), request a fresh playlist
+                // Every 4th heartbeat (60s): request a fresh playlist, and re-check for any
+                // proof-of-play events still unacked (covers an ack that got lost while the
+                // socket otherwise looked fine, so device:registered's flush never re-fires).
                 if (heartbeatCount % 4 == 0) {
                     requestPlaylistRefresh()
+                    flushPendingPlayEvents()
                 }
                 handler.postDelayed(this, 15000) // Every 15 seconds
             }
@@ -421,18 +479,42 @@ class WebSocketService : Service() {
 
     fun requestPlaylistRefresh() {
         if (socket?.connected() != true || config.deviceId.isEmpty()) return
-        Log.i("WebSocketService", "Requesting playlist refresh")
+        // De-dupe: next()-driven and heartbeat-driven refreshes can land close together.
+        // At most one refresh in flight at a time - the second trigger just skips, since
+        // the in-flight one will pick up whatever's current by the time it resolves.
+        if (refreshInFlight) {
+            Log.i("WebSocketService", "Playlist refresh already in flight, skipping duplicate request")
+            return
+        }
+        refreshInFlight = true
+        refreshTimeoutRunnable = Runnable {
+            Log.w("WebSocketService", "Playlist refresh timed out waiting for a response, clearing in-flight flag")
+            refreshInFlight = false
+            refreshTimeoutRunnable = null
+        }
+        handler.postDelayed(refreshTimeoutRunnable!!, REFRESH_TIMEOUT_MS)
+
+        val gen = refreshGeneration.incrementAndGet()
+        Log.i("WebSocketService", "Requesting playlist refresh (gen=$gen)")
         try {
             val data = org.json.JSONObject().apply {
                 put("device_id", config.deviceId)
                 val token = config.deviceToken
                 if (token.isNotEmpty()) put("device_token", token)
                 try { put("device_info", deviceInfo.getDeviceInfo()) } catch (e: Throwable) { Log.w("WebSocketService", "device_info: ${e.message}") }
+                put("refresh_gen", gen)
             }
             socket?.emit("device:register", data)
         } catch (e: Throwable) {
             Log.e("WebSocketService", "requestPlaylistRefresh failed: ${e.message}")
+            clearRefreshInFlight()
         }
+    }
+
+    private fun clearRefreshInFlight() {
+        refreshInFlight = false
+        refreshTimeoutRunnable?.let { handler.removeCallbacks(it) }
+        refreshTimeoutRunnable = null
     }
 
     private fun stopHeartbeat() {
@@ -616,6 +698,42 @@ class WebSocketService : Service() {
                 put("ota_attempts", config.otaAttempts)
             })
         } catch (e: Throwable) { Log.w("WebSocketService", "sendOtaStatus: ${e.message}") }
+    }
+
+    // Proof-of-play (offline-resilient). MainActivity writes every play_start/play_end to
+    // PlayEventQueue BEFORE calling this — this only ever tries to drain what's already
+    // durably queued, and never deletes a row itself except via the ack in sendOne(). Only the
+    // video-wall leader (or non-walled players) ever enqueue in the first place — that gate
+    // lives in PlaylistController, not here.
+    fun flushPendingPlayEvents() {
+        if (socket?.connected() != true) return
+        try {
+            playEventQueue.getPending().forEach { sendOne(it) }
+        } catch (e: Throwable) { Log.w("WebSocketService", "flushPendingPlayEvents: ${e.message}") }
+    }
+
+    private fun sendOne(rec: PlayEventRecord) {
+        if (socket?.connected() != true) return
+        try {
+            val data = JSONObject().apply {
+                put("device_id", config.deviceId)
+                put("event", rec.eventType)
+                put("session_id", rec.sessionId)
+                put("content_id", rec.contentId ?: JSONObject.NULL)
+                put("content_name", rec.contentName)
+                put("started_at", rec.startedAtMs)
+                if (rec.eventType == "play_start") {
+                    put("duration_sec", rec.durationSec ?: JSONObject.NULL)
+                } else {
+                    put("ended_at", rec.endedAtMs ?: rec.startedAtMs)
+                    put("completed", rec.completed ?: true)
+                }
+            }
+            socket?.emit("device:play-event", data, Ack { args ->
+                val ok = (args.firstOrNull() as? JSONObject)?.optBoolean("ok", false) ?: false
+                if (ok) playEventQueue.markAcked(rec.sessionId, rec.eventType)
+            })
+        } catch (e: Throwable) { Log.w("WebSocketService", "sendOne(${rec.eventType}): ${e.message}") }
     }
 
     fun sendPlaybackState(contentId: String, positionSec: Float) {

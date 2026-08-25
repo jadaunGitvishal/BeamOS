@@ -47,6 +47,21 @@ const JWT_ONLY_ROUTERS = [
   { path: '/api/workspaces',  mod: './routes/workspaces' },
   { path: '/api/admin',       mod: './routes/admin' },
   { path: '/api/tokens',      mod: './routes/tokens',       tenancy: true },
+  // Merged in from the standalone BeamOS-Dashboard app (read-only reporting:
+  // Overview / Devices / Content delivery / Issues). Mounted under its own
+  // /api/dashboard/* prefix rather than reusing /api/devices or /api/reports
+  // - those paths are already live above with different response shapes, so
+  // sharing them would shadow the existing routers instead of merging with
+  // them. Any workspace member (workspace_viewer and up) can read these -
+  // resolveTenancy alone gates that, same as every other tenancy:true router
+  // here; there's no additional role check because none of these routes
+  // expose anything a viewer couldn't already piece together from the
+  // devices/content/activity surfaces they already have read access to.
+  { path: '/api/dashboard/overview', mod: './routes/dashboard-overview', tenancy: true },
+  { path: '/api/dashboard/content',  mod: './routes/dashboard-content',  tenancy: true },
+  { path: '/api/dashboard/issues',   mod: './routes/dashboard-issues',   tenancy: true },
+  { path: '/api/dashboard/devices',  mod: './routes/dashboard-devices',  tenancy: true },
+  { path: '/api/dashboard/reports',  mod: './routes/dashboard-reports',  tenancy: true },
 ];
 
 // #73: AGENCY_ROUTERS - capability-restricted ('agency' scope) surface. Mounted with

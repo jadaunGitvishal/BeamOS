@@ -17,6 +17,11 @@ class ContentCache(private val context: Context) {
         .build()
 
     fun getCachedFile(contentId: String): File? {
+        // An empty contentId would make startsWith("") match every file in the cache
+        // dir, silently handing back an unrelated (but real) cached file instead of
+        // failing the lookup - e.g. two different playlist items would appear to play
+        // the same content. Refuse the lookup outright instead.
+        if (contentId.isEmpty()) return null
         val files = cacheDir.listFiles { _, name -> name.startsWith(contentId) }
         return files?.firstOrNull()?.takeIf { it.exists() && it.length() > 0 }
     }

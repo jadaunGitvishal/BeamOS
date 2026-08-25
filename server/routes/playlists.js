@@ -408,6 +408,13 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
     let { duration_sec } = req.body;
 
     if (!content_id && !widget_id) return res.status(400).json({ error: 'content_id or widget_id required' });
+    // Exactly one of content_id/widget_id must end up set - a row with both would
+    // resolve a real filename via COALESCE(c.filename, w.name) (content wins) while
+    // ALSO carrying a widget_id, and the Android player treats any non-empty
+    // widget_id as "this is a widget" (isWidget check) BEFORE it ever looks at
+    // content_id - so it'd render the wrong widget URL and never touch the actual
+    // video. Mirrors the same check already enforced on PUT .../items/:itemId.
+    if (content_id && widget_id) return res.status(400).json({ error: 'provide only one of content_id / widget_id' });
     if (duration_sec !== undefined && duration_sec !== null && (typeof duration_sec !== 'number' || duration_sec < 1)) {
       return res.status(400).json({ error: 'duration_sec must be a positive integer' });
     }

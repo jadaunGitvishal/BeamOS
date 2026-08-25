@@ -3,8 +3,10 @@ package com.remotedisplay.player.player
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.remotedisplay.player.util.DebugLog
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 data class PlaylistItem(
     val assignmentId: Int,
@@ -31,8 +33,25 @@ class PlaylistController(
     private val onItemChanged: (PlaylistItem?) -> Unit,
     private val onPlaylistEmpty: () -> Unit,
     private val onRequestRefresh: (() -> Unit)? = null,
-    private val onNothingScheduled: (() -> Unit)? = null
+    private val onNothingScheduled: (() -> Unit)? = null,
+    // Proof-of-play. Only fired when !wallFollower (video wall leader or non-walled), mirroring
+    // the web player's playCurrentItem()/nextItem() emit gates in server/player/index.html —
+    // followers would otherwise spam duplicate play_logs rows for the same item. sessionId ties
+    // a play_start/play_end pair together (the offline-queue idempotency key server-side); the
+    // ms timestamps let the server report the play's actual time even if this is sent much later
+    // from an offline queue instead of "now".
+    private val onPlayStart: ((PlaylistItem, sessionId: String, startedAtMs: Long) -> Unit)? = null,
+    private val onPlayEnd: ((PlaylistItem, sessionId: String, startedAtMs: Long, endedAtMs: Long) -> Unit)? = null,
+    // Fired when an item has failed to play MAX_CONSECUTIVE_FAILURES times in a row and
+    // there is nothing else schedule-active to skip to. Falls back to onNothingScheduled/
+    // onPlaylistEmpty if not supplied.
+    private val onContentUnavailable: ((PlaylistItem) -> Unit)? = null
 ) {
+    companion object {
+        private const val MAX_CONSECUTIVE_FAILURES = 3
+        private const val RETRY_DELAY_MS = 2000L
+    }
+
     private val items = mutableListOf<PlaylistItem>()
     private var currentIndex = -1
     private val handler = Handler(Looper.getMainLooper())
@@ -41,11 +60,16 @@ class PlaylistController(
     // #74/#75: per-item scheduling state
     @Volatile private var effectiveTimezone: String? = null
     private var retryRunnable: Runnable? = null
+    // Crash-loop guard: consecutive playback errors on the current item, keyed by
+    // assignmentId. Reset when the item completes successfully (STATE_ENDED).
+    private val consecutiveFailures = mutableMapOf<Int, Int>()
 
     // Video wall: followers don't self-advance — the leader's wall:sync drives the index.
     private var wallFollower = false
     // Wall-clock at which the current item started playing, for non-video sync position.
     private var itemStartedAt = 0L
+    // Proof-of-play: id shared by the play_start/play_end pair for the current item.
+    private var currentSessionId: String? = null
 
     val isPlaying: Boolean get() = isRunning && currentIndex >= 0
 
@@ -127,8 +151,16 @@ class PlaylistController(
 
         Log.i("PlaylistController", "Playlist changed: ${items.size} -> ${newItems.size} items")
 
-        // Remember what's currently playing
-        val currentlyPlayingId = currentItem?.contentId
+        // Remember what's currently playing. assignmentId (the playlist_items row id) is
+        // kept alongside contentId as a fallback key - a mid-cycle refresh (next() requests
+        // one on every advance) can race the item that was JUST switched to, and if that
+        // item's content_id is ever unstable/mismatched between two reads of the same
+        // playlist, matching by contentId alone wrongly looks like "item was removed" and
+        // force-replays item 0 (bug: FloFoam never reaching ExoPlayer, always reverting to
+        // Bata - see updatePlaylist below).
+        val currentlyPlayingItem = currentItem
+        val currentlyPlayingId = currentlyPlayingItem?.contentId
+        val currentlyPlayingAssignmentId = currentlyPlayingItem?.assignmentId
 
         items.clear()
         items.addAll(newItems)
@@ -139,8 +171,27 @@ class PlaylistController(
             onPlaylistEmpty()
         } else if (isRunning) {
             // Try to keep playing the current item if it's still in the list
-            if (currentlyPlayingId != null) {
-                val newIndex = items.indexOfFirst { it.contentId == currentlyPlayingId }
+            if (currentlyPlayingItem != null) {
+                // TEMP_DEBUG (FloFoam-never-loads bug): dump the raw comparison so we can
+                // confirm whether a failed match below is due to a missing/empty/mismatched
+                // content_id from the server, vs. a genuine removal. Remove once confirmed.
+                DebugLog.i("PlaylistController", "TEMP_DEBUG matching currentlyPlaying: contentId='$currentlyPlayingId' " +
+                    "assignmentId=$currentlyPlayingAssignmentId filename=${currentlyPlayingItem.filename} against newItems=[" +
+                    newItems.joinToString { "{assignmentId=${it.assignmentId}, contentId='${it.contentId}', filename=${it.filename}}" } + "]")
+
+                var newIndex = if (!currentlyPlayingId.isNullOrEmpty())
+                    items.indexOfFirst { it.contentId == currentlyPlayingId } else -1
+
+                // content_id didn't match (or was empty) - fall back to the stable DB row id.
+                // A failed content_id lookup alone doesn't mean the assignment is gone.
+                if (newIndex < 0) {
+                    newIndex = items.indexOfFirst { it.assignmentId == currentlyPlayingAssignmentId }
+                    if (newIndex >= 0) {
+                        DebugLog.w("PlaylistController", "content_id match failed for ${currentlyPlayingItem.filename} " +
+                            "(had contentId='$currentlyPlayingId'), recovered via assignmentId=$currentlyPlayingAssignmentId at index $newIndex")
+                    }
+                }
+
                 if (newIndex >= 0) {
                     // Current item still exists - don't interrupt, just update index
                     currentIndex = newIndex
@@ -148,8 +199,9 @@ class PlaylistController(
                     return
                 }
             }
-            // Current item was removed or nothing was playing - start from the first
-            // schedule-active item; idle if none are active right now.
+            // Current item matched neither content_id nor assignmentId - it was genuinely
+            // removed (or nothing was playing). Start from the first schedule-active item;
+            // idle if none are active right now.
             val idx = firstActiveIndex()
             if (idx >= 0) { currentIndex = idx; playCurrentItem() } else showNothingScheduled()
         } else {
@@ -178,6 +230,11 @@ class PlaylistController(
         val idx = firstActiveIndex()
         if (idx < 0) { showNothingScheduled(); return }
         currentIndex = idx
+        // TEMP_DEBUG (FloFoam-never-loads bug): start() is a second, unmatched entry
+        // point into playCurrentItem() - it always jumps to firstActiveIndex() with no
+        // "is this the same item already playing" check. Confirm whether it's firing
+        // mid-cycle (racing next()'s advance) vs. only on genuine cold starts.
+        DebugLog.i("PlaylistController", "TEMP_DEBUG start(): firstActiveIndex()=$idx -> ${items[idx].filename} (assignmentId=${items[idx].assignmentId})")
         playCurrentItem()
     }
 
@@ -189,10 +246,16 @@ class PlaylistController(
         }
         if (isRunning && currentIndex >= 0 && currentIndex < items.size) {
             // Already playing something valid - don't restart
-            Log.i("PlaylistController", "Already playing ${items[currentIndex].filename}, not restarting")
+            // TEMP_DEBUG (FloFoam-never-loads bug): was Log.i (invisible in remote debug
+            // capture) - promoted to confirm this guard is actually holding on every
+            // playlist-update delivery, not just most of them.
+            DebugLog.i("PlaylistController", "TEMP_DEBUG startIfNeeded(): guard held, already playing ${items[currentIndex].filename} at index $currentIndex, not restarting")
             return
         }
-        Log.i("PlaylistController", "Starting playback")
+        // TEMP_DEBUG (FloFoam-never-loads bug): guard did NOT hold - about to call
+        // start(), which reverts to firstActiveIndex(). isRunning/currentIndex logged
+        // here so we can see exactly which condition failed.
+        DebugLog.i("PlaylistController", "TEMP_DEBUG startIfNeeded(): guard bypassed (isRunning=$isRunning, currentIndex=$currentIndex, items.size=${items.size}) -> calling start()")
         start()
     }
 
@@ -204,6 +267,13 @@ class PlaylistController(
 
     fun next() {
         if (items.isEmpty()) return
+        // Proof-of-play: report the item being left, before the index advances. Must read
+        // currentSessionId/itemStartedAt before playCurrentItem() below overwrites them.
+        if (!wallFollower) {
+            val sessionId = currentSessionId
+            val startedAt = itemStartedAt
+            currentItem?.let { onPlayEnd?.invoke(it, sessionId ?: UUID.randomUUID().toString(), startedAt, System.currentTimeMillis()) }
+        }
         // Request a playlist refresh between plays so new content gets picked up
         onRequestRefresh?.invoke()
         // #74/#75: advance to the next item the schedule allows now; idle if none.
@@ -217,7 +287,58 @@ class PlaylistController(
         // Called when a video finishes naturally. Wall followers don't self-advance —
         // they hold (and loop) the leader's item until a wall:sync changes the index.
         if (wallFollower) return
+        currentItem?.let { consecutiveFailures.remove(it.assignmentId) }
         next()
+    }
+
+    /**
+     * Called when ExoPlayer reports a decode/playback error for the current item
+     * (MediaPlayerManager's onPlayerError). Previously this went straight through
+     * onVideoComplete() -> next() -> playCurrentItem() with zero delay, so an
+     * undecodable file would fail and restart in a tight loop (~1s per attempt, since
+     * that's how long ExoPlayer takes to fail again), spamming play_logs with hundreds
+     * of ~1s "completed" entries. Now: retry the same item after a fixed delay
+     * (mirrors ZoneManager's single-item retry), and after MAX_CONSECUTIVE_FAILURES
+     * give up on it - skip to the next schedule-active item, or show a
+     * content-unavailable state if this is the only playable item.
+     */
+    fun onPlaybackError() {
+        if (wallFollower) return
+        val item = currentItem ?: return
+
+        val failures = (consecutiveFailures[item.assignmentId] ?: 0) + 1
+        consecutiveFailures[item.assignmentId] = failures
+
+        // Report the failed attempt's play_end before deciding what happens next -
+        // mirrors next()'s pre-advance bookkeeping.
+        if (!wallFollower) {
+            val sessionId = currentSessionId
+            val startedAt = itemStartedAt
+            onPlayEnd?.invoke(item, sessionId ?: UUID.randomUUID().toString(), startedAt, System.currentTimeMillis())
+        }
+
+        cancelAdvance()
+        cancelRetry()
+
+        if (failures < MAX_CONSECUTIVE_FAILURES) {
+            Log.w("PlaylistController", "Playback error on ${item.filename} ($failures/$MAX_CONSECUTIVE_FAILURES), retrying in ${RETRY_DELAY_MS}ms")
+            retryRunnable = Runnable { if (isRunning) playCurrentItem() }
+            handler.postDelayed(retryRunnable!!, RETRY_DELAY_MS)
+            return
+        }
+
+        Log.e("PlaylistController", "Giving up on ${item.filename} after $failures consecutive playback errors")
+        consecutiveFailures.remove(item.assignmentId)
+        onRequestRefresh?.invoke()
+        val idx = nextActiveIndex(currentIndex)
+        if (idx < 0 || idx == currentIndex) {
+            // Nothing else schedule-active to fall back to (or this was the only item) -
+            // don't replay the broken item, show an error state instead.
+            showContentUnavailable(item)
+            return
+        }
+        currentIndex = idx
+        playCurrentItem()
     }
 
     private fun playCurrentItem() {
@@ -225,7 +346,10 @@ class PlaylistController(
         cancelRetry()
         val item = currentItem ?: return
         itemStartedAt = System.currentTimeMillis()
+        val sessionId = UUID.randomUUID().toString()
+        currentSessionId = sessionId
         Log.i("PlaylistController", "Playing: ${item.filename} (index $currentIndex)")
+        if (!wallFollower) onPlayStart?.invoke(item, sessionId, itemStartedAt)
         onItemChanged(item)
 
         // For images and widgets, auto-advance after duration. For videos, wait
@@ -239,7 +363,9 @@ class PlaylistController(
     private fun scheduleAdvance(delayMs: Long) {
         cancelAdvance()
         advanceRunnable = Runnable { next() }
-        handler.postDelayed(advanceRunnable!!, delayMs)
+        // Clamp to a safe minimum: a 0/near-0 durationSec would otherwise re-trigger next()
+        // in a tight loop.
+        handler.postDelayed(advanceRunnable!!, delayMs.coerceAtLeast(1000L))
     }
 
     private fun cancelAdvance() {
@@ -279,6 +405,23 @@ class PlaylistController(
         cancelRetry()
         retryRunnable = Runnable {
             if (isRunning && items.isNotEmpty()) {
+                val idx = firstActiveIndex()
+                if (idx >= 0) { currentIndex = idx; playCurrentItem() } else showNothingScheduled()
+            }
+        }
+        handler.postDelayed(retryRunnable!!, 30_000L)
+    }
+
+    // MAX_CONSECUTIVE_FAILURES exhausted with nothing else to skip to: show an error
+    // state and recheck periodically (same cadence as showNothingScheduled) in case the
+    // content gets fixed/replaced without the playlist signature changing.
+    private fun showContentUnavailable(item: PlaylistItem) {
+        cancelAdvance()
+        cancelRetry()
+        if (onContentUnavailable != null) onContentUnavailable.invoke(item) else (onNothingScheduled ?: onPlaylistEmpty)()
+        retryRunnable = Runnable {
+            if (isRunning && items.isNotEmpty()) {
+                consecutiveFailures.remove(item.assignmentId)
                 val idx = firstActiveIndex()
                 if (idx >= 0) { currentIndex = idx; playCurrentItem() } else showNothingScheduled()
             }

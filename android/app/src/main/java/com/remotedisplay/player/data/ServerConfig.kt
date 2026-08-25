@@ -41,6 +41,13 @@ class ServerConfig(context: Context) {
         get() = prefs.getString("device_name", "Unnamed Display") ?: "Unnamed Display"
         set(value) = prefs.edit().putString("device_name", value).apply()
 
+    // Organization name for the per-org video intro screen. Persisted (not in-memory) so an
+    // offline cold-start restoring the cached playlist still shows the right intro before the
+    // socket reconnects and re-sends it.
+    var organizationName: String
+        get() = prefs.getString("organization_name", "") ?: ""
+        set(value) = prefs.edit().putString("organization_name", value).apply()
+
     val isProvisioned: Boolean
         get() = deviceId.isNotEmpty() && serverUrl.isNotEmpty()
 
