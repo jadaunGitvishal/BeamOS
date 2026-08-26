@@ -5,6 +5,13 @@ const { db } = require("../db/database");
 const { canAdminWorkspace, canAccessWorkspace } = require("../lib/permissions");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
+const { toCsvRow } = require("../lib/csv");
+const { renderXlsx, renderPdf } = require("../lib/report-export");
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return "";
+  return new Date(epochSeconds * 1000).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+}
 
 // Workspace management routes. Operates on a target workspace specified by
 // URL param, NOT the caller's currently active workspace - so this router
@@ -237,6 +244,60 @@ router.get(
     const ws = await loadWorkspace(req, res, false);
     if (!ws) return;
     res.json(await listMembers(ws.id, ws.organization_id));
+  }),
+);
+
+// GET /:id/members/export?format=csv|xlsx|pdf - same membership data (direct
+// + via_org) and same access tier as GET /:id/members, rendered as a
+// downloadable file via the shared report-export lib.
+router.get(
+  "/:id/members/export",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, false);
+    if (!ws) return;
+    const members = await listMembers(ws.id, ws.organization_id);
+
+    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+      ? req.query.format
+      : "csv";
+
+    const headers = ["Name", "Email", "Role", "Membership", "Joined (UTC)", "User ID"];
+    const dataRows = members.map((m) => [
+      m.name || "",
+      m.email,
+      m.role,
+      m.via_org ? "Via Org" : "Direct",
+      formatTimestamp(m.joined_at),
+      m.user_id,
+    ]);
+
+    const date = new Date().toISOString().slice(0, 10);
+    const filenameBase = `workspace-members-${ws.id}-${date}`;
+
+    if (format === "xlsx") {
+      const buffer = await renderXlsx("Workspace Members", headers, dataRows);
+      res.set(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.set("Content-Disposition", `attachment; filename="${filenameBase}.xlsx"`);
+      res.send(buffer);
+      return;
+    }
+
+    if (format === "pdf") {
+      const buffer = await renderPdf(`Workspace Members - ${ws.name}`, headers, dataRows);
+      res.set("Content-Type", "application/pdf");
+      res.set("Content-Disposition", `attachment; filename="${filenameBase}.pdf"`);
+      res.send(buffer);
+      return;
+    }
+
+    const header = toCsvRow(headers);
+    const csvRows = dataRows.map((row) => toCsvRow(row));
+    res.set("Content-Type", "text/csv; charset=utf-8");
+    res.set("Content-Disposition", `attachment; filename="${filenameBase}.csv"`);
+    res.send("﻿" + [header, ...csvRows].join("\r\n"));
   }),
 );
 

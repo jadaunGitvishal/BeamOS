@@ -19,12 +19,28 @@ export async function render(container, workspaceId) {
   container.innerHTML = `
     <div class="page-header">
       <h1>${t('members.title')}</h1>
-      <div id="membersHeaderActions"></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div id="membersHeaderActions"></div>
+        <div class="export-menu-wrap" id="exportMenuWrap">
+          <button type="button" class="btn btn-secondary" id="exportBtn" aria-haspopup="true" aria-expanded="false">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            ${t('report.export_csv')}
+          </button>
+          <div class="export-menu" id="exportMenu" role="menu">
+            <button type="button" class="export-menu-item" data-format="csv" role="menuitem">CSV</button>
+            <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">XLSX</button>
+            <button type="button" class="export-menu-item" data-format="pdf" role="menuitem">PDF</button>
+          </div>
+        </div>
+      </div>
     </div>
     <div id="workspaceMembersContent" style="color:var(--text-muted)">${t('members.loading')}</div>
   `;
   const content = document.getElementById('workspaceMembersContent');
   const headerActions = document.getElementById('membersHeaderActions');
+  wireExportMenu(workspaceId);
 
   // Fetch members, invites, and /me (for can_admin) in parallel. /me is the
   // source of truth for can_admin in THIS workspace - the same field the
@@ -307,6 +323,64 @@ export function mapMutationError(err) {
   if (/Cannot remove the organization owner/i.test(msg)) return t('members.error.org_owner_remove');
   if (/Email send failed/i.test(msg)) return t('members.error.email_send_failed');
   return t('members.error.mutation_generic', { error: msg });
+}
+
+// Wires the CSV/XLSX/PDF export dropdown. Same open/close + fetch-blob-and-
+// download behavior as reports.js's export menu; self-removing document
+// click listener since this view has no teardown hook and render() re-runs
+// on every visit.
+function wireExportMenu(workspaceId) {
+  const exportMenuWrap = document.getElementById('exportMenuWrap');
+  const exportBtn = document.getElementById('exportBtn');
+
+  exportBtn.onclick = (e) => {
+    e.stopPropagation();
+    const opening = !exportMenuWrap.classList.contains('open');
+    exportMenuWrap.classList.toggle('open');
+    exportBtn.setAttribute('aria-expanded', String(opening));
+  };
+
+  document.addEventListener('click', function onDocClick(e) {
+    if (!document.body.contains(exportMenuWrap)) {
+      document.removeEventListener('click', onDocClick);
+      return;
+    }
+    if (!exportMenuWrap.contains(e.target)) {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  exportMenuWrap.querySelectorAll('.export-menu-item').forEach((item) => {
+    item.onclick = async () => {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+
+      const format = item.dataset.format;
+      const token = localStorage.getItem('token');
+      const url = `/api/workspaces/${workspaceId}/members/export?format=${format}`;
+
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        showToast(error.error || 'Export failed', 'error');
+        return;
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `workspace-members.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    };
+  });
 }
 
 function renderError(message) {

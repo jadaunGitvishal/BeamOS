@@ -5,6 +5,13 @@ const { canAdminOrg, canAccessOrg } = require("../lib/permissions");
 const { isPlatformRole } = require("../middleware/auth");
 const { logActivity, getClientIp } = require("../services/activity");
 const { asyncHandler } = require("../lib/async-handler");
+const { toCsvRow } = require("../lib/csv");
+const { renderXlsx, renderPdf } = require("../lib/report-export");
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return "";
+  return new Date(epochSeconds * 1000).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+}
 
 // Organization-member management. Operates on a target org specified by URL
 // param, NOT the caller's currently active org - so this router does NOT use
@@ -82,6 +89,72 @@ router.get(
       )
       .all(org.id);
     res.json(members);
+  }),
+);
+
+// GET /:id/members/export?format=csv|xlsx|pdf - same membership data as
+// GET /:id/members, same access tier (any org member may read/export the
+// roster), rendered as a downloadable file via the shared report-export lib.
+router.get(
+  "/:id/members/export",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrg(req, res, false);
+    if (!org) return;
+    const members = await db
+      .prepare(
+        `
+    SELECT u.id AS user_id, u.email, u.name, u.role AS platform_role, om.role, om.joined_at,
+           inv.email AS invited_by_email
+    FROM organization_members om
+    JOIN users u ON u.id = om.user_id
+    LEFT JOIN users inv ON inv.id = om.invited_by
+    WHERE om.organization_id = ?
+    ORDER BY om.joined_at ASC
+  `,
+      )
+      .all(org.id);
+
+    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+      ? req.query.format
+      : "csv";
+
+    const headers = ["Name", "Email", "Role", "Joined (UTC)", "Invited By", "User ID"];
+    const dataRows = members.map((m) => [
+      m.name || "",
+      m.email,
+      m.role,
+      formatTimestamp(m.joined_at),
+      m.invited_by_email || "",
+      m.user_id,
+    ]);
+
+    const date = new Date().toISOString().slice(0, 10);
+    const filenameBase = `org-members-${org.id}-${date}`;
+
+    if (format === "xlsx") {
+      const buffer = await renderXlsx("Org Members", headers, dataRows);
+      res.set(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.set("Content-Disposition", `attachment; filename="${filenameBase}.xlsx"`);
+      res.send(buffer);
+      return;
+    }
+
+    if (format === "pdf") {
+      const buffer = await renderPdf(`Org Members - ${org.name}`, headers, dataRows);
+      res.set("Content-Type", "application/pdf");
+      res.set("Content-Disposition", `attachment; filename="${filenameBase}.pdf"`);
+      res.send(buffer);
+      return;
+    }
+
+    const header = toCsvRow(headers);
+    const csvRows = dataRows.map((row) => toCsvRow(row));
+    res.set("Content-Type", "text/csv; charset=utf-8");
+    res.set("Content-Disposition", `attachment; filename="${filenameBase}.csv"`);
+    res.send("﻿" + [header, ...csvRows].join("\r\n"));
   }),
 );
 
