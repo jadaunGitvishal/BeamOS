@@ -104,6 +104,11 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 input.srch{border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:6px 10px;font:inherit;font-size:12.5px;width:190px;color:var(--ink)}
 input.srch::placeholder{color:var(--ink3)}
 
+.export-menu-wrap{position:relative;display:inline-block}
+.export-menu{position:absolute;top:calc(100% + 4px);right:0;min-width:120px;background:var(--paper);border:1px solid var(--line);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.12);padding:4px 0;z-index:20}
+.export-menu button{display:block;width:100%;box-sizing:border-box;text-align:left;padding:7px 12px;border:none;background:none;font-size:12.5px;color:var(--ink);cursor:pointer}
+.export-menu button:hover{background:var(--line-soft)}
+
 table{width:100%;border-collapse:collapse}
 th{text-align:left;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink3);font-weight:500;padding:9px 14px;border-bottom:1px solid var(--line)}
 th.r,td.r{text-align:right}

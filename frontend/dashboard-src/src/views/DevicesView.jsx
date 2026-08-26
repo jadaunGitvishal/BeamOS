@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApi } from "../hooks/useApi";
 import { useSession } from "../hooks/useSession";
@@ -13,9 +13,9 @@ const fetchDevices = ({ signal }) => apiFetch("/api/dashboard/devices", { signal
 // token, which only fetch() can attach (a bare link can't set headers).
 // Same fetch -> blob -> synthetic-<a>-click pattern as BeamOS's own
 // frontend/js/views/reports.js export button.
-async function downloadDevicesCsv() {
+async function downloadDevices(format) {
   const token = localStorage.getItem("token");
-  const resp = await fetch("/api/dashboard/devices/export", {
+  const resp = await fetch(`/api/dashboard/devices/export?format=${format}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!resp.ok) return;
@@ -23,7 +23,7 @@ async function downloadDevicesCsv() {
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `devices-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `devices-${new Date().toISOString().slice(0, 10)}.${format}`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -40,6 +40,17 @@ export default function DevicesView() {
 
   const [inputValue, setInputValue] = useState(urlSearch);
   useEffect(() => setInputValue(urlSearch), [urlSearch]);
+
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportRef = useRef(null);
+  useEffect(() => {
+    if (!exportOpen) return;
+    const onClick = (e) => {
+      if (exportRef.current && !exportRef.current.contains(e.target)) setExportOpen(false);
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, [exportOpen]);
 
   // Debounced URL update — matches the vanilla 260ms debounce before the
   // ?q= hash param changes (kept for bookmark/back-button parity). Unlike
@@ -112,9 +123,27 @@ export default function DevicesView() {
         >
           At risk or weak signal only
         </button>
-        <button className="btn" onClick={downloadDevicesCsv}>
-          Export CSV
-        </button>
+        <div className="export-menu-wrap" ref={exportRef}>
+          <button className="btn" onClick={() => setExportOpen((v) => !v)} aria-haspopup="true" aria-expanded={exportOpen}>
+            Export
+          </button>
+          {exportOpen && (
+            <div className="export-menu" role="menu">
+              {["csv", "xlsx", "pdf"].map((format) => (
+                <button
+                  key={format}
+                  role="menuitem"
+                  onClick={() => {
+                    setExportOpen(false);
+                    downloadDevices(format);
+                  }}
+                >
+                  {format.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {!list.length ? (

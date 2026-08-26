@@ -916,7 +916,7 @@ export default {
   'report.title': 'Berichte',
   'report.subtitle': 'Wiedergabe-Analytik und Geräteverfügbarkeit',
   'report.help_tip': 'Wiedergabe-Analytik. Sehen Sie, was wann auf welchem Gerät gespielt wurde. Filtern Sie nach Zeitraum und Gerät. CSV-Export für Verifizierung.',
-  'report.export_csv': 'CSV exportieren',
+  'report.export_csv': 'Exportieren',
   'report.device': 'Gerät',
   'report.all_devices': 'Alle Geräte',
   'report.start_date': 'Startdatum',

@@ -881,7 +881,7 @@ export default {
   'report.title': 'Report',
   'report.subtitle': 'Analisi proof-of-play e attività dei dispositivi',
   'report.help_tip': 'Analisi proof-of-play. Visualizza cosa è stato riprodotto, quando e su quale dispositivo. Filtra per intervallo di date e dispositivo. Esporta in CSV per la verifica pubblicitaria.',
-  'report.export_csv': 'Esporta CSV',
+  'report.export_csv': 'Esporta',
   'report.device': 'Dispositivo',
   'report.all_devices': 'Tutti i dispositivi',
   'report.start_date': 'Data Inizio',

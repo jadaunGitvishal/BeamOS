@@ -312,6 +312,23 @@ body {
   cursor: pointer;
 }
 
+.export-menu-wrap { position: relative; display: inline-block; }
+.export-menu {
+  display: none;
+  position: absolute; top: calc(100% + 4px); right: 0;
+  min-width: 140px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  padding: 4px 0; z-index: 20;
+}
+.export-menu-wrap.open .export-menu { display: block; }
+.export-menu-item {
+  display: block; width: 100%; box-sizing: border-box; text-align: left;
+  padding: 8px 14px; background: none; border: none;
+  color: var(--text-primary); font-size: 13px; cursor: pointer;
+}
+.export-menu-item:hover { background: var(--bg-input); }
+
 .btn-primary {
   background: var(--accent);
   color: white;

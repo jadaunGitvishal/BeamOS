@@ -21,12 +21,19 @@ export async function render(container) {
   container.innerHTML = `
     <div class="page-header">
       <div><h1>${t("report.title")} <span class="help-tip" data-tip="${t("report.help_tip")}">?</span></h1><div class="subtitle">${t("report.subtitle")}</div></div>
-      <a class="btn btn-secondary" id="exportBtn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-        </svg>
-        ${t("report.export_csv")}
-      </a>
+      <div class="export-menu-wrap" id="exportMenuWrap">
+        <button type="button" class="btn btn-secondary" id="exportBtn" aria-haspopup="true" aria-expanded="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          ${t("report.export_csv")}
+        </button>
+        <div class="export-menu" id="exportMenu" role="menu">
+          <button type="button" class="export-menu-item" data-format="csv" role="menuitem">CSV</button>
+          <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">XLSX</button>
+          <button type="button" class="export-menu-item" data-format="pdf" role="menuitem">PDF</button>
+        </div>
+      </div>
     </div>
 
     <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;align-items:flex-end">
@@ -59,41 +66,72 @@ export async function render(container) {
   //   window.open(`/api/reports/export?device_id=${deviceId}&start=${start}&end=${end}&token=${token}`, '_blank');
   // };
 
-  document.getElementById("exportBtn").onclick = async () => {
-    const deviceId = document.getElementById("reportDevice").value;
-    const start = document.getElementById("reportStart").value;
-    const end = document.getElementById("reportEnd").value;
+  const exportMenuWrap = document.getElementById("exportMenuWrap");
+  const exportBtn = document.getElementById("exportBtn");
 
-    const token = localStorage.getItem("token");
+  exportBtn.onclick = (e) => {
+    e.stopPropagation();
+    const opening = !exportMenuWrap.classList.contains("open");
+    exportMenuWrap.classList.toggle("open");
+    exportBtn.setAttribute("aria-expanded", String(opening));
+  };
 
-    const url = `/api/reports/export?device_id=${deviceId}&start=${start}&end=${end}`;
-
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
-      showToast(error.error || "Export failed", "error");
+  // Self-removing: this view has no teardown hook, and render() re-runs on
+  // every visit to the Reports tab, so a plain addEventListener here would
+  // stack one stale listener per visit. Once exportMenuWrap is no longer in
+  // the document (replaced by the next render), the listener detaches itself.
+  document.addEventListener("click", function onDocClick(e) {
+    if (!document.body.contains(exportMenuWrap)) {
+      document.removeEventListener("click", onDocClick);
       return;
     }
+    if (!exportMenuWrap.contains(e.target)) {
+      exportMenuWrap.classList.remove("open");
+      exportBtn.setAttribute("aria-expanded", "false");
+    }
+  });
 
-    const blob = await response.blob();
+  exportMenuWrap.querySelectorAll(".export-menu-item").forEach((item) => {
+    item.onclick = async () => {
+      exportMenuWrap.classList.remove("open");
+      exportBtn.setAttribute("aria-expanded", "false");
 
-    const downloadUrl = window.URL.createObjectURL(blob);
+      const format = item.dataset.format;
+      const deviceId = document.getElementById("reportDevice").value;
+      const start = document.getElementById("reportStart").value;
+      const end = document.getElementById("reportEnd").value;
 
-    const a = document.createElement("a");
-    a.href = downloadUrl;
-    a.download = "proof-of-play.csv";
+      const token = localStorage.getItem("token");
 
-    document.body.appendChild(a);
-    a.click();
+      const url = `/api/reports/export?device_id=${deviceId}&start=${start}&end=${end}&format=${format}`;
 
-    a.remove();
-    window.URL.revokeObjectURL(downloadUrl);
-  };
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        showToast(error.error || "Export failed", "error");
+        return;
+      }
+
+      const blob = await response.blob();
+
+      const downloadUrl = window.URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      a.download = `proof-of-play.${format}`;
+
+      document.body.appendChild(a);
+      a.click();
+
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    };
+  });
 
   async function loadReport() {
     const deviceId = document.getElementById("reportDevice").value;

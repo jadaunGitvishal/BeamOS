@@ -916,7 +916,7 @@ export default {
   'report.title': 'Rapports',
   'report.subtitle': 'Analyses de lecture et disponibilité des appareils',
   'report.help_tip': 'Analyses de lecture. Voyez ce qui a été lu, quand et sur quel appareil. Filtrez par période et appareil. Export CSV pour vérification.',
-  'report.export_csv': 'Exporter CSV',
+  'report.export_csv': 'Exporter',
   'report.device': 'Appareil',
   'report.all_devices': 'Tous les appareils',
   'report.start_date': 'Date de début',

@@ -916,7 +916,7 @@ export default {
   'report.title': 'Relatórios',
   'report.subtitle': 'Análise de exibição e disponibilidade dos dispositivos',
   'report.help_tip': 'Análise de exibição. Veja o que foi exibido, quando e em qual dispositivo. Filtre por período e dispositivo. Exporte CSV para verificação.',
-  'report.export_csv': 'Exportar CSV',
+  'report.export_csv': 'Exportar',
   'report.device': 'Dispositivo',
   'report.all_devices': 'Todos os dispositivos',
   'report.start_date': 'Data de início',

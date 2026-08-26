@@ -1168,7 +1168,7 @@ export default {
   "report.subtitle": "Proof-of-play analytics and device uptime",
   "report.help_tip":
     "Proof-of-play analytics. See what played, when, and on which device. Filter by date range and device. Export to CSV for ad verification.",
-  "report.export_csv": "Export CSV",
+  "report.export_csv": "Export",
   "report.device": "Device",
   "report.all_devices": "All Devices",
   "report.start_date": "Start Date",

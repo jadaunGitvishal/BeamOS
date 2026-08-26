@@ -915,7 +915,7 @@ export default {
   'report.title': 'Informes',
   'report.subtitle': 'Análisis de reproducción y disponibilidad de dispositivos',
   'report.help_tip': 'Análisis de reproducción. Ve qué se reprodujo, cuándo y en qué dispositivo. Filtra por rango de fechas y dispositivo. Exporta a CSV para verificación.',
-  'report.export_csv': 'Exportar CSV',
+  'report.export_csv': 'Exportar',
   'report.device': 'Dispositivo',
   'report.all_devices': 'Todos los dispositivos',
   'report.start_date': 'Fecha de inicio',
