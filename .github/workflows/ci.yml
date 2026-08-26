@@ -54,6 +54,31 @@ jobs:
           if grep -qE 'unassigned|/prune' docs/openapi.yaml; then echo "::error::token-denied endpoint present in public spec"; exit 1; fi
           echo "OK: spec is public-only"
 
+  dashboard-build:
+    name: Dashboard build (Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+      # No lockfile, matching the Dockerfile's dashboard-builder stage: `npm ci`
+      # (and even plain `npm install` with the committed lockfile present) can
+      # silently omit a platform-specific optional dep (vite's
+      # @rollup/rollup-linux-x64-gnu) because package-lock.json was generated
+      # on Windows - https://github.com/npm/cli/issues/4828. Installing with no
+      # lockfile forces npm to resolve the platform-specific tree fresh.
+      - name: Install deps (no lockfile - see Dockerfile dashboard-builder stage)
+        run: rm -f package-lock.json && npm install
+      - run: npm run build:dashboard
+      # Catches both "build errored" (caught above already) and "build
+      # succeeded but produced nothing useful".
+      - name: Assert dashboard bundle was produced
+        run: test -f ../frontend/dashboard/dashboard.html
+
   android-test:
     name: Android unit tests (Kotlin schedule evaluator vectors)
     runs-on: ubuntu-latest
