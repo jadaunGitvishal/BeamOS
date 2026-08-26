@@ -8,6 +8,18 @@ const { asyncHandler } = require('../lib/async-handler');
 // Phase 2.2k: workspace-aware access. requirePlaylistOwnership is replaced
 // by read/write helpers gated on the playlist's workspace_id.
 const { accessContext } = require('../lib/tenancy');
+const { toCsvRow } = require('../lib/csv');
+const { renderXlsx, renderPdf } = require('../lib/report-export');
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return '';
+  return new Date(epochSeconds * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+// Unlike Content Library/Activity Log (unbounded, grow forever), playlists per
+// workspace are a small roster - GET / itself has no LIMIT. This cap is just a
+// safety net against a pathological workspace, set well above any real usage.
+const EXPORT_ROW_CAP = 5000;
 
 // Re-probe video duration with ffprobe if content.duration_sec is missing
 async function probeAndUpdateDuration(content) {
@@ -179,6 +191,66 @@ router.get('/', asyncHandler(async (req, res) => {
     ORDER BY p.name ASC
   `).all(req.workspaceId);
   res.json(playlists);
+}));
+
+// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// (p.workspace_id = ? - no shared/platform-template exception for playlists)
+// and source aggregation query, just adds format branching on top.
+router.get('/export', asyncHandler(async (req, res) => {
+  let playlists = [];
+  if (req.workspaceId) {
+    playlists = await db.prepare(`
+      SELECT p.*, COUNT(DISTINCT pi.id) as item_count, COUNT(DISTINCT d.id) as display_count,
+             EXISTS(SELECT 1 FROM playlist_items z WHERE z.playlist_id = p.id AND z.zone_id IS NOT NULL) as zoned
+      FROM playlists p
+      LEFT JOIN playlist_items pi ON p.id = pi.playlist_id
+      LEFT JOIN devices d ON d.playlist_id = p.id
+      WHERE p.workspace_id = ?
+      GROUP BY p.id
+      ORDER BY p.name ASC
+      LIMIT ?
+    `).all(req.workspaceId, EXPORT_ROW_CAP);
+  }
+
+  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+
+  const headers = ['Name', 'Description', 'Item Count', 'Display Count', 'Zoned', 'Created At (UTC)'];
+  // description is TEXT and nullable - auto-generated playlists (device-groups.js,
+  // assignments.js, status.js) never set it, unlike the manual-create path
+  // (POST /, which always stores at least '') - so it can be a real NULL here.
+  const dataRows = playlists.map((p) => [
+    p.name,
+    p.description || '',
+    p.item_count,
+    p.display_count,
+    p.zoned ? 'Yes' : 'No',
+    formatTimestamp(p.created_at),
+  ]);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const filenameBase = `playlists-${date}`;
+
+  if (format === 'xlsx') {
+    const buffer = await renderXlsx('Playlists', headers, dataRows);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.xlsx"`);
+    res.send(buffer);
+    return;
+  }
+
+  if (format === 'pdf') {
+    const buffer = await renderPdf('Playlists', headers, dataRows);
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.pdf"`);
+    res.send(buffer);
+    return;
+  }
+
+  const header = toCsvRow(headers);
+  const csvRows = dataRows.map((row) => toCsvRow(row));
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${filenameBase}.csv"`);
+  res.send('﻿' + [header, ...csvRows].join('\r\n'));
 }));
 
 // Phase 2.2k: create stamps workspace_id from req.workspaceId. Viewer-deny
