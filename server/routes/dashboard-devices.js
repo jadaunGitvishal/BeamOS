@@ -6,6 +6,7 @@ const { stripDeviceSecrets } = require("../lib/device-sanitize");
 const { accessContext } = require("../lib/tenancy");
 const { getWorkspaceDeviceFilter } = require("../lib/workspace-scope");
 const { toCsvRow } = require("../lib/csv");
+const { renderXlsx, renderPdf } = require("../lib/report-export");
 
 // Merged in from BeamOS-Dashboard's routes/devices.js. Its standalone-app
 // GET /:id/screenshot proxy (which forwarded a dash_token cookie to BeamOS's
@@ -79,6 +80,16 @@ function formatUptime(seconds) {
   const m = Math.round((seconds % 3600) / 60);
   return h === 0 ? `${m}m` : `${h}h ${m}m`;
 }
+// PDF-only: blank telemetry reads as "device has never reported" rather
+// than "field forgot to render" - CSV/XLSX keep true empty cells since
+// those are consumed by spreadsheets/scripts that expect blank = null.
+function dashIfBlank(value) {
+  return value === null || value === undefined || value === "" ? "—" : value;
+}
+function formatMergedPair(free, total) {
+  if (free === null || free === undefined || total === null || total === undefined) return "—";
+  return `${free} / ${total}`;
+}
 
 router.get(
   "/export",
@@ -103,7 +114,11 @@ router.get(
   `;
     const devices = await db.prepare(sql).all(...scope.params);
 
-    const header = toCsvRow([
+    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+      ? req.query.format
+      : "csv";
+
+    const headers = [
       "Name",
       "Status",
       "Last Heartbeat (UTC)",
@@ -117,29 +132,83 @@ router.get(
       "Wi-Fi Signal (dBm)",
       "Uptime",
       "Device ID",
+    ];
+    const dataRows = devices.map((d) => [
+      d.name,
+      d.status,
+      formatTimestamp(d.last_heartbeat),
+      d.battery_level,
+      d.battery_level === null || d.battery_level === undefined ? "" : d.battery_charging ? "Yes" : "No",
+      d.storage_free_mb,
+      d.storage_total_mb,
+      d.ram_free_mb,
+      d.ram_total_mb,
+      d.wifi_ssid,
+      d.wifi_rssi,
+      formatUptime(d.uptime_seconds),
+      d.id,
     ]);
-    const rows = devices.map((d) =>
-      toCsvRow([
-        d.name,
-        d.status,
-        formatTimestamp(d.last_heartbeat),
-        d.battery_level,
-        d.battery_level === null || d.battery_level === undefined ? "" : d.battery_charging ? "Yes" : "No",
-        d.storage_free_mb,
-        d.storage_total_mb,
-        d.ram_free_mb,
-        d.ram_total_mb,
-        d.wifi_ssid,
-        d.wifi_rssi,
-        formatUptime(d.uptime_seconds),
-        d.id,
-      ]),
-    );
 
     const date = new Date().toISOString().slice(0, 10);
+
+    if (format === "xlsx") {
+      const buffer = await renderXlsx("Devices", headers, dataRows);
+      res.set(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.set("Content-Disposition", `attachment; filename="devices-${date}.xlsx"`);
+      res.send(buffer);
+      return;
+    }
+
+    if (format === "pdf") {
+      // PDF-only column layout: 13 columns of even width made most of them
+      // unreadable (long names/headers all ellipsis-truncated to the point
+      // of being ambiguous between devices). Merge the free/total pairs
+      // into one column each and shorten verbose headers so Name - the
+      // actual identifier - can get real width instead of an even 1/13th.
+      const pdfHeaders = [
+        "Name",
+        "Status",
+        "Last Seen",
+        "Battery (%)",
+        "Charging",
+        "Storage (MB)",
+        "RAM (MB)",
+        "Wi-Fi SSID",
+        "Signal (dBm)",
+        "Uptime",
+        "Device ID",
+      ];
+      const pdfRows = devices.map((d) => [
+        d.name,
+        d.status,
+        dashIfBlank(formatTimestamp(d.last_heartbeat)),
+        dashIfBlank(d.battery_level),
+        d.battery_level === null || d.battery_level === undefined ? "—" : d.battery_charging ? "Yes" : "No",
+        formatMergedPair(d.storage_free_mb, d.storage_total_mb),
+        formatMergedPair(d.ram_free_mb, d.ram_total_mb),
+        dashIfBlank(d.wifi_ssid),
+        dashIfBlank(d.wifi_rssi),
+        dashIfBlank(formatUptime(d.uptime_seconds)),
+        d.id,
+      ]);
+      // Column widths auto-fit to the actual header/data lengths (see
+      // renderPdf) - no more hand-tuned weights to keep in sync as columns
+      // or typical content change.
+      const buffer = await renderPdf("Devices", pdfHeaders, pdfRows);
+      res.set("Content-Type", "application/pdf");
+      res.set("Content-Disposition", `attachment; filename="devices-${date}.pdf"`);
+      res.send(buffer);
+      return;
+    }
+
+    const header = toCsvRow(headers);
+    const csvRows = dataRows.map((row) => toCsvRow(row));
     res.set("Content-Type", "text/csv; charset=utf-8");
     res.set("Content-Disposition", `attachment; filename="devices-${date}.csv"`);
-    res.send("﻿" + [header, ...rows].join("\r\n"));
+    res.send("﻿" + [header, ...csvRows].join("\r\n"));
   }),
 );
 

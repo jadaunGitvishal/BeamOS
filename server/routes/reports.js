@@ -6,6 +6,7 @@ const {
   getWorkspaceDeviceFilter,
   getWorkspaceDeviceSubquery,
 } = require('../lib/workspace-scope');
+const { renderXlsx, renderPdf } = require('../lib/report-export');
 
 // Query play logs
 router.get(
@@ -184,16 +185,42 @@ router.get(
 
     const rows = await db.prepare(sql).all(...params);
 
+    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+      ? req.query.format
+      : "csv";
+
+    const headers = ["Device", "Content", "Started", "Ended", "Duration (sec)", "Completed"];
+    const dataRows = rows.map((r) => {
+      const started = new Date(r.started_at * 1000).toISOString();
+      const ended = r.ended_at ? new Date(r.ended_at * 1000).toISOString() : "";
+      return [r.device_name, r.content_name, started, ended, r.duration_sec || "", r.completed ? "Yes" : "No"];
+    });
+
+    if (format === "xlsx") {
+      const buffer = await renderXlsx("Proof of Play", headers, dataRows);
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader("Content-Disposition", "attachment; filename=proof-of-play.xlsx");
+      res.send(buffer);
+      return;
+    }
+
+    if (format === "pdf") {
+      const buffer = await renderPdf("Proof of Play", headers, dataRows);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", "attachment; filename=proof-of-play.pdf");
+      res.send(buffer);
+      return;
+    }
+
     const header = "Device,Content,Started,Ended,Duration (sec),Completed\n";
     const csv =
       header +
-      rows
-        .map((r) => {
-          const started = new Date(r.started_at * 1000).toISOString();
-          const ended = r.ended_at
-            ? new Date(r.ended_at * 1000).toISOString()
-            : "";
-          return `"${r.device_name}","${r.content_name}","${started}","${ended}",${r.duration_sec || ""},${r.completed ? "Yes" : "No"}`;
+      dataRows
+        .map(([device, content, started, ended, duration, completed]) => {
+          return `"${device}","${content}","${started}","${ended}",${duration},${completed}`;
         })
         .join("\n");
 
