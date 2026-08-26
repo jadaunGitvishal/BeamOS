@@ -107,20 +107,33 @@ const resolveTenancy = asyncHandler(async function resolveTenancy(req, res, next
   req.isPlatformOperator = isPlatformStaffUser && !isPlatformAdmin;
   req.isPlatformStaff = isPlatformStaffUser;
 
-  // Build the ordered candidate list of workspace_ids to try.
+  // Build the ordered candidate list of workspace_ids to try. header/query
+  // candidates are `explicit`: the caller named this workspace on purpose,
+  // as opposed to the JWT's current_workspace_id, which is just carried
+  // session state the caller didn't type anywhere on this request.
   const candidates = [];
   const headerWs = (req.headers['x-workspace-id'] || '').trim();
-  if (headerWs) candidates.push(headerWs);
-  if (req.query && req.query.workspace_id) candidates.push(String(req.query.workspace_id));
-  if (req.jwtWorkspaceId) candidates.push(req.jwtWorkspaceId);
+  if (headerWs) candidates.push({ id: headerWs, explicit: true });
+  if (req.query && req.query.workspace_id) candidates.push({ id: String(req.query.workspace_id), explicit: true });
+  if (req.jwtWorkspaceId) candidates.push({ id: req.jwtWorkspaceId, explicit: false });
 
   let workspace = null;
   let context = null;
-  for (const wsId of candidates) {
-    const ws = await loadWorkspace(wsId);
+  for (const candidate of candidates) {
+    const ws = await loadWorkspace(candidate.id);
     if (!ws) continue;
     const ctx = await accessContext(req.user.id, req.user.role, ws);
-    if (!ctx) continue;
+    if (!ctx) {
+      if (candidate.explicit) {
+        // Caller explicitly asked for this workspace via X-Workspace-Id or
+        // ?workspace_id= and has no path into it (not a member, not
+        // org-wide, not platform staff) - reject instead of silently
+        // substituting their own workspace. A stale JWT current_workspace_id
+        // (not explicit) still falls through to the fallbacks below.
+        return res.status(403).json({ error: 'Access denied to that workspace' });
+      }
+      continue;
+    }
     workspace = ws;
     context = ctx;
     break;
