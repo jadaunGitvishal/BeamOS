@@ -31,6 +31,12 @@ video
 *.wgt
 *.tar.gz
 
+# Build artifact, not source (see .gitignore) - built fresh by the Dockerfile's
+# `builder` stage. Excluded here too so a stale/mismatched local build never
+# rides into the image's build context and shadows (or mixes with) the
+# freshly-built one the Dockerfile copies in.
+frontend/dashboard/
+
 # docs / editor cruft
 *.md
 .vscode
