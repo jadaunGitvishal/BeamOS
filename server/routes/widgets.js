@@ -9,6 +9,17 @@ const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
 // Phase 2.2d: workspace-aware access. Same pattern as devices.js / content.js.
 const { accessContext } = require('../lib/tenancy');
 const { asyncHandler } = require('../lib/async-handler');
+const { toCsvRow } = require('../lib/csv');
+const { renderXlsx, renderPdf } = require('../lib/report-export');
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return '';
+  return new Date(epochSeconds * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+// Mirrors content.js's EXPORT_ROW_CAP rationale - GET / has no LIMIT, this
+// is just a safety net against a pathological workspace.
+const EXPORT_ROW_CAP = 5000;
 
 // For preview only: inline /api/content/:id/file and /thumbnail URLs as data URIs,
 // scoped to the caller's current workspace. Lets the srcdoc preview iframe show
@@ -106,6 +117,54 @@ router.get('/', asyncHandler(async (req, res) => {
     'SELECT * FROM widgets WHERE (workspace_id = ? OR workspace_id IS NULL) ORDER BY created_at DESC'
   ).all(req.workspaceId);
   res.json(widgets);
+}));
+
+// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// (workspace_id = ? OR workspace_id IS NULL - own workspace's widgets plus
+// platform-template rows shared with every workspace) and its "no workspace
+// context" behavior (empty/headers-only export rather than an error).
+router.get('/export', asyncHandler(async (req, res) => {
+  let widgets = [];
+  if (req.workspaceId) {
+    widgets = await db.prepare(
+      'SELECT * FROM widgets WHERE (workspace_id = ? OR workspace_id IS NULL) ORDER BY created_at DESC LIMIT ?'
+    ).all(req.workspaceId, EXPORT_ROW_CAP);
+  }
+
+  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+
+  const headers = ['Name', 'Widget Type', 'Created At (UTC)', 'Shared Template'];
+  const dataRows = widgets.map((w) => [
+    w.name,
+    w.widget_type,
+    formatTimestamp(w.created_at),
+    w.workspace_id ? 'No' : 'Yes',
+  ]);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const filenameBase = `widgets-${date}`;
+
+  if (format === 'xlsx') {
+    const buffer = await renderXlsx('Widgets', headers, dataRows);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.xlsx"`);
+    res.send(buffer);
+    return;
+  }
+
+  if (format === 'pdf') {
+    const buffer = await renderPdf('Widgets', headers, dataRows);
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.pdf"`);
+    res.send(buffer);
+    return;
+  }
+
+  const header = toCsvRow(headers);
+  const csvRows = dataRows.map((row) => toCsvRow(row));
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${filenameBase}.csv"`);
+  res.send('﻿' + [header, ...csvRows].join('\r\n'));
 }));
 
 // Create widget in the caller's current workspace.
