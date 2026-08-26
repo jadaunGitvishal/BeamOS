@@ -8,6 +8,17 @@ const { asyncHandler } = require('../lib/async-handler');
 // dead code after the Phase 2.1 role rename (no users carry role='admin'
 // anymore; team_members is a vestigial table from the pre-workspace model).
 const { accessContext } = require('../lib/tenancy');
+const { toCsvRow } = require('../lib/csv');
+const { renderXlsx, renderPdf } = require('../lib/report-export');
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return '';
+  return new Date(epochSeconds * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+// Mirrors playlists.js's EXPORT_ROW_CAP rationale: walls per workspace are a
+// small roster (GET / has no LIMIT), this is just a safety net.
+const EXPORT_ROW_CAP = 5000;
 
 // Load a wall + access context. Returns the wall row or null after sending
 // 403/404. requireWrite=true also denies workspace_viewer.
@@ -52,6 +63,59 @@ router.get('/', asyncHandler(async (req, res) => {
   for (const w of walls) { w.devices = await devStmt.all(w.id); }
 
   res.json(walls);
+}));
+
+// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// (workspace_id = ? - no shared-template exception for video walls) plus a
+// device-count aggregation equivalent to GET /'s per-wall w.devices array.
+router.get('/export', asyncHandler(async (req, res) => {
+  let walls = [];
+  if (req.workspaceId) {
+    walls = await db.prepare(`
+      SELECT vw.*, COUNT(vwd.device_id) as device_count
+      FROM video_walls vw
+      LEFT JOIN video_wall_devices vwd ON vwd.wall_id = vw.id
+      WHERE vw.workspace_id = ?
+      GROUP BY vw.id
+      ORDER BY vw.created_at DESC
+      LIMIT ?
+    `).all(req.workspaceId, EXPORT_ROW_CAP);
+  }
+
+  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+
+  const headers = ['Name', 'Device Count', 'Grid Dimensions', 'Created At (UTC)'];
+  const dataRows = walls.map((w) => [
+    w.name,
+    w.device_count,
+    `${w.grid_cols}x${w.grid_rows}`,
+    formatTimestamp(w.created_at),
+  ]);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const filenameBase = `video-walls-${date}`;
+
+  if (format === 'xlsx') {
+    const buffer = await renderXlsx('Video Walls', headers, dataRows);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.xlsx"`);
+    res.send(buffer);
+    return;
+  }
+
+  if (format === 'pdf') {
+    const buffer = await renderPdf('Video Walls', headers, dataRows);
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.pdf"`);
+    res.send(buffer);
+    return;
+  }
+
+  const header = toCsvRow(headers);
+  const csvRows = dataRows.map((row) => toCsvRow(row));
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${filenameBase}.csv"`);
+  res.send('﻿' + [header, ...csvRows].join('\r\n'));
 }));
 
 // Notify dashboard clients to re-fetch walls/devices. Phase 2.3: scoped to
