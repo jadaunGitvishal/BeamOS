@@ -14,6 +14,20 @@ const { accessContext } = require('../lib/tenancy');
 // #73: the upload ingest (processing + insert) is now shared with the agency router.
 const { ingestUploadedFile } = require('../lib/content-ingest');
 const { asyncHandler } = require('../lib/async-handler');
+const { toCsvRow } = require('../lib/csv');
+const { renderXlsx, renderPdf } = require('../lib/report-export');
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return '';
+  return new Date(epochSeconds * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+// Content libraries are open-ended (grow with every upload) unlike a roster
+// such as workspace members, so - matching the activity-log export precedent -
+// exports use a fixed ceiling well above the UI's 500-row page cap instead of
+// that same cap, to keep a busy workspace's export from trying to buffer an
+// unbounded xlsx/pdf in memory.
+const EXPORT_ROW_CAP = 10000;
 
 // Multer captures file.originalname directly from the multipart filename header,
 // bypassing sanitizeBody. Apply the same HTML-escape here so a filename like
@@ -77,6 +91,75 @@ router.get('/', asyncHandler(async (req, res) => {
   params.push(Math.min(parseInt(req.query.limit) || 100, 500), parseInt(req.query.offset) || 0);
   const content = await db.prepare(sql).all(...params);
   res.json(content);
+}));
+
+// GET /export?format=csv|xlsx|pdf - same scoping as GET / (workspace_id = ?
+// OR workspace_id IS NULL - own workspace's content plus platform-template
+// rows shared with every workspace; intentional, not a bug, see GET / above)
+// plus the same optional folder/folder_id filters. Mirrors GET /'s "no
+// workspace context" behavior too: rather than erroring, it exports an empty
+// (headers-only) file, matching GET /'s res.json([]).
+router.get('/export', asyncHandler(async (req, res) => {
+  const folder = req.query.folder;
+  const folderId = req.query.folder_id;
+  let content = [];
+  if (req.workspaceId) {
+    let sql = 'SELECT * FROM content WHERE (workspace_id = ? OR workspace_id IS NULL)';
+    const params = [req.workspaceId];
+    if (folder) { sql += ' AND folder = ?'; params.push(folder); }
+    if (folderId !== undefined) {
+      if (folderId === 'root' || folderId === '') {
+        sql += ' AND folder_id IS NULL';
+      } else {
+        sql += ' AND folder_id = ?';
+        params.push(folderId);
+      }
+    }
+    sql += ' ORDER BY folder, created_at DESC LIMIT ?';
+    params.push(EXPORT_ROW_CAP);
+    content = await db.prepare(sql).all(...params);
+  }
+
+  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+
+  const headers = ['Filename', 'Folder', 'MIME Type', 'File Size', 'Duration (sec)', 'Width', 'Height', 'Remote URL', 'Created At (UTC)', 'Shared Template'];
+  const dataRows = content.map((c) => [
+    c.filename,
+    c.folder || '',
+    c.mime_type,
+    c.file_size || 0,
+    c.duration_sec ?? '',
+    c.width ?? '',
+    c.height ?? '',
+    c.remote_url || '',
+    formatTimestamp(c.created_at),
+    c.workspace_id ? 'No' : 'Yes',
+  ]);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const filenameBase = `content-library-${date}`;
+
+  if (format === 'xlsx') {
+    const buffer = await renderXlsx('Content Library', headers, dataRows);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.xlsx"`);
+    res.send(buffer);
+    return;
+  }
+
+  if (format === 'pdf') {
+    const buffer = await renderPdf('Content Library', headers, dataRows);
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.pdf"`);
+    res.send(buffer);
+    return;
+  }
+
+  const header = toCsvRow(headers);
+  const csvRows = dataRows.map((row) => toCsvRow(row));
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${filenameBase}.csv"`);
+  res.send('﻿' + [header, ...csvRows].join('\r\n'));
 }));
 
 // Get folders list for the caller's current workspace.

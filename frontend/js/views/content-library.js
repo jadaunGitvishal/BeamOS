@@ -48,6 +48,19 @@ export async function render(container) {
         <h1>${t('content.title')} <span class="help-tip" data-tip="${t('content.help_tip')}">?</span></h1>
         <div class="subtitle">${t('content.subtitle')}</div>
       </div>
+      <div class="export-menu-wrap" id="exportMenuWrap">
+        <button type="button" class="btn btn-secondary" id="exportBtn" aria-haspopup="true" aria-expanded="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          ${t('report.export_csv')}
+        </button>
+        <div class="export-menu" id="exportMenu" role="menu">
+          <button type="button" class="export-menu-item" data-format="csv" role="menuitem">CSV</button>
+          <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">XLSX</button>
+          <button type="button" class="export-menu-item" data-format="pdf" role="menuitem">PDF</button>
+        </div>
+      </div>
     </div>
 
     <div class="content-toolbar" style="display:flex;gap:16px;margin-bottom:24px">
@@ -215,6 +228,7 @@ export async function render(container) {
     state.canEdit = true;
   }
 
+  wireExportMenu();
   loadContent();
 }
 
@@ -225,6 +239,66 @@ const state = {
   folders: [],           // all folders for this user (flat tree)
   canEdit: true,          // resolved from /auth/me before first load; default fails open (server still enforces)
 };
+
+// Wires the CSV/XLSX/PDF export dropdown. Same open/close + fetch-blob-and-
+// download behavior as the other export menus (activity.js, workspace-members.js).
+// Scopes the export to the folder currently being viewed via folder_id, read
+// from state at click time so navigating folders keeps the export in sync
+// with what's on screen without needing to re-wire the menu.
+function wireExportMenu() {
+  const exportMenuWrap = document.getElementById('exportMenuWrap');
+  const exportBtn = document.getElementById('exportBtn');
+
+  exportBtn.onclick = (e) => {
+    e.stopPropagation();
+    const opening = !exportMenuWrap.classList.contains('open');
+    exportMenuWrap.classList.toggle('open');
+    exportBtn.setAttribute('aria-expanded', String(opening));
+  };
+
+  document.addEventListener('click', function onDocClick(e) {
+    if (!document.body.contains(exportMenuWrap)) {
+      document.removeEventListener('click', onDocClick);
+      return;
+    }
+    if (!exportMenuWrap.contains(e.target)) {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  exportMenuWrap.querySelectorAll('.export-menu-item').forEach((item) => {
+    item.onclick = async () => {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+
+      const format = item.dataset.format;
+      const token = localStorage.getItem('token');
+      const folderId = state.currentFolderId === null ? 'root' : encodeURIComponent(state.currentFolderId);
+      const url = `/api/content/export?format=${format}&folder_id=${folderId}`;
+
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        showToast(error.error || 'Export failed', 'error');
+        return;
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `content-library.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    };
+  });
+}
 
 async function handleFiles(files) {
   const progress = document.getElementById('uploadProgress');
