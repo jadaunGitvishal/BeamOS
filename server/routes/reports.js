@@ -7,6 +7,7 @@ const {
   getWorkspaceDeviceSubquery,
 } = require('../lib/workspace-scope');
 const { renderXlsx, renderPdf } = require('../lib/report-export');
+const { getProofOfPlaySummary } = require('../lib/proof-of-play');
 
 // Query play logs
 router.get(
@@ -57,108 +58,20 @@ router.get(
       : Math.floor(Date.now() / 1000);
 
     // Phase 2.2g: workspace-scope all summary queries, no admin bypass.
+    // MySQL note (byHour): HOUR(FROM_UNIXTIME(x)) converts using the DB session/global
+    // time_zone (SYSTEM by default) - the closest match to SQLite's old 'localtime'.
+    // byDay uses DATE_FORMAT (not DATE()) so `day` stays a plain 'YYYY-MM-DD' string.
     const wsScope = getWorkspaceDeviceSubquery(req);
-    let deviceFilter = wsScope.sql;
-    const params = [startEpoch, endEpoch, ...wsScope.params];
+    let scopeSql = wsScope.sql;
+    const scopeParams = [...wsScope.params];
     if (device_id) {
-      deviceFilter += " AND device_id = ?";
-      params.push(device_id);
+      scopeSql += " AND device_id = ?";
+      scopeParams.push(device_id);
     }
 
-    // Overall stats
-    const overall = await db
-      .prepare(
-        `
-    SELECT COUNT(*) as total_plays,
-           COALESCE(SUM(duration_sec), 0) as total_duration_sec,
-           COUNT(DISTINCT content_id) as unique_content,
-           COUNT(DISTINCT device_id) as unique_devices,
-           AVG(duration_sec) as avg_duration_sec
-    FROM play_logs
-    WHERE started_at >= ? AND started_at <= ? ${deviceFilter}
-  `,
-      )
-      .get(...params);
-
-    // By content
-    const byContent = await db
-      .prepare(
-        `
-    SELECT content_id, content_name, COUNT(*) as plays,
-           COALESCE(SUM(duration_sec), 0) as total_seconds,
-           SUM(completed) as completed_plays
-    FROM play_logs
-    WHERE started_at >= ? AND started_at <= ? ${deviceFilter}
-    GROUP BY content_id, content_name
-    ORDER BY plays DESC LIMIT 50
-  `,
-      )
-      .all(...params);
-
-    // By device
-    const byDevice = await db
-      .prepare(
-        `
-    SELECT pl.device_id, d.name as device_name, COUNT(*) as plays,
-           COALESCE(SUM(pl.duration_sec), 0) as total_seconds
-    FROM play_logs pl
-    JOIN devices d ON pl.device_id = d.id
-    WHERE pl.started_at >= ? AND pl.started_at <= ? ${deviceFilter}
-    GROUP BY pl.device_id
-    ORDER BY plays DESC
-  `,
-      )
-      .all(...params);
-
-    // By hour of day. MySQL equivalent of SQLite's strftime('%H', x, 'unixepoch', 'localtime'):
-    // FROM_UNIXTIME() already converts using the session/global time_zone (SYSTEM by default,
-    // i.e. the DB server's OS timezone) - the closest available match to SQLite's 'localtime'
-    // modifier (the server PROCESS's OS timezone). Not byte-identical if the app and DB
-    // processes ever run in different zones, but that was already implicitly assumed.
-    const byHour = await db
-      .prepare(
-        `
-    SELECT HOUR(FROM_UNIXTIME(started_at)) as hour,
-           COUNT(*) as plays
-    FROM play_logs
-    WHERE started_at >= ? AND started_at <= ? ${deviceFilter}
-    GROUP BY hour ORDER BY hour
-  `,
-      )
-      .all(...params);
-
-    // By day. DATE_FORMAT (not DATE()) so `day` always comes back as a plain 'YYYY-MM-DD'
-    // string like the old SQLite date() did, rather than a native DATE value mysql2 might
-    // hand back as a JS Date object.
-    const byDay = await db
-      .prepare(
-        `
-    SELECT DATE_FORMAT(FROM_UNIXTIME(started_at), '%Y-%m-%d') as day, COUNT(*) as plays,
-           COALESCE(SUM(duration_sec), 0) as total_seconds
-    FROM play_logs
-    WHERE started_at >= ? AND started_at <= ? ${deviceFilter}
-    GROUP BY day ORDER BY day
-  `,
-      )
-      .all(...params);
-
-    res.json({
-      period: {
-        start: new Date(startEpoch * 1000).toISOString(),
-        end: new Date(endEpoch * 1000).toISOString(),
-      },
-      overall: {
-        total_plays: overall.total_plays,
-        total_hours: Math.round((overall.total_duration_sec / 3600) * 10) / 10,
-        unique_content: overall.unique_content,
-        unique_devices: overall.unique_devices,
-        avg_duration_sec: Math.round(overall.avg_duration_sec || 0),
-      },
-      by_content: byContent,
-      by_device: byDevice,
-      by_hour: byHour,
-      by_day: byDay,
-    });
+    res.json(
+      await getProofOfPlaySummary({ scopeSql, scopeParams, startEpoch, endEpoch }),
+    );
   }),
 );
 

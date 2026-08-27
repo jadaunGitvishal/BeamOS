@@ -1002,6 +1002,10 @@ async function boot() {
   const { startScreenshotScheduler } = require("./services/screenshot-scheduler");
   startScreenshotScheduler(io);
 
+  // Ref 46: daily/monthly automated proof-of-play report digests
+  const { startReportDigests } = require("./services/report-digest");
+  startReportDigests();
+
   // Start alert service
   const { startAlertService } = require("./services/alerts");
   startAlertService(io);

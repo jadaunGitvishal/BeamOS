@@ -106,26 +106,36 @@ function postSendMail(token, payload) {
 // prefix) — used by the signup emails which carry their own clean subjects.
 // fromName: overrides the default GRAPH_SENDER_NAME display name (the From
 // address is always graphSenderEmail, so replies still land in that mailbox).
-function buildSendMailPayload(to, subject, text, html, fromName, rawSubject) {
-  return {
-    message: {
-      subject: rawSubject ? subject : `[BeamOS] ${subject}`,
-      body: {
-        contentType: "HTML",
-        content:
-          html ||
-          `<pre style="font-family:sans-serif">${escapeHtml(text || "")}</pre>`,
-      },
-      toRecipients: [{ emailAddress: { address: to } }],
-      from: {
-        emailAddress: {
-          address: config.graphSenderEmail,
-          name: fromName || config.graphSenderName || "BeamOS",
-        },
+// attachments: optional [{ filename, content, contentType }] where `content` is a Buffer
+// or an already-base64 string. Rendered as Graph fileAttachment objects.
+function buildSendMailPayload(to, subject, text, html, fromName, rawSubject, attachments) {
+  const message = {
+    subject: rawSubject ? subject : `[BeamOS] ${subject}`,
+    body: {
+      contentType: "HTML",
+      content:
+        html ||
+        `<pre style="font-family:sans-serif">${escapeHtml(text || "")}</pre>`,
+    },
+    toRecipients: [{ emailAddress: { address: to } }],
+    from: {
+      emailAddress: {
+        address: config.graphSenderEmail,
+        name: fromName || config.graphSenderName || "BeamOS",
       },
     },
-    saveToSentItems: false,
   };
+  if (attachments && attachments.length) {
+    message.attachments = attachments.map((a) => ({
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      name: a.filename,
+      contentType: a.contentType || "application/octet-stream",
+      contentBytes: Buffer.isBuffer(a.content)
+        ? a.content.toString("base64")
+        : String(a.content),
+    }));
+  }
+  return { message, saveToSentItems: false };
 }
 
 function escapeHtml(s) {
@@ -143,10 +153,12 @@ function escapeHtml(s) {
 // caller. Graph errors are logged and the function returns sent:false so
 // app-level flow (e.g. the device-offline alert) keeps running even when
 // email delivery is broken.
-async function sendEmail({ to, subject, text, html, fromName, rawSubject }) {
+async function sendEmail({ to, subject, text, html, fromName, rawSubject, attachments }) {
   if (!isConfigured()) {
     console.log(`[EMAIL] not configured - would send to ${to}: ${subject}`);
     if (text) console.log(`  ${text.split("\n")[0]}`);
+    if (attachments && attachments.length)
+      console.log(`  (+${attachments.length} attachment: ${attachments.map((a) => a.filename).join(", ")})`);
     return { sent: false, reason: "not_configured" };
   }
   // Dev allow-list. Bypass Graph entirely for any recipient not in the list.
@@ -167,7 +179,7 @@ async function sendEmail({ to, subject, text, html, fromName, rawSubject }) {
     const token = await getAccessToken();
     await postSendMail(
       token,
-      buildSendMailPayload(to, subject, text, html, fromName, rawSubject),
+      buildSendMailPayload(to, subject, text, html, fromName, rawSubject, attachments),
     );
     console.log(`[EMAIL] sent to ${to}: ${subject}`);
     return { sent: true };

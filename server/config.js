@@ -87,6 +87,13 @@ module.exports = {
   // the table + disk after each new insert) so neither can grow unbounded. 0 = keep all.
   screenshotPreviewRetention:
     parseInt(process.env.SCREENSHOT_PREVIEW_RETENTION) || 12,
+  // Ref 46: automated proof-of-play report digests (services/report-digest.js). The
+  // sweep runs on this interval and checks whether a day/month boundary has passed
+  // since the last send (watermark in app_settings) rather than sleeping until midnight.
+  // Keep well under a day; hourly means a report goes out within ~1h of 00:00 UTC.
+  // Lowered via env only for tests.
+  reportDigestIntervalMs:
+    parseInt(process.env.REPORT_DIGEST_INTERVAL_MS) || 60 * 60 * 1000,
   // SSL: drop your Cloudflare Origin cert + key in certs/ folder
   // or set env vars SSL_CERT and SSL_KEY to custom paths
   sslCert: process.env.SSL_CERT || path.join(certsDir, "cert.pem"),
