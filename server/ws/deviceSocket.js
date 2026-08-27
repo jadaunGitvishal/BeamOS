@@ -748,6 +748,15 @@ module.exports = function setupDeviceSocket(io) {
       } catch (err) {
         console.error('Screenshot save error:', err);
       }
+
+      // Ref 36: if the periodic preview sweep asked for this shot, persist it (file +
+      // screenshots row). On-demand previews aren't pending, so this is a no-op for
+      // them - they stay relay-only, exactly as before.
+      try {
+        await require('../services/screenshot-scheduler').persistScreenshotIfPending(device_id, image_b64);
+      } catch (err) {
+        console.error('Periodic screenshot persist error:', err.message);
+      }
     });
 
     // Content download acknowledgement

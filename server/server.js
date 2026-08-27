@@ -998,6 +998,10 @@ async function boot() {
   const { startScheduler } = require("./services/scheduler");
   startScheduler(io);
 
+  // Ref 36: periodic live screen preview sweep
+  const { startScreenshotScheduler } = require("./services/screenshot-scheduler");
+  startScreenshotScheduler(io);
+
   // Start alert service
   const { startAlertService } = require("./services/alerts");
   startAlertService(io);

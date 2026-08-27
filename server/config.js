@@ -76,6 +76,17 @@ module.exports = {
   maxFileSize: Number.MAX_SAFE_INTEGER, // Effectively unlimited for BeamOS
   thumbnailWidth: 320,
   screenshotQuality: 70,
+  // Ref 36: periodic live screen preview. A background sweep
+  // (services/screenshot-scheduler.js) asks every currently-connected device for a
+  // screenshot on this interval and persists the reply to the screenshots table
+  // (unlike on-demand previews, which only stream to the dashboard, no disk write).
+  // Configurable so it can be tuned later; set to 0 to disable the sweep entirely.
+  screenshotPreviewIntervalMs:
+    parseInt(process.env.SCREENSHOT_PREVIEW_INTERVAL_MS) || 5 * 60 * 1000,
+  // Keep at most this many periodic screenshots per device (older ones pruned from
+  // the table + disk after each new insert) so neither can grow unbounded. 0 = keep all.
+  screenshotPreviewRetention:
+    parseInt(process.env.SCREENSHOT_PREVIEW_RETENTION) || 12,
   // SSL: drop your Cloudflare Origin cert + key in certs/ folder
   // or set env vars SSL_CERT and SSL_KEY to custom paths
   sslCert: process.env.SSL_CERT || path.join(certsDir, "cert.pem"),
