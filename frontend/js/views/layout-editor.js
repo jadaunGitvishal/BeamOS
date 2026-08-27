@@ -18,10 +18,25 @@ async function renderList(container) {
   container.innerHTML = `
     <div class="page-header">
       <div><h1>${t('layout.title')} <span class="help-tip" data-tip="${t('layout.help_tip')}">?</span></h1><div class="subtitle">${t('layout.subtitle')}</div></div>
-      <button class="btn btn-primary" id="newLayoutBtn">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        ${t('layout.new_layout')}
-      </button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div class="export-menu-wrap" id="exportMenuWrap">
+          <button type="button" class="btn btn-secondary" id="exportBtn" aria-haspopup="true" aria-expanded="false">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            ${t('report.export_csv')}
+          </button>
+          <div class="export-menu" id="exportMenu" role="menu">
+            <button type="button" class="export-menu-item" data-format="csv" role="menuitem">CSV</button>
+            <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">XLSX</button>
+            <button type="button" class="export-menu-item" data-format="pdf" role="menuitem">PDF</button>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="newLayoutBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          ${t('layout.new_layout')}
+        </button>
+      </div>
     </div>
     <h3 style="margin-bottom:12px;font-size:14px;color:var(--text-secondary)">${t('layout.templates')}</h3>
     <div class="content-grid" id="templateGrid"></div>
@@ -35,6 +50,8 @@ async function renderList(container) {
     const layout = await API('/layouts', { method: 'POST', body: JSON.stringify({ name, zones: [{ name: t('layout.default_zone_name'), x_percent: 0, y_percent: 0, width_percent: 100, height_percent: 100 }] }) });
     window.location.hash = `#/layout/${layout.id}`;
   };
+
+  wireExportMenu();
 
   try {
     const layouts = await API('/layouts');
@@ -73,6 +90,62 @@ async function renderList(container) {
   } catch (err) {
     showToast(err.message, 'error');
   }
+}
+
+// Wires the CSV/XLSX/PDF export dropdown. Same open/close + fetch-blob-and-
+// download behavior as the other export menus (playlists.js, widgets.js).
+function wireExportMenu() {
+  const exportMenuWrap = document.getElementById('exportMenuWrap');
+  const exportBtn = document.getElementById('exportBtn');
+
+  exportBtn.onclick = (e) => {
+    e.stopPropagation();
+    const opening = !exportMenuWrap.classList.contains('open');
+    exportMenuWrap.classList.toggle('open');
+    exportBtn.setAttribute('aria-expanded', String(opening));
+  };
+
+  document.addEventListener('click', function onDocClick(e) {
+    if (!document.body.contains(exportMenuWrap)) {
+      document.removeEventListener('click', onDocClick);
+      return;
+    }
+    if (!exportMenuWrap.contains(e.target)) {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  exportMenuWrap.querySelectorAll('.export-menu-item').forEach((item) => {
+    item.onclick = async () => {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+
+      const format = item.dataset.format;
+      const token = localStorage.getItem('token');
+      const url = `/api/layouts/export?format=${format}`;
+
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        showToast(error.error || 'Export failed', 'error');
+        return;
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `layouts.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    };
+  });
 }
 
 function renderLayoutCard(layout, isTemplate) {

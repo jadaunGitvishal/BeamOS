@@ -8,6 +8,17 @@ const { asyncHandler } = require('../lib/async-handler');
 // platform-shared pair (NULL user_id, NULL workspace_id) and are visible
 // everywhere, writable only by platform_admin.
 const { accessContext } = require('../lib/tenancy');
+const { toCsvRow } = require('../lib/csv');
+const { renderXlsx, renderPdf } = require('../lib/report-export');
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return '';
+  return new Date(epochSeconds * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+// Mirrors the other export routes' EXPORT_ROW_CAP rationale - GET / has no
+// LIMIT, this is just a safety net against a pathological workspace.
+const EXPORT_ROW_CAP = 5000;
 
 // List layouts in the caller's current workspace plus all templates.
 // Phase 2.2h: workspace-scoped. Templates (is_template=1) remain visible to
@@ -32,6 +43,75 @@ router.get('/', asyncHandler(async (req, res) => {
   for (const l of layouts) { l.zones = await zonesStmt.all(l.id); }
 
   res.json(layouts);
+}));
+
+// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping, including
+// its 3-way branch: ?templates=true (or no workspace context) -> templates
+// only; otherwise workspace_id = ? OR is_template = 1. Zone data is
+// summarized as a count (Zone Count column) rather than exported row-by-row -
+// the full zones array is nested detail data, not summary table data, and
+// doesn't fit a flat export row.
+router.get('/export', asyncHandler(async (req, res) => {
+  const showTemplates = req.query.templates === 'true';
+
+  let layouts;
+  if (showTemplates || !req.workspaceId) {
+    layouts = await db.prepare(`
+      SELECT l.*, COUNT(z.id) as zone_count
+      FROM layouts l
+      LEFT JOIN layout_zones z ON z.layout_id = l.id
+      WHERE l.is_template = 1
+      GROUP BY l.id
+      ORDER BY l.template_category, l.name
+      LIMIT ?
+    `).all(EXPORT_ROW_CAP);
+  } else {
+    layouts = await db.prepare(`
+      SELECT l.*, COUNT(z.id) as zone_count
+      FROM layouts l
+      LEFT JOIN layout_zones z ON z.layout_id = l.id
+      WHERE (l.workspace_id = ? OR l.is_template = 1)
+      GROUP BY l.id
+      ORDER BY l.is_template DESC, l.created_at DESC
+      LIMIT ?
+    `).all(req.workspaceId, EXPORT_ROW_CAP);
+  }
+
+  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+
+  const headers = ['Name', 'Template Category', 'Zone Count', 'Is Template', 'Created At (UTC)'];
+  const dataRows = layouts.map((l) => [
+    l.name,
+    l.is_template ? (l.template_category || '') : '',
+    l.zone_count,
+    l.is_template ? 'Yes' : 'No',
+    formatTimestamp(l.created_at),
+  ]);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const filenameBase = `layouts-${date}`;
+
+  if (format === 'xlsx') {
+    const buffer = await renderXlsx('Layouts', headers, dataRows);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.xlsx"`);
+    res.send(buffer);
+    return;
+  }
+
+  if (format === 'pdf') {
+    const buffer = await renderPdf('Layouts', headers, dataRows);
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.pdf"`);
+    res.send(buffer);
+    return;
+  }
+
+  const header = toCsvRow(headers);
+  const csvRows = dataRows.map((row) => toCsvRow(row));
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${filenameBase}.csv"`);
+  res.send('﻿' + [header, ...csvRows].join('\r\n'));
 }));
 
 // Phase 2.2h: workspace-aware access. Mirrors content/widget/kiosk helpers.
