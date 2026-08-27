@@ -9,6 +9,17 @@ const { asyncHandler } = require('../lib/async-handler');
 // the target. This closes a long-standing leak where POST accepted those
 // payload refs with no ownership check at all (only the target was checked).
 const { accessContext } = require('../lib/tenancy');
+const { toCsvRow } = require('../lib/csv');
+const { renderXlsx, renderPdf } = require('../lib/report-export');
+
+function formatTimestamp(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return '';
+  return new Date(epochSeconds * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+// Mirrors the other export routes' EXPORT_ROW_CAP rationale - GET / has no
+// LIMIT, this is just a safety net against a pathological workspace.
+const EXPORT_ROW_CAP = 5000;
 
 // Helper: build the expanded schedule query for a device (device-level + group-level)
 function getDeviceSchedulesQuery() {
@@ -101,6 +112,87 @@ router.get('/', asyncHandler(async (req, res) => {
 
   sql += ' ORDER BY s.start_time ASC';
   res.json(await db.prepare(sql).all(...params));
+}));
+
+// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// (s.workspace_id = ?) and the same optional device_id/group_id/start/end
+// filters, using the identical JOIN query as the source (just format
+// branching added on top).
+//
+// content_id/widget_id/playlist_id are NOT mutually exclusive at either the
+// DB level (only device_id/group_id has a CHECK constraint - see schema.sql)
+// or the UI level (schedule.js's modal has independent Content/Playlist/
+// Layout selectors with no client-side exclusion, so a schedule can carry a
+// playlist override AND a content override at once). Collapsing them into a
+// single "Content" column would silently hide that. Separate Content Name /
+// Widget Name / Playlist Name columns (blank when unset) represent this
+// safely instead of guessing at exclusivity that isn't actually enforced.
+router.get('/export', asyncHandler(async (req, res) => {
+  let schedules = [];
+  if (req.workspaceId) {
+    const { device_id, group_id, start, end } = req.query;
+    let sql = `SELECT s.*, c.filename as content_name, w.name as widget_name, p.name as playlist_name,
+               dg.name as group_name
+               FROM schedules s
+               LEFT JOIN content c ON s.content_id = c.id
+               LEFT JOIN widgets w ON s.widget_id = w.id
+               LEFT JOIN playlists p ON s.playlist_id = p.id
+               LEFT JOIN device_groups dg ON s.group_id = dg.id
+               WHERE s.workspace_id = ?`;
+    const params = [req.workspaceId];
+
+    if (device_id) {
+      sql += ` AND (s.device_id = ? OR s.group_id IN (SELECT group_id FROM device_group_members WHERE device_id = ?))`;
+      params.push(device_id, device_id);
+    }
+    if (group_id) { sql += ' AND s.group_id = ?'; params.push(group_id); }
+    if (start) { sql += ' AND s.end_time >= ?'; params.push(start); }
+    if (end) { sql += ' AND s.start_time <= ?'; params.push(end); }
+
+    sql += ' ORDER BY s.start_time ASC LIMIT ?';
+    params.push(EXPORT_ROW_CAP);
+    schedules = await db.prepare(sql).all(...params);
+  }
+
+  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+
+  const headers = ['Content Name', 'Widget Name', 'Playlist Name', 'Group Name', 'Start Time', 'End Time', 'Device ID', 'Group ID', 'Created At (UTC)'];
+  const dataRows = schedules.map((s) => [
+    s.content_name || '',
+    s.widget_name || '',
+    s.playlist_name || '',
+    s.group_name || '',
+    s.start_time || '',
+    s.end_time || '',
+    s.device_id || '',
+    s.group_id || '',
+    formatTimestamp(s.created_at),
+  ]);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const filenameBase = `schedules-${date}`;
+
+  if (format === 'xlsx') {
+    const buffer = await renderXlsx('Schedules', headers, dataRows);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.xlsx"`);
+    res.send(buffer);
+    return;
+  }
+
+  if (format === 'pdf') {
+    const buffer = await renderPdf('Schedules', headers, dataRows);
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${filenameBase}.pdf"`);
+    res.send(buffer);
+    return;
+  }
+
+  const header = toCsvRow(headers);
+  const csvRows = dataRows.map((row) => toCsvRow(row));
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${filenameBase}.csv"`);
+  res.send('﻿' + [header, ...csvRows].join('\r\n'));
 }));
 
 // Get schedules for a device. Phase 2.2m: device access via workspace_id.

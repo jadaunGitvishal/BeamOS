@@ -32,6 +32,19 @@ export async function render(container) {
   container.innerHTML = `
     <div class="page-header">
       <div><h1>${t('schedule.title')} <span class="help-tip" data-tip="${t('schedule.help_tip')}">?</span></h1><div class="subtitle">${t('schedule.subtitle')}</div></div>
+      <div class="export-menu-wrap" id="exportMenuWrap">
+        <button type="button" class="btn btn-secondary" id="exportBtn" aria-haspopup="true" aria-expanded="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          ${t('report.export_csv')}
+        </button>
+        <div class="export-menu" id="exportMenu" role="menu">
+          <button type="button" class="export-menu-item" data-format="csv" role="menuitem">CSV</button>
+          <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">XLSX</button>
+          <button type="button" class="export-menu-item" data-format="pdf" role="menuitem">PDF</button>
+        </div>
+      </div>
     </div>
     <div class="schedule-controls" style="display:flex;gap:12px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
       <select id="schedDevice" class="input" style="width:200px;max-width:100%;background:var(--bg-input)">
@@ -308,7 +321,71 @@ export async function render(container) {
   document.getElementById('prevWeek').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() - 7); loadCalendar(); };
   document.getElementById('nextWeek').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() + 7); loadCalendar(); };
 
+  wireExportMenu();
   loadCalendar();
+}
+
+// Wires the CSV/XLSX/PDF export dropdown. Same open/close + fetch-blob-and-
+// download behavior as the other export menus (playlists.js, content-library.js).
+// Scopes the export to the device currently selected in the top device filter
+// via device_id, read from the DOM at click time so switching devices keeps
+// the export in sync without extra state plumbing - same approach as
+// Content Library's folder-aware export. This is a workspace-wide data
+// export (every schedule matching the filter, not just the visible week),
+// not a visual replica of the calendar grid.
+function wireExportMenu() {
+  const exportMenuWrap = document.getElementById('exportMenuWrap');
+  const exportBtn = document.getElementById('exportBtn');
+
+  exportBtn.onclick = (e) => {
+    e.stopPropagation();
+    const opening = !exportMenuWrap.classList.contains('open');
+    exportMenuWrap.classList.toggle('open');
+    exportBtn.setAttribute('aria-expanded', String(opening));
+  };
+
+  document.addEventListener('click', function onDocClick(e) {
+    if (!document.body.contains(exportMenuWrap)) {
+      document.removeEventListener('click', onDocClick);
+      return;
+    }
+    if (!exportMenuWrap.contains(e.target)) {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  exportMenuWrap.querySelectorAll('.export-menu-item').forEach((item) => {
+    item.onclick = async () => {
+      exportMenuWrap.classList.remove('open');
+      exportBtn.setAttribute('aria-expanded', 'false');
+
+      const format = item.dataset.format;
+      const token = localStorage.getItem('token');
+      const deviceId = document.getElementById('schedDevice')?.value;
+      const url = `/api/schedules/export?format=${format}${deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ''}`;
+
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        showToast(error.error || 'Export failed', 'error');
+        return;
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `schedules.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    };
+  });
 }
 
 export function cleanup() {}
