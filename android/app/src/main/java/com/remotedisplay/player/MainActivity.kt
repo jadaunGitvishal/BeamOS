@@ -121,7 +121,9 @@ class MainActivity : AppCompatActivity() {
         )
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        contentCache = ContentCache(this)
+        // Ref 39: optional field override for the cache free-space floor (MB). 0/absent -> default (500 MB).
+        val minFreeMb = prefs.getInt("content_cache_min_free_mb", 0)
+        contentCache = if (minFreeMb > 0) ContentCache(this, minFreeMb.toLong() * 1024 * 1024) else ContentCache(this)
         screenshotCapture = ScreenshotCapture()
         touchInjector = TouchInjector()
         // Constructed here (not just in WebSocketService) so a play event that happens before
@@ -524,6 +526,10 @@ class MainActivity : AppCompatActivity() {
                         if (!downloaded) wsService?.sendContentAck(contentId, "failed")
                     }
                 }
+
+                // Ref 39: runs on every playlist sync (~45-60s), so storage is reclaimed
+                // even when nothing new downloaded this pass (e.g. another app filled the disk).
+                contentCache.enforceStorageLimit()
 
                 // Start or resume playback after downloads complete — but ONLY in
                 // single-zone/fullscreen mode. In multi-zone, ZoneManager drives each
