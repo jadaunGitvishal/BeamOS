@@ -3,10 +3,15 @@
 // Ref 46: daily / monthly automated proof-of-play reports.
 //
 // No RSM/ASM/ZM role hierarchy exists in this app, so this is scoped to the real roles:
-//   - DAILY:   one workspace-scoped proof-of-play PDF per workspace, emailed to that
-//              workspace's workspace_admin(s).
-//   - MONTHLY: one org-wide roll-up PDF (across every workspace in the org) per org,
-//              emailed to that org's org_owner(s).
+//   - DAILY:   one workspace-scoped report per workspace, emailed to that workspace's
+//              workspace_admin(s).
+//   - MONTHLY: one org-wide roll-up (across every workspace in the org) per org, emailed
+//              to that org's org_owner(s).
+//
+// Each email carries the SAME report in two formats - a PDF and an XLSX - since the
+// requirement ("email PDF/Excel summary reports") is ambiguous and both renderers already
+// exist and are proven. Each report has two sections: an operational summary (device
+// counts + period uptime) and the content-performance / proof-of-play table.
 //
 // Follows scheduler.js's setInterval pattern: instead of sleeping until midnight, the
 // sweep runs on a short interval and asks "has a day/month boundary passed since the
@@ -14,14 +19,16 @@
 // report_digest_monthly_through) makes it idempotent and restart-safe.
 //
 // Reuses lib/proof-of-play.js (the same aggregation /api/reports/summary serves),
-// lib/report-export.js renderPdf, and services/email.js sendEmail (with the new
-// attachments option). All dates are UTC.
+// lib/report-export.js renderSectionedPdf / renderSectionedXlsx, and services/email.js
+// sendEmail (with the attachments option). All dates are UTC.
 
 const { db: defaultDb } = require('../db/database');
 const defaultEmail = require('./email');
 const config = require('../config');
 const { getProofOfPlaySummary } = require('../lib/proof-of-play');
-const { renderPdf } = require('../lib/report-export');
+const { renderSectionedPdf, renderSectionedXlsx } = require('../lib/report-export');
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 const DAILY_KEY = 'report_digest_daily_through';   // 'YYYY-MM-DD' of the last day reported
 const MONTHLY_KEY = 'report_digest_monthly_through'; // 'YYYY-MM' of the last month reported
@@ -86,26 +93,95 @@ async function resolveOrgOwners(db, organizationId) {
     .all(organizationId);
 }
 
-// ---- PDF ---------------------------------------------------------------
+// ---- operational stats --------------------------------------------------
+
+// Device / operational snapshot for a report scope.
+//   deviceFilterSql  - a WHERE fragment on `devices` (e.g. "workspace_id = ?")
+//   dayFilterSql     - a WHERE fragment on device_usage_daily.day ("day = ?" / "day LIKE ?")
+//
+// Uptime % comes from device_usage_daily (the billing-grade accrual that
+// heartbeat.js UPSERTs every tick, and the source the dashboard /availability widget
+// uses) rather than the heartbeat-count /uptime estimate: the accrual is the
+// authoritative record of actual online-seconds per UTC day, the digest's periods are
+// already whole UTC days / months, so it needs no fixed-cadence estimation and can't
+// exceed 100%. Online / offline "now" is the persisted devices.status (lags a live
+// disconnect by the offline-timeout, which is fine for a daily/monthly summary).
+async function getOperationalSummary(db, { deviceFilterSql, deviceFilterParams, dayFilterSql, dayFilterParams }) {
+  const counts = await db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online
+         FROM devices WHERE ${deviceFilterSql}`,
+    )
+    .get(...deviceFilterParams);
+
+  const uptime = await db
+    .prepare(
+      `SELECT ROUND(SUM(online_seconds) / (COUNT(*) * 86400) * 100, 1) AS pct
+         FROM device_usage_daily
+        WHERE ${dayFilterSql}
+          AND device_id IN (SELECT id FROM devices WHERE ${deviceFilterSql})`,
+    )
+    .get(...dayFilterParams, ...deviceFilterParams);
+
+  const total = Number(counts?.total || 0);
+  const online = Number(counts?.online || 0);
+  return {
+    total_devices: total,
+    online,
+    offline: total - online,
+    avg_uptime_pct: uptime && uptime.pct != null ? Number(uptime.pct) : null,
+  };
+}
+
+// ---- report rendering -------------------------------------------------
 
 function slug(s) {
   return String(s || 'report').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40) || 'report';
 }
 
-// Renders the summary's by-content breakdown as a proof-of-play PDF (reuses the shared
-// renderPdf table renderer). Totals go in the title line.
-function renderSummaryPdf(titlePrefix, periodLabel, summary) {
-  const o = summary.overall;
-  const title = `${titlePrefix} — ${periodLabel}   (${o.total_plays} plays · ${o.total_hours}h · ${o.unique_content} items · ${o.unique_devices} devices)`;
-  const headers = ['Content', 'Plays', 'Total Hours', 'Completion %'];
-  const rows = summary.by_content.map((c) => [
+// The two sections shared by the PDF and the XLSX rendering of a digest report.
+function buildReportSections(summary, ops) {
+  const opsRows = [
+    ['Total devices', ops.total_devices],
+    ['Online now', ops.online],
+    ['Offline now', ops.offline],
+    ['Avg uptime (period)', ops.avg_uptime_pct == null ? 'n/a' : `${ops.avg_uptime_pct}%`],
+  ];
+
+  const contentRows = summary.by_content.map((c) => [
     c.content_name || 'Unknown',
     c.plays,
     (c.total_seconds / 3600).toFixed(1),
-    c.plays > 0 ? Math.round((c.completed_plays / c.plays) * 100) + '%' : '0%',
+    c.plays > 0 ? `${Math.round((c.completed_plays / c.plays) * 100)}%` : '0%',
   ]);
-  if (!rows.length) rows.push(['(no plays recorded in this period)', '0', '0.0', '0%']);
-  return renderPdf(title, headers, rows);
+  if (!contentRows.length) contentRows.push(['(no plays recorded in this period)', '0', '0.0', '0%']);
+
+  return [
+    { heading: 'Operational Summary', headers: ['Metric', 'Value'], rows: opsRows },
+    { heading: 'Content Performance', headers: ['Content', 'Plays', 'Total Hours', 'Completion %'], rows: contentRows },
+  ];
+}
+
+// Renders the digest report as BOTH a PDF and an XLSX (same two sections in each).
+async function renderReportFiles(titlePrefix, periodLabel, summary, ops) {
+  const o = summary.overall;
+  const title = `${titlePrefix} — ${periodLabel}   (${o.total_plays} plays · ${o.total_hours}h · ${o.unique_content} items · ${o.unique_devices} devices)`;
+  const sections = buildReportSections(summary, ops);
+  const [pdf, xlsx] = await Promise.all([renderSectionedPdf(title, sections), renderSectionedXlsx(sections)]);
+  return { pdf, xlsx };
+}
+
+function reportAttachments(base, pdf, xlsx) {
+  return [
+    { filename: `${base}.pdf`, content: pdf, contentType: 'application/pdf' },
+    { filename: `${base}.xlsx`, content: xlsx, contentType: XLSX_MIME },
+  ];
+}
+
+function opsLine(ops) {
+  const up = ops.avg_uptime_pct == null ? 'n/a' : `${ops.avg_uptime_pct}%`;
+  return `Devices: ${ops.online}/${ops.total_devices} online now, avg uptime ${up} for the period.`;
 }
 
 // ---- core ------------------------------------------------------------
@@ -130,18 +206,25 @@ async function runDailyDigests(db, email, now) {
         startEpoch,
         endEpoch,
       });
-      const pdf = await renderSummaryPdf(`Proof of Play — ${ws.name}`, target, summary);
-      const filename = `proof-of-play-${slug(ws.name)}-${target}.pdf`;
+      const ops = await getOperationalSummary(db, {
+        deviceFilterSql: 'workspace_id = ?',
+        deviceFilterParams: [ws.id],
+        dayFilterSql: 'day = ?',
+        dayFilterParams: [target],
+      });
+      const { pdf, xlsx } = await renderReportFiles(`Proof of Play — ${ws.name}`, target, summary, ops);
+      const base = `proof-of-play-${slug(ws.name)}-${target}`;
 
       for (const a of admins) {
         await email.sendEmail({
           to: a.email,
           subject: `Daily proof-of-play — ${ws.name} — ${target}`,
           text:
-            `Attached is the proof-of-play summary for "${ws.name}" on ${target} (UTC).\n\n` +
+            `Attached is the proof-of-play summary for "${ws.name}" on ${target} (UTC), as PDF and Excel.\n\n` +
             `${summary.overall.total_plays} plays across ${summary.overall.unique_devices} device(s), ` +
-            `${summary.overall.total_hours} hours total.`,
-          attachments: [{ filename, content: pdf, contentType: 'application/pdf' }],
+            `${summary.overall.total_hours} hours total.\n` +
+            opsLine(ops),
+          attachments: reportAttachments(base, pdf, xlsx),
         });
         sent++;
       }
@@ -151,7 +234,7 @@ async function runDailyDigests(db, email, now) {
   }
 
   await setSetting(db, DAILY_KEY, target);
-  console.log(`[report-digest] daily digests for ${target}: ${sent} email(s) across ${workspaces.length} workspace(s)`);
+  console.log(`[report-digest] daily digests for ${target}: ${sent} email(s) (PDF+XLSX) across ${workspaces.length} workspace(s)`);
   return { ran: true, target, sent };
 }
 
@@ -178,8 +261,14 @@ async function runMonthlyRollups(db, email, now) {
         startEpoch,
         endEpoch,
       });
-      const pdf = await renderSummaryPdf(`Proof of Play — ${org.name} (org-wide)`, target, summary);
-      const filename = `proof-of-play-${slug(org.name)}-${target}.pdf`;
+      const ops = await getOperationalSummary(db, {
+        deviceFilterSql: 'workspace_id IN (SELECT id FROM workspaces WHERE organization_id = ?)',
+        deviceFilterParams: [org.id],
+        dayFilterSql: 'day LIKE ?',
+        dayFilterParams: [`${target}-%`], // target is 'YYYY-MM'
+      });
+      const { pdf, xlsx } = await renderReportFiles(`Proof of Play — ${org.name} (org-wide)`, target, summary, ops);
+      const base = `proof-of-play-${slug(org.name)}-${target}`;
 
       for (const o of owners) {
         await email.sendEmail({
@@ -187,10 +276,11 @@ async function runMonthlyRollups(db, email, now) {
           subject: `Monthly proof-of-play roll-up — ${org.name} — ${target}`,
           text:
             `Attached is the org-wide proof-of-play roll-up for "${org.name}" for ${target} (UTC), ` +
-            `across every workspace in the organization.\n\n` +
+            `across every workspace in the organization, as PDF and Excel.\n\n` +
             `${summary.overall.total_plays} plays across ${summary.overall.unique_devices} device(s), ` +
-            `${summary.overall.total_hours} hours total.`,
-          attachments: [{ filename, content: pdf, contentType: 'application/pdf' }],
+            `${summary.overall.total_hours} hours total.\n` +
+            opsLine(ops),
+          attachments: reportAttachments(base, pdf, xlsx),
         });
         sent++;
       }
@@ -200,7 +290,7 @@ async function runMonthlyRollups(db, email, now) {
   }
 
   await setSetting(db, MONTHLY_KEY, target);
-  console.log(`[report-digest] monthly rollups for ${target}: ${sent} email(s) across ${orgs.length} org(s)`);
+  console.log(`[report-digest] monthly rollups for ${target}: ${sent} email(s) (PDF+XLSX) across ${orgs.length} org(s)`);
   return { ran: true, target, sent };
 }
 
@@ -234,7 +324,8 @@ async function runReportDigests(db = defaultDb, email = defaultEmail, opts = {})
     monthly = { ran: false, target: null, sent: 0, error: e.message };
   }
 
-  const part = (r) => (r.error ? `error (${r.error})` : r.ran ? `sent ${r.sent}` : 'skipped');
+  // Each sent email carries a PDF + an XLSX, so note that on the parts that did work.
+  const part = (r) => (r.error ? `error (${r.error})` : r.ran ? `sent ${r.sent} (pdf+xlsx)` : 'skipped');
   console.log(`[report-digest] tick: daily ${part(daily)}, monthly ${part(monthly)}`);
 
   return { daily, monthly };
@@ -257,7 +348,9 @@ module.exports = {
   runMonthlyRollups,
   resolveWorkspaceAdmins,
   resolveOrgOwners,
-  renderSummaryPdf,
+  getOperationalSummary,
+  buildReportSections,
+  renderReportFiles,
   DAILY_KEY,
   MONTHLY_KEY,
 };

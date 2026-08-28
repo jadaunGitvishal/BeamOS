@@ -4,15 +4,21 @@
 //
 // In-process against the real MySQL (like the other integration tests). Seeds one org
 // with two workspaces, a workspace_admin per workspace, an org_owner, a non-admin
-// member, and play_logs dated into "yesterday" and "last month". Then drives the
-// report-digest core and asserts recipients, PDF validity, and idempotency.
+// member, play_logs dated into "yesterday" and "last month", device status, and
+// device_usage_daily rows. Then drives the report-digest core and asserts recipients,
+// PDF + XLSX validity (incl. the operational-stats section), and idempotency.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const ExcelJS = require('exceljs');
 
 const { db } = require('../db/database');
 const digest = require('../services/report-digest');
+const { extractCells } = require('../scripts/pdf-text-dump');
 
 const RID = 'RD-' + crypto.randomBytes(4).toString('hex');
 const id = (s) => `${RID}-${s}`;
@@ -39,8 +45,19 @@ before(async () => {
   await db.prepare('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)').run(id('ws1'), id('u-viewer'), 'workspace_viewer');
   await db.prepare('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)').run(id('ws2'), id('u-wsadmin2'), 'workspace_admin');
 
-  await db.prepare('INSERT INTO devices (id, workspace_id, name) VALUES (?, ?, ?)').run(id('d1'), id('ws1'), `${RID} Device 1`);
-  await db.prepare('INSERT INTO devices (id, workspace_id, name) VALUES (?, ?, ?)').run(id('d2'), id('ws2'), `${RID} Device 2`);
+  await db.prepare('INSERT INTO devices (id, workspace_id, name, status) VALUES (?, ?, ?, ?)').run(id('d1'), id('ws1'), `${RID} Device 1`, 'online');
+  await db.prepare('INSERT INTO devices (id, workspace_id, name, status) VALUES (?, ?, ?, ?)').run(id('d2'), id('ws2'), `${RID} Device 2`, 'offline');
+
+  // device_usage_daily (billing-grade online-seconds accrual) - the source getOperationalSummary
+  // reads for period uptime %. yesterday: d1 full day (100%), d2 half day (50%).
+  const yDay = yesterday.toISOString().slice(0, 10);
+  const lmDay = new Date(lastMonthMid * 1000).toISOString().slice(0, 10);
+  const usage = (dev, day, secs) =>
+    db.prepare('INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)').run(dev, day, secs);
+  await usage(id('d1'), yDay, 86400);
+  await usage(id('d2'), yDay, 43200);
+  await usage(id('d1'), lmDay, 86400);
+  await usage(id('d2'), lmDay, 21600);
 
   // content_id left NULL (FK to content); the summary groups by (content_id, content_name)
   // so grouping still works by name.
@@ -64,6 +81,7 @@ before(async () => {
 
 after(async () => {
   await db.prepare('DELETE FROM play_logs WHERE device_id IN (?, ?)').run(id('d1'), id('d2'));
+  await db.prepare('DELETE FROM device_usage_daily WHERE device_id IN (?, ?)').run(id('d1'), id('d2'));
   await db.prepare('DELETE FROM devices WHERE id IN (?, ?)').run(id('d1'), id('d2'));
   await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces + members
   await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
@@ -78,7 +96,29 @@ function fakeEmail() {
 
 const isPdf = (buf) => Buffer.isBuffer(buf) && buf.slice(0, 5).toString('latin1') === '%PDF-';
 
-test('daily: one PDF per workspace to that workspace_admin(s); not to non-admins', async () => {
+// Pulls every rendered text cell out of a PDF buffer (via the pdf-text-dump utility).
+function pdfTextOf(buf) {
+  const tmp = path.join(os.tmpdir(), `rd-test-${crypto.randomBytes(4).toString('hex')}.pdf`);
+  fs.writeFileSync(tmp, buf);
+  try {
+    return extractCells(tmp).map((c) => c.str).join(' ');
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+}
+
+async function opsPairsFromXlsx(buf) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf);
+  const sheet = wb.getWorksheet('Operational Summary');
+  const pairs = new Map();
+  sheet.eachRow((row, n) => {
+    if (n > 1) pairs.set(String(row.getCell(1).value), String(row.getCell(2).value));
+  });
+  return { wb, pairs };
+}
+
+test('daily: PDF + XLSX per workspace to that workspace_admin(s); not to non-admins', async () => {
   const mail = fakeEmail();
   const res = await digest.runDailyDigests(db, mail, now);
   assert.equal(res.ran, true);
@@ -91,12 +131,34 @@ test('daily: one PDF per workspace to that workspace_admin(s); not to non-admins
 
   const m1 = byTo.get(email('wsadmin1'));
   assert.match(m1.subject, new RegExp(`Daily proof-of-play .* ${RID} WS One`), 'subject names the workspace');
-  assert.equal(m1.attachments.length, 1);
-  assert.match(m1.attachments[0].filename, /\.pdf$/);
-  assert.equal(m1.attachments[0].contentType, 'application/pdf');
-  assert.ok(isPdf(m1.attachments[0].content), 'attachment is a valid PDF (starts with %PDF-)');
+
+  // both formats attached
+  assert.equal(m1.attachments.length, 2);
+  const pdfAtt = m1.attachments.find((a) => a.filename.endsWith('.pdf'));
+  const xlsxAtt = m1.attachments.find((a) => a.filename.endsWith('.xlsx'));
+  assert.ok(pdfAtt && xlsxAtt, 'a PDF and an XLSX attachment');
+  assert.equal(pdfAtt.contentType, 'application/pdf');
+  assert.equal(xlsxAtt.contentType, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  assert.ok(isPdf(pdfAtt.content), 'PDF attachment starts with %PDF-');
+
+  // PDF carries both sections
+  const pdfText = pdfTextOf(pdfAtt.content);
+  assert.match(pdfText, /Operational Summary/);
+  assert.match(pdfText, /Total devices/);
+  assert.match(pdfText, /Avg uptime \(period\)/);
+  assert.match(pdfText, /Content Performance/);
+
+  // XLSX opens, both sheets present, operational numbers correct (ws1 = d1 only, online, full day)
+  const { wb, pairs } = await opsPairsFromXlsx(xlsxAtt.content);
+  assert.ok(wb.getWorksheet('Content Performance'), 'Content Performance sheet present');
+  assert.equal(pairs.get('Total devices'), '1');
+  assert.equal(pairs.get('Online now'), '1');
+  assert.equal(pairs.get('Offline now'), '0');
+  assert.equal(pairs.get('Avg uptime (period)'), '100%');
+
   // ws1 had 3 plays yesterday, ws2 not counted here
   assert.match(m1.text, /3 plays across 1 device/);
+  assert.match(m1.text, /Devices: 1\/1 online now, avg uptime 100%/);
 });
 
 test('monthly: one org-wide roll-up to org_owner(s), across all workspaces in the org', async () => {
@@ -110,9 +172,37 @@ test('monthly: one org-wide roll-up to org_owner(s), across all workspaces in th
 
   const m = toOwner[0];
   assert.match(m.subject, new RegExp(`Monthly proof-of-play roll-up .* ${RID} Org`));
-  assert.ok(isPdf(m.attachments[0].content), 'monthly attachment is a valid PDF');
+  assert.equal(m.attachments.length, 2);
+  const pdfAtt = m.attachments.find((a) => a.filename.endsWith('.pdf'));
+  const xlsxAtt = m.attachments.find((a) => a.filename.endsWith('.xlsx'));
+  assert.ok(isPdf(pdfAtt.content), 'monthly PDF attachment is valid');
+  assert.match(pdfTextOf(pdfAtt.content), /Operational Summary/);
+
+  // org-wide: both devices, d1 online / d2 offline; uptime (86400+21600)/(2*86400) = 62.5%
+  const { wb, pairs } = await opsPairsFromXlsx(xlsxAtt.content);
+  assert.ok(wb.getWorksheet('Content Performance'), 'Content Performance sheet present');
+  assert.equal(pairs.get('Total devices'), '2');
+  assert.equal(pairs.get('Online now'), '1');
+  assert.equal(pairs.get('Offline now'), '1');
+  assert.equal(pairs.get('Avg uptime (period)'), '62.5%');
+
   // last month: 1 play on d1 + 1 on d2 = 2 plays across 2 devices (org-wide rollup)
   assert.match(m.text, /2 plays across 2 device/);
+  assert.match(m.text, /Devices: 1\/2 online now, avg uptime 62\.5%/);
+});
+
+test('operational summary: device counts + period uptime from device_usage_daily', async () => {
+  const ops = await digest.getOperationalSummary(db, {
+    deviceFilterSql: 'workspace_id IN (SELECT id FROM workspaces WHERE organization_id = ?)',
+    deviceFilterParams: [id('org')],
+    dayFilterSql: 'day = ?',
+    dayFilterParams: [yesterday.toISOString().slice(0, 10)],
+  });
+  assert.equal(ops.total_devices, 2);
+  assert.equal(ops.online, 1);
+  assert.equal(ops.offline, 1);
+  // (86400 + 43200) / (2 * 86400) * 100 = 75
+  assert.equal(ops.avg_uptime_pct, 75);
 });
 
 test('idempotent: a second run with the same clock sends nothing (watermark advanced)', async () => {
@@ -174,7 +264,7 @@ test('tick summary: logged as "sent N" on a tick where work happened', async () 
 
   const summaries = lines.filter((l) => l.startsWith('[report-digest] tick:'));
   assert.equal(summaries.length, 1, 'exactly one tick summary line');
-  assert.match(summaries[0], /^\[report-digest\] tick: daily sent \d+, monthly sent \d+$/);
+  assert.match(summaries[0], /^\[report-digest\] tick: daily sent \d+ \(pdf\+xlsx\), monthly sent \d+ \(pdf\+xlsx\)$/);
 });
 
 test('tick summary: still logged as "skipped" on a nothing-due tick (watermark caught up)', async () => {

@@ -3,12 +3,8 @@
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
 
-// Renders a single-sheet workbook and returns it as a Buffer.
-// headers: string[]; rows: array of arrays (same order as headers).
-async function renderXlsx(sheetName, headers, rows) {
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet(sheetName);
-
+// Fills one worksheet: bold header row, data rows, character-count column autofit.
+function fillSheet(sheet, headers, rows) {
   sheet.addRow(headers);
   sheet.getRow(1).font = { bold: true };
   rows.forEach((row) => sheet.addRow(row));
@@ -21,7 +17,37 @@ async function renderXlsx(sheetName, headers, rows) {
     });
     column.width = Math.min(maxLength + 2, 40);
   });
+}
 
+// Excel worksheet names: <= 31 chars, and none of  : \ / ? * [ ]  — plus no dupes.
+function sheetSafeName(name, used) {
+  const base = String(name || 'Sheet').replace(/[:\\/?*[\]]/g, ' ').trim().slice(0, 31) || 'Sheet';
+  let candidate = base;
+  let i = 2;
+  while (used.has(candidate.toLowerCase())) {
+    const suffix = ` (${i++})`;
+    candidate = base.slice(0, 31 - suffix.length) + suffix;
+  }
+  used.add(candidate.toLowerCase());
+  return candidate;
+}
+
+// Renders a single-sheet workbook and returns it as a Buffer.
+// headers: string[]; rows: array of arrays (same order as headers).
+async function renderXlsx(sheetName, headers, rows) {
+  const workbook = new ExcelJS.Workbook();
+  fillSheet(workbook.addWorksheet(sheetSafeName(sheetName, new Set())), headers, rows);
+  return workbook.xlsx.writeBuffer();
+}
+
+// Multi-section workbook: one worksheet per section.
+// sections: [{ heading, headers, rows }].
+async function renderSectionedXlsx(sections) {
+  const workbook = new ExcelJS.Workbook();
+  const used = new Set();
+  for (const s of sections) {
+    fillSheet(workbook.addWorksheet(sheetSafeName(s.heading, used)), s.headers, s.rows);
+  }
   return workbook.xlsx.writeBuffer();
 }
 
@@ -96,91 +122,129 @@ function autoColumnWidths(doc, headers, rows, usableWidth, { padding = 8, maxSha
 
 const PDF_FOOTER_NOTE = 'For complete, untruncated data, export as CSV or XLSX.';
 
-// Renders a simple tabular PDF (title + header row + data rows) and
-// returns it as a Buffer. Column widths auto-fit to content by default
-// (see autoColumnWidths, computed from real font metrics); pass
-// `columnWidths` (relative weights, same length as `headers`) to override
-// with an explicit proportional layout instead.
-function renderPdf(title, headers, rows, { columnWidths } = {}) {
+// Draws one table (header row + data rows, with page-break repetition of the
+// header) starting at the current doc.y. Returns the y just below the last row.
+// `columnWidths` (relative weights) overrides the font-metric autofit.
+function drawTable(doc, headers, rows, { columnWidths } = {}) {
+  const startX = doc.page.margins.left;
+  const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  let colWidths;
+  if (columnWidths) {
+    const weightSum = columnWidths.reduce((a, b) => a + b, 0);
+    colWidths = columnWidths.map((w) => (w / weightSum) * usableWidth);
+  } else {
+    colWidths = autoColumnWidths(doc, headers, rows, usableWidth);
+  }
+  const colX = colWidths.reduce((acc, w, i) => {
+    acc.push(i === 0 ? startX : acc[i - 1] + colWidths[i - 1]);
+    return acc;
+  }, []);
+  const rowHeight = 18;
+  const bottomLimit = doc.page.height - doc.page.margins.bottom;
+
+  function drawRow(values, y, bold) {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
+    values.forEach((value, i) => {
+      doc.text(value === null || value === undefined ? '' : String(value), colX[i], y, {
+        width: colWidths[i] - 4,
+        // height caps this to a single line so pdfkit truncates with an
+        // ellipsis instead of wrapping - without it, `ellipsis` is a no-op
+        // and overflow text wraps onto extra lines that overlap the next
+        // fixed-height row.
+        height: rowHeight - 6,
+        ellipsis: true,
+      });
+    });
+  }
+
+  let y = doc.y;
+  drawRow(headers, y, true);
+  y += rowHeight;
+  doc
+    .moveTo(startX, y - 4)
+    .lineTo(startX + usableWidth, y - 4)
+    .strokeColor('#cccccc')
+    .stroke();
+
+  rows.forEach((row) => {
+    if (y + rowHeight > bottomLimit) {
+      doc.addPage();
+      y = doc.page.margins.top;
+      drawRow(headers, y, true);
+      y += rowHeight;
+    }
+    drawRow(row, y, false);
+    y += rowHeight;
+  });
+
+  doc.y = y;
+  return y;
+}
+
+function finishPdfWithFooter(doc) {
+  const startX = doc.page.margins.left;
+  const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  // Footer note sits inside the bottom margin (below bottomLimit, the area
+  // the table itself is kept out of). pdfkit's text() auto-paginates any
+  // draw whose y falls past page.height - margins.bottom, which this one
+  // deliberately does - so the bottom margin is dropped to 0 for just this
+  // call, otherwise it silently spills onto a new, otherwise-blank page.
+  const footerY = doc.page.height - doc.page.margins.bottom + 8;
+  const savedBottomMargin = doc.page.margins.bottom;
+  doc.page.margins.bottom = 0;
+  doc
+    .font('Helvetica')
+    .fontSize(7)
+    .fillColor('#999999')
+    .text(PDF_FOOTER_NOTE, startX, footerY, { width: usableWidth, align: 'left' })
+    .fillColor('black');
+  doc.page.margins.bottom = savedBottomMargin;
+}
+
+function newPdfDoc(build) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 36, size: 'A4', layout: 'landscape' });
     const chunks = [];
     doc.on('data', (chunk) => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
-
-    doc.fontSize(16).font('Helvetica-Bold').text(title, { align: 'left' });
-    doc.moveDown(0.5);
-
-    const startX = doc.page.margins.left;
-    const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-    let colWidths;
-    if (columnWidths) {
-      const weightSum = columnWidths.reduce((a, b) => a + b, 0);
-      colWidths = columnWidths.map((w) => (w / weightSum) * usableWidth);
-    } else {
-      colWidths = autoColumnWidths(doc, headers, rows, usableWidth);
-    }
-    const colX = colWidths.reduce((acc, w, i) => {
-      acc.push(i === 0 ? startX : acc[i - 1] + colWidths[i - 1]);
-      return acc;
-    }, []);
-    const rowHeight = 18;
-    const bottomLimit = doc.page.height - doc.page.margins.bottom;
-
-    function drawRow(values, y, bold) {
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
-      values.forEach((value, i) => {
-        doc.text(value === null || value === undefined ? '' : String(value), colX[i], y, {
-          width: colWidths[i] - 4,
-          // height caps this to a single line so pdfkit truncates with an
-          // ellipsis instead of wrapping - without it, `ellipsis` is a no-op
-          // and overflow text wraps onto extra lines that overlap the next
-          // fixed-height row.
-          height: rowHeight - 6,
-          ellipsis: true,
-        });
-      });
-    }
-
-    let y = doc.y;
-    drawRow(headers, y, true);
-    y += rowHeight;
-    doc
-      .moveTo(startX, y - 4)
-      .lineTo(startX + usableWidth, y - 4)
-      .strokeColor('#cccccc')
-      .stroke();
-
-    rows.forEach((row) => {
-      if (y + rowHeight > bottomLimit) {
-        doc.addPage();
-        y = doc.page.margins.top;
-        drawRow(headers, y, true);
-        y += rowHeight;
-      }
-      drawRow(row, y, false);
-      y += rowHeight;
-    });
-
-    // Footer note sits inside the bottom margin (below bottomLimit, the area
-    // the table itself is kept out of). pdfkit's text() auto-paginates any
-    // draw whose y falls past page.height - margins.bottom, which this one
-    // deliberately does - so the bottom margin is dropped to 0 for just this
-    // call, otherwise it silently spills onto a new, otherwise-blank page.
-    const footerY = doc.page.height - doc.page.margins.bottom + 8;
-    const savedBottomMargin = doc.page.margins.bottom;
-    doc.page.margins.bottom = 0;
-    doc
-      .font('Helvetica')
-      .fontSize(7)
-      .fillColor('#999999')
-      .text(PDF_FOOTER_NOTE, startX, footerY, { width: usableWidth, align: 'left' })
-      .fillColor('black');
-    doc.page.margins.bottom = savedBottomMargin;
-
+    build(doc);
+    finishPdfWithFooter(doc);
     doc.end();
   });
 }
 
-module.exports = { renderXlsx, renderPdf };
+// Renders a simple tabular PDF (title + header row + data rows) and
+// returns it as a Buffer. Column widths auto-fit to content by default
+// (see autoColumnWidths, computed from real font metrics); pass
+// `columnWidths` (relative weights, same length as `headers`) to override
+// with an explicit proportional layout instead.
+function renderPdf(title, headers, rows, { columnWidths } = {}) {
+  return newPdfDoc((doc) => {
+    doc.fontSize(16).font('Helvetica-Bold').text(title, { align: 'left' });
+    doc.moveDown(0.5);
+    drawTable(doc, headers, rows, { columnWidths });
+  });
+}
+
+// Multi-section PDF: one title, then each section as a bold heading + its own
+// table. sections: [{ heading, headers, rows, columnWidths? }].
+function renderSectionedPdf(title, sections) {
+  return newPdfDoc((doc) => {
+    const startX = doc.page.margins.left;
+    doc.fontSize(16).font('Helvetica-Bold').text(title, { align: 'left' });
+    doc.moveDown(0.5);
+
+    sections.forEach((section, idx) => {
+      if (idx > 0) doc.moveDown(1);
+      const bottomLimit = doc.page.height - doc.page.margins.bottom;
+      // keep a heading + at least its own header row together
+      if (doc.y + 48 > bottomLimit) doc.addPage();
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('black').text(section.heading, startX, doc.y);
+      doc.moveDown(0.3);
+      drawTable(doc, section.headers, section.rows, { columnWidths: section.columnWidths });
+    });
+  });
+}
+
+module.exports = { renderXlsx, renderPdf, renderSectionedXlsx, renderSectionedPdf };
