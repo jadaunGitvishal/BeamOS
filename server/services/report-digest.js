@@ -205,18 +205,47 @@ async function runMonthlyRollups(db, email, now) {
 }
 
 // Testable core: pass a db handle, an email impl ({ sendEmail }), and optionally a fixed
-// `now` (ms or Date). Never throws.
+// `now` (ms or Date).
+//
+// Never throws: the daily and monthly runs are each wrapped here, so a failure in one
+// (including the outer watermark getSetting / SELECT / setSetting queries that live
+// outside runDaily/runMonthly's per-item try/catch) is logged with its full stack and
+// reported as { ran: false, error } — without aborting the other run or crashing the tick.
+//
+// Always logs a one-line `[report-digest] tick: ...` summary, whether or not any work
+// happened, so a healthy "nothing due" tick is visibly distinguishable in the logs from
+// a dead / crash-looping service.
 async function runReportDigests(db = defaultDb, email = defaultEmail, opts = {}) {
   const now = opts.now ? new Date(opts.now) : new Date();
-  const daily = await runDailyDigests(db, email, now);
-  const monthly = await runMonthlyRollups(db, email, now);
+
+  let daily;
+  try {
+    daily = await runDailyDigests(db, email, now);
+  } catch (e) {
+    console.error(`[report-digest] daily run failed: ${e.stack || e.message}`);
+    daily = { ran: false, target: null, sent: 0, error: e.message };
+  }
+
+  let monthly;
+  try {
+    monthly = await runMonthlyRollups(db, email, now);
+  } catch (e) {
+    console.error(`[report-digest] monthly run failed: ${e.stack || e.message}`);
+    monthly = { ran: false, target: null, sent: 0, error: e.message };
+  }
+
+  const part = (r) => (r.error ? `error (${r.error})` : r.ran ? `sent ${r.sent}` : 'skipped');
+  console.log(`[report-digest] tick: daily ${part(daily)}, monthly ${part(monthly)}`);
+
   return { daily, monthly };
 }
 
 function startReportDigests() {
   const interval = config.reportDigestIntervalMs;
   setInterval(() => {
-    runReportDigests().catch((e) => console.error('[report-digest] tick failed:', e.message));
+    // runReportDigests never throws; keep the guard as a backstop and log the full stack
+    // (not just the message) if it somehow ever does.
+    runReportDigests().catch((e) => console.error(`[report-digest] tick failed: ${e.stack || e.message}`));
   }, interval);
   console.log(`Report digest service started (every ${Math.round(interval / 1000)}s)`);
 }

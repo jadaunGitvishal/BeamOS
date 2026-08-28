@@ -152,3 +152,42 @@ test('real email.js path: unconfigured SMTP still makes a logged send attempt wi
     'the log records the PDF attachment',
   );
 });
+
+// Ref 46 / observability fix: runReportDigests() must emit exactly one
+// `[report-digest] tick: ...` summary line on EVERY call, so a healthy "nothing due"
+// tick is distinguishable in the logs from a dead / crash-looping service.
+function captureRun(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => { lines.push(a.join(' ')); };
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => { console.log = orig; })
+    .then(() => lines);
+}
+
+test('tick summary: logged as "sent N" on a tick where work happened', async () => {
+  await db.prepare('DELETE FROM app_settings WHERE `key` IN (?, ?)').run(digest.DAILY_KEY, digest.MONTHLY_KEY);
+  const mail = fakeEmail();
+
+  const lines = await captureRun(() => digest.runReportDigests(db, mail, { now: now.getTime() }));
+
+  const summaries = lines.filter((l) => l.startsWith('[report-digest] tick:'));
+  assert.equal(summaries.length, 1, 'exactly one tick summary line');
+  assert.match(summaries[0], /^\[report-digest\] tick: daily sent \d+, monthly sent \d+$/);
+});
+
+test('tick summary: still logged as "skipped" on a nothing-due tick (watermark caught up)', async () => {
+  // First run advances both watermarks to the current targets...
+  await db.prepare('DELETE FROM app_settings WHERE `key` IN (?, ?)').run(digest.DAILY_KEY, digest.MONTHLY_KEY);
+  await digest.runReportDigests(db, fakeEmail(), { now: now.getTime() });
+
+  // ...so this second run with the same clock has nothing due.
+  const mail = fakeEmail();
+  const lines = await captureRun(() => digest.runReportDigests(db, mail, { now: now.getTime() }));
+
+  assert.equal(mail.sent.length, 0, 'nothing re-sent');
+  const summaries = lines.filter((l) => l.startsWith('[report-digest] tick:'));
+  assert.equal(summaries.length, 1, 'the summary line is still emitted when nothing was due');
+  assert.equal(summaries[0], '[report-digest] tick: daily skipped, monthly skipped');
+});
