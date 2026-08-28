@@ -529,7 +529,22 @@ class MainActivity : AppCompatActivity() {
 
                 // Ref 39: runs on every playlist sync (~45-60s), so storage is reclaimed
                 // even when nothing new downloaded this pass (e.g. another app filled the disk).
-                contentCache.enforceStorageLimit()
+                // Protect every content id the current playlist still needs from eviction -
+                // same filtering as the download loop above (skip widgets, empty ids, and
+                // remote-url items, which aren't cached locally).
+                val playlistContentIds = buildSet {
+                    for (i in 0 until assignments.length()) {
+                        val a = assignments.getJSONObject(i)
+                        val wId = if (a.isNull("widget_id")) "" else a.optString("widget_id", "")
+                        if (wId.isNotEmpty()) continue
+                        val cId = if (a.isNull("content_id")) "" else a.optString("content_id", "")
+                        if (cId.isEmpty()) continue
+                        val rUrl = a.optString("remote_url", null)
+                        if (!rUrl.isNullOrEmpty()) continue
+                        add(cId)
+                    }
+                }
+                contentCache.enforceStorageLimit(keepIds = playlistContentIds)
 
                 // Start or resume playback after downloads complete — but ONLY in
                 // single-zone/fullscreen mode. In multi-zone, ZoneManager drives each

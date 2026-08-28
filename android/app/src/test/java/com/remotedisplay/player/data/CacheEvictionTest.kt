@@ -46,6 +46,47 @@ class CacheEvictionTest {
         assertEquals(listOf("stale"), plan)
     }
 
+    @Test fun multipleKeepIdsAllProtectedSimultaneously() {
+        // The whole current playlist (play1..play3) must survive; only the two stale,
+        // non-playlist entries are eligible.
+        val entries = listOf(
+            e("play1", 150, 10),
+            e("play2", 150, 11),
+            e("play3", 150, 12),
+            e("stale1", 150, 1),
+            e("stale2", 150, 2),
+        )
+        // free=150, need 500 -> reclaim >=350MB. stale1+stale2 = 300MB is all we may touch.
+        val plan = CacheEviction.plan(
+            entries,
+            currentFreeBytes = 150 * MB,
+            minFreeBytes = 500 * MB,
+            keepIds = setOf("play1", "play2", "play3"),
+        )
+        assertEquals(listOf("stale1", "stale2"), plan)
+    }
+
+    @Test fun evictsOlderNonPlaylistContentEvenWhenPlaylistExceedsSpace() {
+        // Current playlist (kept) is larger than the free-space target on its own, so the
+        // threshold can never be reached. The planner must still evict every older,
+        // non-playlist entry it safely can - not silently give up because it's "impossible".
+        val entries = listOf(
+            e("keepBig1", 400, 20),
+            e("keepBig2", 400, 21),
+            e("oldOther", 60, 1),
+            e("newerOther", 60, 2),
+        )
+        // free=100, need 500. Non-playlist total = 120MB -> 100 + 120 = 220 < 500.
+        val plan = CacheEviction.plan(
+            entries,
+            currentFreeBytes = 100 * MB,
+            minFreeBytes = 500 * MB,
+            keepIds = setOf("keepBig1", "keepBig2"),
+        )
+        // Both non-playlist entries evicted, oldest-used first; kept items untouched.
+        assertEquals(listOf("oldOther", "newerOther"), plan)
+    }
+
     @Test fun returnsAllEvictableWhenStillShort() {
         val entries = listOf(e("a", 50, 1), e("b", 50, 2))
         val plan = CacheEviction.plan(entries, currentFreeBytes = 100 * MB, minFreeBytes = 500 * MB)

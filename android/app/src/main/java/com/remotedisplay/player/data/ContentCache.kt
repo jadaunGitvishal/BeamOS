@@ -73,8 +73,8 @@ class ContentCache(
 
             Log.i("ContentCache", "Downloaded: $filename -> ${file.absolutePath}")
             // Ref 39: the cache just grew - reclaim space if we've dropped below the floor.
-            // keepId protects the file we just fetched from being the one evicted.
-            enforceStorageLimit(keepId = contentId)
+            // keepIds protects the file we just fetched from being the one evicted.
+            enforceStorageLimit(keepIds = setOf(contentId))
             return file
         } catch (e: Exception) {
             Log.e("ContentCache", "Download error: ${e.message}")
@@ -107,11 +107,12 @@ class ContentCache(
      * threshold, or nothing evictable is left. A no-op when there's headroom, so it's
      * cheap to call after every download and on every playlist sync.
      *
-     * @param keepId a content id that must not be evicted (the item currently downloading).
+     * @param keepIds content ids that must not be evicted (the item currently downloading,
+     *   plus every item the current playlist still needs).
      * @return number of cache entries purged.
      */
     @Synchronized
-    fun enforceStorageLimit(keepId: String? = null): Int {
+    fun enforceStorageLimit(keepIds: Set<String> = emptySet()): Int {
         val free = freeBytes()
         if (free >= minFreeBytes) return 0
 
@@ -123,7 +124,7 @@ class ContentCache(
             entries,
             currentFreeBytes = free,
             minFreeBytes = minFreeBytes,
-            keepIds = keepId?.let { setOf(it) } ?: emptySet(),
+            keepIds = keepIds,
         )
         if (victims.isEmpty()) {
             Log.w("ContentCache", "Low storage (${mb(free)}MB free < ${mb(minFreeBytes)}MB) but no evictable cache entries")
