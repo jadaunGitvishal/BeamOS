@@ -273,6 +273,7 @@ export default {
   'device.info.screen_resolution': 'Risoluzione Schermo',
   'device.info.ram': 'RAM',
   'device.info.cpu_usage': 'Utilizzo CPU',
+  'device.info.location': 'Posizione',
   // Uptime timeline
   'device.timeline.title': 'Cronologia Attività (Ultime 24 Ore)',
   'device.timeline.h24_ago': '24 ore fa',
@@ -300,6 +301,8 @@ export default {
   'device.ctl.launch_player': 'Avvia Player',
   'device.ctl.force_update': 'Forza Aggiornamento',
   'device.ctl.shutdown': 'Spegni',
+  'device.ctl.request_location': 'Richiedi posizione',
+  'device.ctl.request_location_hint': 'Mostra la finestra di autorizzazione alla posizione sullo schermo del dispositivo — qualcuno deve essere presente per toccare Consenti',
   // Remote tab
   'device.remote.start_prompt': 'Clicca "Avvia Controllo" per iniziare',
   'device.remote.start': 'Avvia Controllo',
@@ -374,6 +377,7 @@ export default {
   'device.toast.screen_on_sent': 'Comando accensione schermo inviato',
   'device.toast.launch_sent': 'Comando di avvio inviato',
   'device.toast.update_triggered': 'Controllo aggiornamenti avviato',
+  'device.toast.location_request_sent': 'Richiesta di autorizzazione alla posizione inviata',
   'device.toast.remote_started': 'Sessione remota avviata',
 
     // Settings

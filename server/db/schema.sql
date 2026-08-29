@@ -249,6 +249,12 @@ CREATE TABLE IF NOT EXISTS device_telemetry (
     wifi_ssid       VARCHAR(255),
     wifi_rssi       INT,
     uptime_seconds  BIGINT,
+    -- Ref 32: GPS location captured alongside the rest of the heartbeat telemetry.
+    -- Both nullable and frequently NULL: the player only fills them when the runtime
+    -- location permission is granted AND a fix is available (Play Services present,
+    -- location services on). Sanitized server-side (lib/geo.js) before insert.
+    latitude        DOUBLE,
+    longitude       DOUBLE,
     reported_at     BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

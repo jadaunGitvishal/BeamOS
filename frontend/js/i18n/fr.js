@@ -257,6 +257,7 @@ export default {
   'device.info.screen_resolution': 'Résolution',
   'device.info.ram': 'RAM',
   'device.info.cpu_usage': 'Utilisation CPU',
+  'device.info.location': 'Localisation',
   'device.timeline.title': 'Disponibilité (24 dernières heures)',
   'device.timeline.h24_ago': 'il y a 24h',
   'device.timeline.now': 'Maintenant',
@@ -281,6 +282,8 @@ export default {
   'device.ctl.launch_player': 'Lancer le lecteur',
   'device.ctl.force_update': 'Forcer la mise à jour',
   'device.ctl.shutdown': 'Arrêter',
+  'device.ctl.request_location': 'Demander la localisation',
+  'device.ctl.request_location_hint': "Affiche la boîte de dialogue d'autorisation de localisation sur l'écran de l'appareil ; quelqu'un doit être présent pour appuyer sur Autoriser",
   'device.remote.start_prompt': 'Cliquez sur « Démarrer » pour commencer',
   'device.remote.start': 'Démarrer',
   'device.remote.stop': 'Arrêter',
@@ -350,6 +353,7 @@ export default {
   'device.toast.screen_on_sent': 'Commande d\'allumage de l\'écran envoyée',
   'device.toast.launch_sent': 'Commande de lancement envoyée',
   'device.toast.update_triggered': 'Vérification de mise à jour déclenchée',
+  'device.toast.location_request_sent': "Demande d'autorisation de localisation envoyée",
   'device.toast.remote_started': 'Session de contrôle à distance démarrée',
 
   // Settings

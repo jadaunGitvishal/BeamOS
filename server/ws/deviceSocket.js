@@ -15,6 +15,7 @@ const sessionSettle = require('../lib/session-settle');   // #148 patch2: evicti
 const { resolveIdentity } = require('../lib/device-identity');
 const logCoalescer = require('../lib/log-coalescer');
 const loopLag = require('../services/loop-lag');
+const { sanitizeCoords } = require('../lib/geo');
 
 // Debounce window for marking a device offline on socket disconnect. Brief
 // flap (Wi-Fi blip, Engine.IO ping miss, server-side eviction-then-reconnect)
@@ -692,10 +693,14 @@ module.exports = function setupDeviceSocket(io) {
         .run(device_id);
 
       if (telemetry) {
+        // Ref 32: GPS is optional and frequently absent. sanitizeCoords returns null
+        // for a missing/out-of-range/(0,0) fix, so lat/long land as NULL and the rest
+        // of the row is unaffected.
+        const coords = sanitizeCoords(telemetry.latitude, telemetry.longitude);
         await db.prepare(`
           INSERT INTO device_telemetry (device_id, battery_level, battery_charging, storage_free_mb, storage_total_mb,
-            ram_free_mb, ram_total_mb, cpu_usage, wifi_ssid, wifi_rssi, uptime_seconds)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ram_free_mb, ram_total_mb, cpu_usage, wifi_ssid, wifi_rssi, uptime_seconds, latitude, longitude)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           device_id,
           telemetry.battery_level ?? null,
@@ -707,7 +712,9 @@ module.exports = function setupDeviceSocket(io) {
           telemetry.cpu_usage ?? null,
           telemetry.wifi_ssid ?? null,
           telemetry.wifi_rssi ?? null,
-          telemetry.uptime_seconds ?? null
+          telemetry.uptime_seconds ?? null,
+          coords ? coords.latitude : null,
+          coords ? coords.longitude : null
         );
         await pruneTelemetry(device_id);
 
@@ -721,7 +728,9 @@ module.exports = function setupDeviceSocket(io) {
         await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:device-status', {
           device_id,
           status: 'online',
-          telemetry
+          // Ref 32: hand the dashboard the SAME sanitized coords that were stored, so the
+          // live tile and a page reload agree.
+          telemetry: { ...telemetry, latitude: coords ? coords.latitude : null, longitude: coords ? coords.longitude : null }
         });
       }
     });

@@ -213,6 +213,63 @@
                 android:paddingBottom="4dp" />
         </LinearLayout>
 
+        <!-- Location Permission (Ref 32: GPS telemetry) -->
+        <LinearLayout
+            android:id="@+id/locationRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="5dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Location"
+                    android:textColor="#F1F5F9"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Optional — reports this screen's GPS coordinates with telemetry"
+                    android:textColor="#64748B"
+                    android:textSize="8sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/locationStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="OFF"
+                android:textColor="#EF4444"
+                android:textSize="9sp"
+                android:textStyle="bold"
+                android:layout_marginEnd="12dp" />
+
+            <Button
+                android:id="@+id/enableLocationBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="Enable"
+                android:textColor="#FFFFFF"
+                android:textSize="9sp"
+                android:background="@drawable/button_primary"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp" />
+        </LinearLayout>
+
         <!-- Launch on boot / full-screen (Android 14+ restricts USE_FULL_SCREEN_INTENT) -->
         <LinearLayout
             android:id="@+id/fullscreenRow"

@@ -22,6 +22,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.remotedisplay.player.service.PowerAccessibilityService
+import com.remotedisplay.player.telemetry.LocationTelemetry
 
 class SetupActivity : AppCompatActivity() {
 
@@ -36,6 +37,8 @@ class SetupActivity : AppCompatActivity() {
     private lateinit var enableBatteryBtn: Button
     private lateinit var overlayStatus: TextView
     private lateinit var enableOverlayBtn: Button
+    private lateinit var locationStatus: TextView
+    private lateinit var enableLocationBtn: Button
     private lateinit var continueBtn: Button
 
     @SuppressLint("BatteryLife")
@@ -84,6 +87,21 @@ class SetupActivity : AppCompatActivity() {
 
         enableAccessibilityBtn.setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
+        // Ref 32: runtime location permission for GPS telemetry. Optional — the player
+        // omits lat/long from telemetry (never crashes / blocks) if this stays denied.
+        locationStatus = findViewById(R.id.locationStatus)
+        enableLocationBtn = findViewById(R.id.enableLocationBtn)
+        enableLocationBtn.setOnClickListener {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ),
+                101
+            )
         }
 
         enableInstallBtn.setOnClickListener {
@@ -213,6 +231,15 @@ class SetupActivity : AppCompatActivity() {
         overlayStatus.text = if (canOverlay) "ON" else "OFF"
         overlayStatus.setTextColor(if (canOverlay) 0xFF22C55E.toInt() else 0xFFEF4444.toInt())
         enableOverlayBtn.visibility = if (canOverlay) View.GONE else View.VISIBLE
+
+        // Ref 32: location permission (FINE or COARSE is enough for a telemetry fix)
+        val hasLocation = LocationTelemetry.hasLocationPermission(
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED,
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        )
+        locationStatus.text = if (hasLocation) "ON" else "OFF"
+        locationStatus.setTextColor(if (hasLocation) 0xFF22C55E.toInt() else 0xFFEF4444.toInt())
+        enableLocationBtn.visibility = if (hasLocation) View.GONE else View.VISIBLE
 
         // Update continue button text
         val allGood = accessibilityEnabled && canInstall

@@ -101,6 +101,12 @@ const db = {
 // from scripts/migrate-multitenancy.js, was folded directly into schema.sql - see that
 // file's header). This array - and the apply loop below - exist so the NEXT schema change
 // has a ready-made idempotent home; add plain ALTER/CREATE statements here going forward.
+//
+// NOTE: a non-empty batch here triggers a full mysqldump on EVERY boot (see
+// applyMigrations -> snapshotDatabase). For a plain "add a nullable column" the
+// lighter home is schema-check.js's REQUIRED_COLUMNS, which only ALTERs when the
+// column is actually absent and never snapshots - that's where Ref 32's
+// device_telemetry.latitude/longitude live.
 const migrations = [];
 
 // MySQL error codes that mean "this DDL already happened" - benign on a re-run, same

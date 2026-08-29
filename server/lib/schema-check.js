@@ -22,6 +22,11 @@ const REQUIRED_COLUMNS = [
   ['users', 'role', null],
   ['users', 'plan_id', "ALTER TABLE users ADD COLUMN plan_id VARCHAR(64) DEFAULT 'free'"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
+  // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)
+  // always lists these columns now, so an un-migrated DB would fail every telemetry
+  // write until repaired. Nullable, no default - absent lat/long is the norm.
+  ['device_telemetry', 'latitude', "ALTER TABLE device_telemetry ADD COLUMN latitude DOUBLE NULL"],
+  ['device_telemetry', 'longitude', "ALTER TABLE device_telemetry ADD COLUMN longitude DOUBLE NULL"],
 ];
 
 function defaultOnMissing(missing) {

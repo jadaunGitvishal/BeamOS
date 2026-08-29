@@ -257,6 +257,7 @@ export default {
   'device.info.screen_resolution': 'Resolução',
   'device.info.ram': 'RAM',
   'device.info.cpu_usage': 'Uso de CPU',
+  'device.info.location': 'Localização',
   'device.timeline.title': 'Linha do tempo (últimas 24 horas)',
   'device.timeline.h24_ago': 'há 24h',
   'device.timeline.now': 'Agora',
@@ -281,6 +282,8 @@ export default {
   'device.ctl.launch_player': 'Iniciar player',
   'device.ctl.force_update': 'Forçar atualização',
   'device.ctl.shutdown': 'Desligar',
+  'device.ctl.request_location': 'Solicitar localização',
+  'device.ctl.request_location_hint': 'Mostra a caixa de diálogo de permissão de localização na tela do dispositivo — alguém precisa estar lá para tocar em Permitir',
   'device.remote.start_prompt': 'Clique em "Iniciar controle remoto" para começar',
   'device.remote.start': 'Iniciar controle remoto',
   'device.remote.stop': 'Parar controle remoto',
@@ -350,6 +353,7 @@ export default {
   'device.toast.screen_on_sent': 'Comando para ligar tela enviado',
   'device.toast.launch_sent': 'Comando de início enviado',
   'device.toast.update_triggered': 'Verificação de atualização disparada',
+  'device.toast.location_request_sent': 'Solicitação de permissão de localização enviada',
   'device.toast.remote_started': 'Sessão de controle remoto iniciada',
 
   // Settings

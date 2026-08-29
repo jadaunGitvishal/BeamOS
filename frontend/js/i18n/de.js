@@ -257,6 +257,7 @@ export default {
   'device.info.screen_resolution': 'Bildschirmauflösung',
   'device.info.ram': 'RAM',
   'device.info.cpu_usage': 'CPU-Auslastung',
+  'device.info.location': 'Standort',
   'device.timeline.title': 'Verfügbarkeit (letzte 24 Stunden)',
   'device.timeline.h24_ago': 'vor 24h',
   'device.timeline.now': 'Jetzt',
@@ -281,6 +282,8 @@ export default {
   'device.ctl.launch_player': 'Player starten',
   'device.ctl.force_update': 'Update erzwingen',
   'device.ctl.shutdown': 'Herunterfahren',
+  'device.ctl.request_location': 'Standort anfordern',
+  'device.ctl.request_location_hint': 'Zeigt den Standortberechtigungsdialog auf dem Gerätebildschirm — jemand muss vor Ort auf „Zulassen“ tippen',
   'device.remote.start_prompt': 'Auf „Fernsteuerung starten" klicken zum Beginnen',
   'device.remote.start': 'Fernsteuerung starten',
   'device.remote.stop': 'Fernsteuerung beenden',
@@ -350,6 +353,7 @@ export default {
   'device.toast.screen_on_sent': 'Befehl Bildschirm an gesendet',
   'device.toast.launch_sent': 'Start-Befehl gesendet',
   'device.toast.update_triggered': 'Update-Prüfung ausgelöst',
+  'device.toast.location_request_sent': 'Standortberechtigungsanfrage gesendet',
   'device.toast.remote_started': 'Fernsteuerungssitzung gestartet',
 
   // Settings

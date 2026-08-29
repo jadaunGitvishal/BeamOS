@@ -32,6 +32,12 @@ class DeviceInfo(private val context: Context) {
             put("wifi_ssid", getWifiSSID())
             put("wifi_rssi", getWifiRSSI())
             put("uptime_seconds", getUptimeSeconds())
+            // Ref 32: GPS lat/long, only when the runtime permission is granted AND a
+            // fix is cached. Absent otherwise - never 0/null placeholders, never throws.
+            LocationProvider.currentFix()?.let {
+                put("latitude", it.latitude)
+                put("longitude", it.longitude)
+            }
             // #74/#75: OS timezone + UTC clock (effective-tz resolution + dashboard skew indicator)
             put("timezone", java.util.TimeZone.getDefault().id)
             put("device_utc", System.currentTimeMillis())

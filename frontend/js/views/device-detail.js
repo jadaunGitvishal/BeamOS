@@ -37,6 +37,16 @@ function formatUptime(seconds) {
   return `${m}m`;
 }
 
+// Ref 32: GPS coordinates from telemetry. lat/long are null/absent whenever the
+// device lacks the location permission or a fix, so "--" is the common case. When
+// present, link out to a map (new tab).
+function renderCoords(lat, lng) {
+  if (lat == null || lng == null) return "--";
+  const label = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  const url = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=15/${lat}/${lng}`;
+  return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+}
+
 // #74/#75: device clock + skew indicator. Compares the device's reported UTC to the
 // server's receipt time; a gap > 2 min means the device clock is wrong, so per-item
 // schedules will fire at the wrong local time — surface it instead of a support mystery.
@@ -387,6 +397,10 @@ async function loadDevice(deviceId, activeTab = null) {
             <div class="info-card-label">${t("device.info.cpu_usage")}</div>
             <div class="info-card-value small" id="telCpu">${latestTelemetry.cpu_usage != null ? latestTelemetry.cpu_usage.toFixed(1) + "%" : "--"}</div>
           </div>
+          <div class="info-card">
+            <div class="info-card-label">${t("device.info.location")}</div>
+            <div class="info-card-value small" id="telLocation">${renderCoords(latestTelemetry.latitude, latestTelemetry.longitude)}</div>
+          </div>
           `
               : ""
           }
@@ -471,6 +485,12 @@ async function loadDevice(deviceId, activeTab = null) {
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
             </svg>
             ${t("device.ctl.force_update")}
+          </button>
+          <button class="btn btn-secondary btn-sm" id="requestLocationBtn" title="${t("device.ctl.request_location_hint")}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>
+            </svg>
+            ${t("device.ctl.request_location")}
           </button>
           <button class="btn btn-danger btn-sm" id="shutdownBtn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1071,6 +1091,16 @@ async function setupActions(device) {
   // Force Update
   document.getElementById("forceUpdateBtn")?.addEventListener("click", () => {
     sendWithFeedback("update", "Update", "device.toast.update_triggered");
+  });
+
+  // Ref 32: ask an already-provisioned device to (re)request the location permission.
+  // The device pops the system dialog on-screen; someone physically there taps Allow.
+  document.getElementById("requestLocationBtn")?.addEventListener("click", () => {
+    sendWithFeedback(
+      "request_location",
+      "Location permission",
+      "device.toast.location_request_sent",
+    );
   });
 
   // #109: PiP overlay tester — pushes/clears an overlay via the public API (POST /api/pip).
@@ -1772,6 +1802,12 @@ function updateTelemetryDisplay(telemetry) {
     );
   if (telemetry.cpu_usage != null)
     update("telCpu", telemetry.cpu_usage.toFixed(1) + "%");
+  // Ref 32: GPS coords (only when the live payload carries a fix — never clobber an
+  // existing value with "--" just because this one heartbeat had no fix).
+  if (telemetry.latitude != null && telemetry.longitude != null) {
+    const el = document.getElementById("telLocation");
+    if (el) el.innerHTML = renderCoords(telemetry.latitude, telemetry.longitude);
+  }
 }
 
 export function cleanup() {

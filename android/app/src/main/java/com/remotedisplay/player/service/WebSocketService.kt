@@ -16,6 +16,7 @@ import com.remotedisplay.player.data.PlayEventQueue
 import com.remotedisplay.player.data.PlayEventRecord
 import com.remotedisplay.player.data.ServerConfig
 import com.remotedisplay.player.telemetry.DeviceInfo
+import com.remotedisplay.player.telemetry.LocationProvider
 import io.socket.client.Ack
 import io.socket.client.IO
 import io.socket.client.Socket
@@ -110,6 +111,11 @@ class WebSocketService : Service() {
         val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
         wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "RemoteDisplay:WebSocket")
         wakeLock?.acquire()
+
+        // Ref 32: begin caching GPS fixes for telemetry. No-op without the location
+        // permission or Play Services; re-attempted from sendHeartbeat() so a grant
+        // made later in SetupActivity is picked up without a restart.
+        LocationProvider.start(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -386,6 +392,14 @@ class WebSocketService : Service() {
                                 } catch (e: Throwable) { Log.e("WebSocketService", "enable_system_capture: ${e.message}") }
                             }
                         }
+                        // Ref 32: post-setup location grant for already-provisioned screens.
+                        "request_location" -> {
+                            handler.post {
+                                try {
+                                    com.remotedisplay.player.LocationPermissionActivity.request(this@WebSocketService)
+                                } catch (e: Throwable) { Log.e("WebSocketService", "request_location: ${e.message}") }
+                            }
+                        }
                         "screen_off" -> {
                             val a11y = PowerAccessibilityService.instance
                             if (a11y != null) {
@@ -524,6 +538,8 @@ class WebSocketService : Service() {
 
     private fun sendHeartbeat() {
         if (socket?.connected() != true) return
+        // Idempotent - only does work if not already started (e.g. permission just granted).
+        LocationProvider.start(this)
         try {
             val data = JSONObject().apply {
                 put("device_id", config.deviceId)
@@ -799,6 +815,7 @@ class WebSocketService : Service() {
 
     override fun onDestroy() {
         wakeLock?.let { if (it.isHeld) it.release() }
+        LocationProvider.stop()
         disconnect()
         super.onDestroy()
     }

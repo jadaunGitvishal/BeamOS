@@ -34,3 +34,14 @@ export function isoDateOnly(d) {
 export function periodLabel(period) {
   return period === 1 ? "last 24 hours" : `last ${period} days`;
 }
+
+// Ref 32: GPS coords off telemetry. Null/absent (no permission or no fix) is the
+// common case -> caller shows "—". Mirrors the main app's renderCoords().
+export function fmtCoords(lat, lng) {
+  if (lat === null || lat === undefined || lng === null || lng === undefined) return null;
+  return `${Number(lat).toFixed(6)}, ${Number(lng).toFixed(6)}`;
+}
+
+export function osmUrl(lat, lng) {
+  return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=15/${lat}/${lng}`;
+}

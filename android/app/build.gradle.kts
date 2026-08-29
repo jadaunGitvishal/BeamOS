@@ -79,6 +79,11 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
+    // Ref 32: FusedLocationProvider (Google Play Services) for periodic GPS telemetry.
+    // Degrades gracefully where Play Services is absent (many AOSP TV boxes) - the
+    // provider just never yields a fix and lat/long stay absent from telemetry.
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+
     // #74/#75: unit tests for the Kotlin schedule evaluator (vector drift guard)
     testImplementation("junit:junit:4.13.2")
 }

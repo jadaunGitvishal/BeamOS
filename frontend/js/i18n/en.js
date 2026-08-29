@@ -302,6 +302,7 @@ export default {
   "device.info.screen_resolution": "Screen Resolution",
   "device.info.ram": "RAM",
   "device.info.cpu_usage": "CPU Usage",
+  "device.info.location": "Location",
   // Uptime timeline
   "device.timeline.title": "Uptime Timeline (Last 24 Hours)",
   "device.timeline.h24_ago": "24h ago",
@@ -332,6 +333,8 @@ export default {
   "device.ctl.launch_player": "Launch Player",
   "device.ctl.force_update": "Force Update",
   "device.ctl.shutdown": "Shutdown",
+  "device.ctl.request_location": "Request Location",
+  "device.ctl.request_location_hint": "Shows the location permission dialog on the device screen — someone must be there to tap Allow",
   // Remote tab
   "device.remote.start_prompt": 'Click "Start Remote" to begin',
   "device.remote.start": "Start Remote",
@@ -415,6 +418,7 @@ export default {
   "device.toast.screen_on_sent": "Screen on command sent",
   "device.toast.launch_sent": "Launch command sent",
   "device.toast.update_triggered": "Update check triggered",
+  "device.toast.location_request_sent": "Location permission request sent",
   "device.toast.remote_started": "Remote session started",
   "device.toast.command_queued":
     "{cmd} — device offline, will deliver on reconnect",

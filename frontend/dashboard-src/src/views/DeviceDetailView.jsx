@@ -4,7 +4,7 @@ import { useApi } from "../hooks/useApi";
 import { usePeriod } from "../hooks/usePeriod";
 import { useBreadcrumb } from "../hooks/useBreadcrumb";
 import { apiFetch } from "../lib/api";
-import { n0, periodWindow, periodLabel, isoDateOnly } from "../lib/format";
+import { n0, periodWindow, periodLabel, isoDateOnly, fmtCoords, osmUrl } from "../lib/format";
 import { isWeakSignal } from "../lib/risk";
 import { buildStatusStrip } from "../lib/transmissionStrip";
 import StatTile from "../components/StatTile";
@@ -110,6 +110,19 @@ export default function DeviceDetailView() {
           label="Wi-Fi signal"
           value={d.wifi_rssi !== null && d.wifi_rssi !== undefined ? d.wifi_rssi + " dBm" : "—"}
           sub={isWeakSignal(d) ? "weak" : d.wifi_ssid || null}
+          card
+        />
+        <StatTile
+          label="Location"
+          value={
+            fmtCoords(d.latitude, d.longitude) ? (
+              <a href={osmUrl(d.latitude, d.longitude)} target="_blank" rel="noopener noreferrer">
+                {fmtCoords(d.latitude, d.longitude)}
+              </a>
+            ) : (
+              "—"
+            )
+          }
           card
         />
       </div>
