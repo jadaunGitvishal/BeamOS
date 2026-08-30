@@ -24,17 +24,20 @@ function esc(s) {
 
 // Pure renderer. `code` is the validated 6-digit string when the URL carried a
 // well-formed code, else null. `found` is whether that code exists in
-// registration_codes. Returns a self-contained HTML document (inline <style> +
-// one inline onclick handler — both allowed by the app CSP; no <script> block).
+// registration_codes. Returns a self-contained HTML document. Styling is inline
+// <style> (allowed by the app CSP); the copy button's behaviour is in the
+// external /js/activate.js (scriptSrc 'self') — an inline <script> would be
+// CSP-blocked, and an inline onclick can't give proper async success/failure
+// feedback for navigator.clipboard.
 function renderActivatePage({ code, found }) {
   const ok = !!code && found;
   const inner = ok
     ? `
       <p class="label">Activation Code</p>
-      <p class="code">${esc(code)}</p>
+      <p class="code" id="code">${esc(code)}</p>
       <p class="hint">Type this code into the display's setup screen.</p>
-      <button class="copy" type="button"
-        onclick="if(navigator.clipboard){navigator.clipboard.writeText('${esc(code)}');this.textContent='Copied'}">Copy code</button>`
+      <button class="copy" type="button" id="copyBtn">Copy code</button>
+      <p class="status" id="copyStatus" role="status" aria-live="polite"></p>`
     : `
       <p class="code notfound">Code not found</p>
       <p class="hint">${code
@@ -66,20 +69,26 @@ function renderActivatePage({ code, found }) {
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: clamp(40px, 14vw, 64px); font-weight: 700; letter-spacing: .12em;
     color: #3b82f6; margin: 0; line-height: 1.1; word-break: break-word;
+    /* long-press / double-tap selects the whole code cleanly for a manual copy */
+    -webkit-user-select: all; user-select: all;
   }
-  .code.notfound { color: #f87171; font-size: clamp(24px, 8vw, 32px); letter-spacing: normal; }
+  .code.notfound { color: #f87171; font-size: clamp(24px, 8vw, 32px); letter-spacing: normal; user-select: auto; }
   .hint { color: #9ca3af; font-size: 15px; line-height: 1.5; margin: 16px 0 0; }
   .copy {
     margin-top: 24px; font: inherit; font-size: 15px; font-weight: 600; width: 100%;
     background: #3b82f6; color: #fff; border: 0; border-radius: 10px; padding: 12px 20px; cursor: pointer;
   }
   .copy:active { background: #2563eb; }
+  .status { font-size: 14px; line-height: 1.5; margin: 12px 0 0; min-height: 1.2em; }
+  .status.ok { color: #34d399; }
+  .status.warn { color: #fbbf24; }
 </style>
 </head>
 <body>
   <div class="card">
     <p class="brand">BeamOS</p>${inner}
   </div>
+  ${ok ? '<script src="/js/activate.js" defer></script>' : ''}
 </body>
 </html>`;
 }
