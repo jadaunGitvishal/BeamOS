@@ -907,6 +907,12 @@ CREATE INDEX idx_usage_daily_day ON device_usage_daily(day);
 -- status: 'unused' (freshly generated, claimable) | 'claimed' (a device consumed it).
 -- A claimed row keeps its code value for the audit trail; new codes only avoid
 -- colliding with other 'unused' rows, and any live lookup filters status = 'unused'.
+--
+-- expires_at: set at generation to created_at + 30 days. A code never claimed
+-- stops being claimable past this point (the claim endpoint returns 410), so an
+-- unused code can't linger indefinitely as a brute-force target. Expired rows are
+-- kept (not deleted) for the audit trail; staff regenerate a fresh code from the
+-- old row via POST .../:id/regenerate.
 CREATE TABLE IF NOT EXISTS registration_codes (
     id                   VARCHAR(64) PRIMARY KEY,
     code                 VARCHAR(6) NOT NULL UNIQUE,
@@ -915,6 +921,7 @@ CREATE TABLE IF NOT EXISTS registration_codes (
     status               VARCHAR(20) NOT NULL DEFAULT 'unused',
     created_by           VARCHAR(64) NOT NULL,
     created_at           BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    expires_at           BIGINT,
     claimed_by_device_id VARCHAR(64),
     claimed_at           BIGINT,
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,

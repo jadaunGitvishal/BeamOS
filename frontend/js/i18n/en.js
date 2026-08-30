@@ -493,12 +493,16 @@ export default {
   "provisioning.col_planned_name": "Planned name",
   "provisioning.col_status": "Status",
   "provisioning.col_created": "Created",
+  "provisioning.col_expires": "Expires",
   "provisioning.col_device": "Claimed by",
   "provisioning.col_qr": "QR",
   "provisioning.status_unused": "Unused",
   "provisioning.status_claimed": "Claimed",
+  "provisioning.status_expired": "Expired",
   "provisioning.show_qr": "Show QR",
   "provisioning.qr_alt": "QR code for {code}",
+  "provisioning.regenerate": "Regenerate",
+  "provisioning.regenerated_toast": "New code generated (the expired one is kept for your records)",
   "provisioning.no_admin_workspace":
     "You need workspace-admin access to generate registration codes.",
 

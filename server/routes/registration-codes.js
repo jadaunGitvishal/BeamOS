@@ -34,6 +34,11 @@ const CODE_MIN = 100000;
 const CODE_SPAN = 900000; // codes span 100000-999999 inclusive
 const CODE_RE = /^[0-9]{6}$/;
 const GEN_MAX_ATTEMPTS = 12;
+// TTL: a code that is never claimed stops being claimable after this window, so
+// an unused code can't sit around indefinitely as a brute-force target. 30 days
+// is generous for real install logistics (order hardware, schedule an installer)
+// without leaving the window open for months.
+const CODE_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 // Load the workspace named by `workspaceId` and confirm the caller may administer
 // it. Sends the response and returns null on any failure (caller bails on null).
@@ -66,10 +71,40 @@ function serializeCode(row) {
     status: row.status,
     created_by: row.created_by,
     created_at: row.created_at,
+    expires_at: row.expires_at || null,
+    expired: !!(row.expires_at && row.expires_at <= Math.floor(Date.now() / 1000) && row.status === 'unused'),
     claimed_by_device_id: row.claimed_by_device_id || null,
     claimed_at: row.claimed_at || null,
     claimed_by_device_name: row.claimed_by_device_name || null,
   };
+}
+
+// Mint one unused code for a workspace. Retries until it lands a value no other
+// LIVE ('unused') row holds; the UNIQUE(code) constraint is the backstop against
+// the check-then-insert race. Returns the stored row, or null if every attempt
+// collided (astronomically unlikely at any realistic code count).
+async function mintCode({ workspaceId, plannedName, createdBy }) {
+  const now = Math.floor(Date.now() / 1000);
+  for (let attempt = 0; attempt < GEN_MAX_ATTEMPTS; attempt++) {
+    const code = String(CODE_MIN + crypto.randomInt(CODE_SPAN));
+    const clash = await db
+      .prepare("SELECT 1 FROM registration_codes WHERE code = ? AND status = 'unused'")
+      .get(code);
+    if (clash) continue;
+    const id = crypto.randomUUID();
+    try {
+      await db.prepare(`
+        INSERT INTO registration_codes (id, code, workspace_id, planned_device_name, status, created_by, created_at, expires_at)
+        VALUES (?, ?, ?, ?, 'unused', ?, ?, ?)
+      `).run(id, code, workspaceId, plannedName, createdBy, now, now + CODE_TTL_SECONDS);
+    } catch (e) {
+      // MySQL: ER_DUP_ENTRY. better-sqlite3 (tests): SQLITE_CONSTRAINT_UNIQUE.
+      if (e.code === 'ER_DUP_ENTRY' || /duplicate entry|unique/i.test(e.message || '')) continue;
+      throw e;
+    }
+    return db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(id);
+  }
+  return null;
 }
 
 // POST /api/provisioning/registration-codes
@@ -86,30 +121,31 @@ router.post('/registration-codes', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: `planned_device_name must be ${NAME_MAX} characters or fewer` });
   }
 
-  // Retry until we land a code no live ('unused') row already holds. The
-  // UNIQUE(code) constraint is the backstop against the check-then-insert race
-  // (a concurrent POST that grabbed the same value between our SELECT and
-  // INSERT) - a duplicate-key error just costs another attempt.
-  let row = null;
-  for (let attempt = 0; attempt < GEN_MAX_ATTEMPTS && !row; attempt++) {
-    const code = String(CODE_MIN + crypto.randomInt(CODE_SPAN));
-    const clash = await db
-      .prepare("SELECT 1 FROM registration_codes WHERE code = ? AND status = 'unused'")
-      .get(code);
-    if (clash) continue;
-    const id = crypto.randomUUID();
-    try {
-      await db.prepare(`
-        INSERT INTO registration_codes (id, code, workspace_id, planned_device_name, status, created_by, created_at)
-        VALUES (?, ?, ?, ?, 'unused', ?, ?)
-      `).run(id, code, ws.id, plannedName, req.user.id, Math.floor(Date.now() / 1000));
-    } catch (e) {
-      // MySQL: ER_DUP_ENTRY. better-sqlite3 (tests): SQLITE_CONSTRAINT_UNIQUE.
-      if (e.code === 'ER_DUP_ENTRY' || /duplicate entry|unique/i.test(e.message || '')) continue;
-      throw e;
-    }
-    row = await db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(id);
+  const row = await mintCode({ workspaceId: ws.id, plannedName, createdBy: req.user.id });
+  if (!row) {
+    return res.status(503).json({ error: 'Could not allocate a unique code, please retry' });
   }
+  res.status(201).json(serializeCode(row));
+}));
+
+// POST /api/provisioning/registration-codes/:id/regenerate
+// -> mints a FRESH code (+ new 30-day expiry) reusing the old row's workspace and
+// planned_device_name, so staff don't re-fill the form when a code lapsed unused.
+// The old row is left exactly as it is (expired, unused) for the audit trail.
+router.post('/registration-codes/:id/regenerate', asyncHandler(async (req, res) => {
+  const old = await db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(req.params.id);
+  if (!old) return res.status(404).json({ error: 'Registration code not found' });
+  const ws = await loadAdminWorkspace(req, res, old.workspace_id);
+  if (!ws) return;
+  // Only an UNUSED code can be regenerated - a claimed code already has its device.
+  if (old.status !== 'unused') {
+    return res.status(409).json({ error: 'That code was already claimed by a device and cannot be regenerated.' });
+  }
+  const row = await mintCode({
+    workspaceId: old.workspace_id,
+    plannedName: old.planned_device_name || null,
+    createdBy: req.user.id,
+  });
   if (!row) {
     return res.status(503).json({ error: 'Could not allocate a unique code, please retry' });
   }
@@ -192,6 +228,11 @@ claimRouter.post('/', asyncHandler(async (req, res) => {
   }
   if (rc.status !== 'unused') {
     return res.status(409).json({ error: 'That activation code is no longer available.' });
+  }
+  // An expired code is a real code that lapsed (not a typo), so it gets its own
+  // distinct 410 - "generate a new one" - not the 404 an unknown code returns.
+  if (rc.expires_at && rc.expires_at <= Math.floor(Date.now() / 1000)) {
+    return res.status(410).json({ error: 'This code has expired - generate a new one from the dashboard.' });
   }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(rc.workspace_id);
   if (!ws) {

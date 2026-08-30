@@ -55,6 +55,9 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ workspace_id, planned_device_name: planned_device_name || null }),
   }),
+  // Mint a fresh code (+ expiry) from an expired-but-unused one, reusing its
+  // workspace + planned name. The old row stays put (expired) for the audit trail.
+  regenerateRegistrationCode: (id) => request(`/provisioning/registration-codes/${id}/regenerate`, { method: 'POST' }),
   getRegistrationCodeQrUrl: async (id) => {
     const res = await fetch(`${API_BASE}/provisioning/registration-codes/${id}/qr`, { headers: getAuthHeaders() });
     if (!res.ok) throw new Error('Failed to load QR image');

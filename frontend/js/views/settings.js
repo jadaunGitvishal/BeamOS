@@ -635,12 +635,18 @@ export async function render(container) {
     provObjectUrls = [];
     const objectUrls = provObjectUrls;
 
-    const statusBadge = (s) => {
-      const claimed = s === "claimed";
-      const label = claimed
-        ? t("provisioning.status_claimed")
-        : t("provisioning.status_unused");
-      const color = claimed ? "var(--text-muted)" : "var(--success)";
+    const statusBadge = (c) => {
+      let label, color;
+      if (c.status === "claimed") {
+        label = t("provisioning.status_claimed");
+        color = "var(--text-muted)";
+      } else if (c.expired) {
+        label = t("provisioning.status_expired");
+        color = "var(--danger)";
+      } else {
+        label = t("provisioning.status_unused");
+        color = "var(--success)";
+      }
       return `<span style="color:${color};font-size:12px;font-weight:500">${esc(label)}</span>`;
     };
 
@@ -668,6 +674,7 @@ export async function render(container) {
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_planned_name")}</th>
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_status")}</th>
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_created")}</th>
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_expires")}</th>
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_device")}</th>
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_qr")}</th>
             </tr>
@@ -679,12 +686,19 @@ export async function render(container) {
               <tr style="border-bottom:1px solid var(--border)">
                 <td style="padding:10px 12px;font-family:monospace;font-weight:700;font-size:16px;letter-spacing:2px">${esc(c.code)}</td>
                 <td style="padding:10px 12px">${esc(c.planned_device_name || "—")}</td>
-                <td style="padding:10px 12px">${statusBadge(c.status)}</td>
+                <td style="padding:10px 12px">${statusBadge(c)}</td>
                 <td style="padding:10px 12px">${esc(fmtTokenDate(c.created_at))}</td>
+                <td style="padding:10px 12px${c.expired ? ";color:var(--danger)" : ""}">${c.expires_at ? esc(fmtTokenDate(c.expires_at)) : "—"}</td>
                 <td style="padding:10px 12px">${esc(c.claimed_by_device_name || "—")}</td>
                 <td style="padding:10px 12px">
-                  <button class="btn btn-secondary btn-sm prov-qr-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr")}</button>
-                  <div class="prov-qr-slot" data-id="${esc(String(c.id))}"></div>
+                  ${
+                    c.expired
+                      ? `<button class="btn btn-secondary btn-sm prov-regen-btn" data-id="${esc(String(c.id))}">${t("provisioning.regenerate")}</button>`
+                      : c.status === "unused"
+                        ? `<button class="btn btn-secondary btn-sm prov-qr-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr")}</button>
+                  <div class="prov-qr-slot" data-id="${esc(String(c.id))}"></div>`
+                        : "—"
+                  }
                 </td>
               </tr>
             `,
@@ -718,6 +732,20 @@ export async function render(container) {
           } catch (err) {
             showToast(err.message, "error");
           } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      provList.querySelectorAll(".prov-regen-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            await api.regenerateRegistrationCode(btn.dataset.id);
+            showToast(t("provisioning.regenerated_toast"), "success");
+            await loadProvisioning();
+          } catch (err) {
+            showToast(err.message, "error");
             btn.disabled = false;
           }
         });

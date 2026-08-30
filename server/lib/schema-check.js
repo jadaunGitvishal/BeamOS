@@ -28,6 +28,10 @@ const REQUIRED_COLUMNS = [
   // write until repaired. Nullable, no default - absent lat/long is the norm.
   ['device_telemetry', 'latitude', "ALTER TABLE device_telemetry ADD COLUMN latitude DOUBLE NULL"],
   ['device_telemetry', 'longitude', "ALTER TABLE device_telemetry ADD COLUMN longitude DOUBLE NULL"],
+  // Ref 30: registration-code TTL. The claim + generate paths both read/write
+  // expires_at, so an un-migrated DB (table created before this column existed)
+  // needs the repair. Nullable - a pre-TTL row with NULL expires_at never expires.
+  ['registration_codes', 'expires_at', "ALTER TABLE registration_codes ADD COLUMN expires_at BIGINT NULL"],
 ];
 
 function defaultOnMissing(missing) {

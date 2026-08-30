@@ -51,6 +51,7 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'unused',
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
+    expires_at INTEGER,
     claimed_by_device_id TEXT,
     claimed_at INTEGER
   );
@@ -136,6 +137,88 @@ test('generate: planned_device_name is optional', async () => {
   assert.equal(res.status, 201);
   const body = await res.json();
   assert.equal(body.planned_device_name, null);
+});
+
+test('generate: sets expires_at ~30 days out and returns it', async () => {
+  const t0 = Math.floor(Date.now() / 1000);
+  const res = await fetch(`${base}/api/provisioning/registration-codes`,
+    postJson(tok.admin, { workspace_id: 'ws-a' }));
+  assert.equal(res.status, 201);
+  const body = await res.json();
+  const THIRTY_D = 30 * 24 * 60 * 60;
+  assert.ok(Math.abs(body.expires_at - (t0 + THIRTY_D)) < 120, `expires_at ≈ created_at + 30d (got ${body.expires_at - t0}s)`);
+  assert.equal(body.expired, false);
+
+  const row = db.prepare('SELECT expires_at FROM registration_codes WHERE id = ?').get(body.id);
+  assert.equal(row.expires_at, body.expires_at, 'persisted');
+
+  // And it shows up in the admin list.
+  const list = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
+  const listed = list.find((c) => c.code === body.code);
+  assert.equal(listed.expires_at, body.expires_at);
+  assert.equal(listed.expired, false);
+});
+
+test('list: an unused code past expires_at is reported expired:true', async () => {
+  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const { id, code } = await res.json();
+  db.prepare('UPDATE registration_codes SET expires_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 10, id);
+  const list = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
+  const row = list.find((c) => c.code === code);
+  assert.equal(row.status, 'unused');
+  assert.equal(row.expired, true);
+});
+
+test('regenerate: expired unused code -> fresh code + expiry, old row untouched (audit trail)', async () => {
+  const mk = await fetch(`${base}/api/provisioning/registration-codes`,
+    postJson(tok.admin, { workspace_id: 'ws-a', planned_device_name: 'Warehouse gate' }));
+  const oldRow = await mk.json();
+  // Age it out.
+  const staleExpiry = Math.floor(Date.now() / 1000) - 3600;
+  db.prepare('UPDATE registration_codes SET expires_at = ? WHERE id = ?').run(staleExpiry, oldRow.id);
+
+  const t0 = Math.floor(Date.now() / 1000);
+  const regen = await fetch(`${base}/api/provisioning/registration-codes/${oldRow.id}/regenerate`, postJson(tok.admin, {}));
+  assert.equal(regen.status, 201);
+  const fresh = await regen.json();
+
+  assert.notEqual(fresh.id, oldRow.id);
+  assert.notEqual(fresh.code, oldRow.code);
+  assert.equal(fresh.workspace_id, 'ws-a', 'reuses workspace');
+  assert.equal(fresh.planned_device_name, 'Warehouse gate', 'reuses planned name');
+  assert.equal(fresh.status, 'unused');
+  assert.equal(fresh.expired, false);
+  assert.ok(fresh.expires_at > t0 + 29 * 24 * 60 * 60, 'fresh 30-day expiry');
+
+  // Old row is NOT deleted and NOT mutated - still unused, still with its stale expiry.
+  const stillThere = db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(oldRow.id);
+  assert.ok(stillThere, 'old row kept for the audit trail');
+  assert.equal(stillThere.status, 'unused');
+  assert.equal(stillThere.expires_at, staleExpiry, 'old expiry unchanged');
+  assert.equal(stillThere.code, oldRow.code);
+});
+
+test('regenerate: works on a still-valid unused code too', async () => {
+  const mk = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const oldRow = await mk.json();
+  const regen = await fetch(`${base}/api/provisioning/registration-codes/${oldRow.id}/regenerate`, postJson(tok.admin, {}));
+  assert.equal(regen.status, 201);
+  assert.notEqual((await regen.json()).code, oldRow.code);
+});
+
+test('regenerate: a claimed code cannot be regenerated (409)', async () => {
+  const mk = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const row = await mk.json();
+  db.prepare("UPDATE registration_codes SET status = 'claimed' WHERE id = ?").run(row.id);
+  const regen = await fetch(`${base}/api/provisioning/registration-codes/${row.id}/regenerate`, postJson(tok.admin, {}));
+  assert.equal(regen.status, 409);
+});
+
+test('regenerate: unknown id -> 404; non-admin -> 403', async () => {
+  assert.equal((await fetch(`${base}/api/provisioning/registration-codes/nope/regenerate`, postJson(tok.admin, {}))).status, 404);
+  const mk = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const row = await mk.json();
+  assert.equal((await fetch(`${base}/api/provisioning/registration-codes/${row.id}/regenerate`, postJson(tok.viewer, {}))).status, 403);
 });
 
 test('generate: codes are unique across repeated calls', async () => {

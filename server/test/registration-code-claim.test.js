@@ -56,6 +56,7 @@ raw.exec(`
     status TEXT NOT NULL DEFAULT 'unused',
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
+    expires_at INTEGER,
     claimed_by_device_id TEXT,
     claimed_at INTEGER
   );
@@ -119,13 +120,15 @@ function seedCode(overrides = {}) {
     status: 'unused',
     created_by: 'u-admin',
     created_at: 1700000000,
+    // Default: a comfortably-in-the-future expiry so existing tests are unaffected.
+    expires_at: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
     claimed_by_device_id: null,
     claimed_at: null,
     ...overrides,
   };
   raw.prepare(`INSERT INTO registration_codes
-    (id, code, workspace_id, planned_device_name, status, created_by, created_at, claimed_by_device_id, claimed_at)
-    VALUES (@id, @code, @workspace_id, @planned_device_name, @status, @created_by, @created_at, @claimed_by_device_id, @claimed_at)`).run(row);
+    (id, code, workspace_id, planned_device_name, status, created_by, created_at, expires_at, claimed_by_device_id, claimed_at)
+    VALUES (@id, @code, @workspace_id, @planned_device_name, @status, @created_by, @created_at, @expires_at, @claimed_by_device_id, @claimed_at)`).run(row);
   return row;
 }
 
@@ -226,6 +229,31 @@ test('claim: malformed code -> 400', async () => {
     const res = await claim({ code: bad });
     assert.equal(res.status, 400, `"${bad}" rejected`);
   }
+});
+
+test('claim: expired code -> 410 (distinct from the 404 for unknown), no device created', async () => {
+  const rc = seedCode({ expires_at: Math.floor(Date.now() / 1000) - 60 });
+  const before = raw.prepare('SELECT COUNT(*) AS n FROM devices').get().n;
+  const res = await claim({ code: rc.code, fingerprint: 'fp-expired' });
+  assert.equal(res.status, 410, 'expired -> 410, not the 404 an unknown code gets');
+  assert.match((await res.json()).error, /expired/i);
+
+  assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM devices').get().n, before, 'no device row');
+  const rowAfter = raw.prepare('SELECT status FROM registration_codes WHERE id = ?').get(rc.id);
+  assert.equal(rowAfter.status, 'unused', 'code left untouched (still unused, just unclaimable)');
+  assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM device_fingerprints WHERE fingerprint = ?').get('fp-expired').n, 0);
+});
+
+test('claim: a code expiring exactly now is unclaimable (boundary)', async () => {
+  const rc = seedCode({ expires_at: Math.floor(Date.now() / 1000) });
+  const res = await claim({ code: rc.code });
+  assert.equal(res.status, 410);
+});
+
+test('claim: a code with null expires_at (pre-TTL row) still claims', async () => {
+  const rc = seedCode({ expires_at: null });
+  const res = await claim({ code: rc.code });
+  assert.equal(res.status, 201);
 });
 
 test('claim: a code can be claimed exactly once across repeated attempts', async () => {
