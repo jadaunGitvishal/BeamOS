@@ -1,18 +1,22 @@
 'use strict';
 
-// Ref 30 Stage 1: advance device registration codes.
+// Ref 30: advance device registration codes.
 //
-// A workspace_admin (or org / platform admin) generates a short numeric code
-// ahead of an install, optionally naming the device it is destined for. An
-// installer later enters that code ON the device to bind it to the workspace -
-// no admin present at install time, no pairing-code round trip. The device-side
-// claim is Stage 2 (not built yet); this router only mints and lists codes.
+// Stage 1 (`router`, default export): a workspace_admin (or org / platform admin)
+// generates a short numeric code ahead of an install, optionally naming the
+// device it is destined for, and lists / QRs the codes for a workspace. Targets
+// a workspace by BODY / QUERY param (not the caller's active workspace), so it is
+// mounted WITHOUT resolveTenancy and gates every handler with
+// canAdminWorkspace(db, user, workspace) - the same pattern as routes/workspaces.js.
+// Mounted JWT-only (config/api-surface.js), so a Bearer st_ API token can never
+// reach it.
 //
-// This router targets a workspace by BODY / QUERY param (not the caller's active
-// workspace), so it is mounted WITHOUT resolveTenancy and gates every handler
-// with canAdminWorkspace(db, user, workspace) - the same pattern as
-// routes/workspaces.js. Mounted JWT-only (config/api-surface.js), so a Bearer
-// st_ API token can never reach it.
+// Stage 2 (`claimRouter`): the device-facing counterpart. The installer types the
+// pre-generated code ON the device (Android ProvisioningActivity / web player);
+// the device POSTs it here to claim itself into the code's workspace. Device-
+// facing => NO requireAuth, so server.js mounts claimRouter on its own public
+// path (/api/provisioning/registration-codes/claim) BEFORE the JWT-only router,
+// behind a rate limit. See the claimRouter block at the bottom of this file.
 
 const express = require('express');
 const router = express.Router();
@@ -21,10 +25,14 @@ const QRCode = require('qrcode');
 const { db } = require('../db/database');
 const { canAdminWorkspace } = require('../lib/permissions');
 const { asyncHandler } = require('../lib/async-handler');
+const { getClientIp } = require('../services/activity');
+const { stripDeviceSecrets } = require('../lib/device-sanitize');
+const { workspaceRoom, emitToWorkspace } = require('../lib/socket-rooms');
 
 const NAME_MAX = 255;
 const CODE_MIN = 100000;
 const CODE_SPAN = 900000; // codes span 100000-999999 inclusive
+const CODE_RE = /^[0-9]{6}$/;
 const GEN_MAX_ATTEMPTS = 12;
 
 // Load the workspace named by `workspaceId` and confirm the caller may administer
@@ -144,4 +152,143 @@ router.get('/registration-codes/:id/qr', asyncHandler(async (req, res) => {
   res.send(png);
 }));
 
+// ============================ Stage 2: device self-claim ============================
+//
+// A device (Android player / web player) the installer typed a pre-generated
+// activation code into POSTs { code, device_info?, fingerprint? } here. We create
+// AND claim the device in one atomic step, landing on the exact same end state the
+// two-step pairing_code flow produces (socket `device:register` INSERT in
+// ws/deviceSocket.js + `POST /api/provision/pair` claim in server.js): a devices
+// row with status='online', workspace_id + user_id set, name assigned, a
+// device_token minted. The only difference is the lookup key - a pre-generated
+// registration_codes row instead of a device-minted devices.pairing_code.
+//
+// The device then authenticates its /device socket with the returned
+// device_id + device_token and receives `device:paired` via the normal reconnect
+// path (deviceSocket.js re-sends it whenever devices.user_id is set), so no
+// bespoke socket handling is needed on either side.
+const claimRouter = express.Router();
+
+// Mirrors ws/deviceSocket.js generateDeviceToken().
+function generateDeviceToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+claimRouter.post('/', asyncHandler(async (req, res) => {
+  const code = String((req.body && req.body.code) || '').trim();
+  if (!CODE_RE.test(code)) {
+    return res.status(400).json({ error: 'A 6-digit activation code is required.' });
+  }
+  const info = (req.body && req.body.device_info) || {};
+  const fingerprint = (req.body && req.body.fingerprint)
+    ? String(req.body.fingerprint) : null;
+
+  const rc = await db.prepare('SELECT * FROM registration_codes WHERE code = ?').get(code);
+  if (!rc) {
+    return res.status(404).json({ error: 'That activation code is not recognised. Check for a typo and try again.' });
+  }
+  if (rc.status === 'claimed') {
+    return res.status(409).json({ error: 'That activation code has already been used. Generate a new one from the dashboard.' });
+  }
+  if (rc.status !== 'unused') {
+    return res.status(409).json({ error: 'That activation code is no longer available.' });
+  }
+  const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(rc.workspace_id);
+  if (!ws) {
+    // workspace_id FK is ON DELETE CASCADE, so a code outliving its workspace is
+    // only reachable in a delete race - treat it as a dead code.
+    return res.status(409).json({ error: 'The workspace for this activation code no longer exists.' });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const deviceId = crypto.randomUUID();
+  const deviceToken = generateDeviceToken();
+  const ip = getClientIp(req);
+
+  // Default name mirrors POST /api/provision/pair: "Display N" scoped to the
+  // provisioning admin's device count, used only when the code carries no
+  // planned_device_name (case 4: name can still be set later, same as normal).
+  let name = rc.planned_device_name && String(rc.planned_device_name).trim();
+  if (!name) {
+    const c = await db.prepare('SELECT COUNT(*) AS count FROM devices WHERE user_id = ?').get(rc.created_by);
+    name = 'Display ' + ((c ? c.count : 0) + 1);
+  }
+
+  let raced = false;
+  try {
+    await db.transaction(async (tx) => {
+      // Device row created ALREADY claimed. INSERT before the code UPDATE so the
+      // registration_codes.claimed_by_device_id FK target exists.
+      await tx.prepare(`
+        INSERT INTO devices (id, user_id, workspace_id, name, status, ip_address,
+          android_version, app_version, screen_width, screen_height, render_width, render_height,
+          device_token, last_heartbeat, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        deviceId, rc.created_by, ws.id, name, ip,
+        info.android_version || null, info.app_version || null,
+        info.screen_width || null, info.screen_height || null,
+        info.render_width || null, info.render_height || null,
+        deviceToken, now, now, now,
+      );
+
+      // The `AND status = 'unused'` makes this the race gate: two devices POSTing
+      // the same code concurrently both INSERT a device, but only the first
+      // UPDATE matches a row. The loser throws -> ROLLBACK -> its device row is
+      // undone -> 409.
+      const upd = await tx.prepare(`
+        UPDATE registration_codes SET status = 'claimed', claimed_by_device_id = ?, claimed_at = ?
+        WHERE code = ? AND status = 'unused'
+      `).run(deviceId, now, code);
+      if (!upd.changes) {
+        const e = new Error('registration code claimed concurrently');
+        e.code = 'CLAIM_RACE';
+        throw e;
+      }
+
+      // Link the hardware fingerprint to the new device + provisioning admin,
+      // mirroring the `UPDATE device_fingerprints` in POST /api/provision/pair.
+      if (fingerprint) {
+        const existing = await tx.prepare('SELECT fingerprint FROM device_fingerprints WHERE fingerprint = ?').get(fingerprint);
+        if (existing) {
+          await tx.prepare('UPDATE device_fingerprints SET device_id = ?, user_id = ?, last_seen = ? WHERE fingerprint = ?')
+            .run(deviceId, rc.created_by, now, fingerprint);
+        } else {
+          await tx.prepare('INSERT INTO device_fingerprints (fingerprint, device_id, user_id, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)')
+            .run(fingerprint, deviceId, rc.created_by, now, now);
+        }
+      }
+    })();
+  } catch (e) {
+    if (e.code === 'CLAIM_RACE') raced = true;
+    else throw e;
+  }
+  if (raced) {
+    return res.status(409).json({ error: 'That activation code has already been used. Generate a new one from the dashboard.' });
+  }
+
+  const device = await db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId);
+
+  // Live dashboard update, mirroring POST /api/provision/pair's dashboard:device-added.
+  try {
+    const io = req.app.get('io');
+    if (io) {
+      const row = { ...device };
+      stripDeviceSecrets(row);
+      emitToWorkspace(io.of('/dashboard'), workspaceRoom(ws.id), 'dashboard:device-added', row);
+    }
+  } catch (_) { /* dashboard push is best-effort */ }
+
+  // device_token is returned ONLY here (same as the socket device:registered
+  // event) - never via the admin list endpoints (serializeCode omits it).
+  res.status(201).json({
+    device_id: deviceId,
+    device_token: deviceToken,
+    name,
+    workspace_id: ws.id,
+    status: 'online',
+  });
+}));
+
 module.exports = router;
+module.exports.claimRouter = claimRouter;

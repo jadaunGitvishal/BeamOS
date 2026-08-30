@@ -465,6 +465,20 @@ app.use("/api/auth", require("./routes/auth"));
 // was unthrottled, letting an authed user brute-force pairing codes. /api/provision
 // matches both /api/provision and /api/provision/pair.
 app.use("/api/provision", rateLimit(60000, 5));
+
+// Ref 30 Stage 2: device self-claim with a pre-generated activation code. Device-
+// facing (the Android player / web player POSTs here after the installer types the
+// code), so it is UNAUTHENTICATED and mounted on its own path BEFORE the JWT-only
+// /api/provisioning router below - a request to this exact path is handled here and
+// never reaches requireAuth. Rate-limited like the other device/pairing surfaces
+// (behind SNAT the whole site shares one IP, so this is a per-site budget - matches
+// /api/provision's 5/min; 10/min here leaves headroom for a small rollout batch).
+app.use(
+  "/api/provisioning/registration-codes/claim",
+  rateLimit(60000, 10),
+  require("./routes/registration-codes").claimRouter,
+);
+
 // Rate limit expensive operations
 app.use("/api/status/export", rateLimit(60000, 5)); // 5 exports per minute
 app.use("/api/status/import", rateLimit(60000, 3)); // 3 imports per minute

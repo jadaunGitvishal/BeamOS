@@ -67,6 +67,35 @@
                 android:importantForAutofill="no" />
         </LinearLayout>
 
+        <!-- Ref 30 Stage 2: choose how this display gets its identity. Hidden once
+             registered, same as serverSection. -->
+        <RadioGroup
+            android:id="@+id/modeGroup"
+            android:layout_width="400dp"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="16dp">
+
+            <RadioButton
+                android:id="@+id/modeAutoRadio"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:text="Auto-generate a pairing code"
+                android:textColor="#F1F5F9"
+                android:textSize="15sp"
+                android:buttonTint="#3B82F6" />
+
+            <RadioButton
+                android:id="@+id/modeActivationRadio"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="I have an activation code"
+                android:textColor="#F1F5F9"
+                android:textSize="15sp"
+                android:buttonTint="#3B82F6" />
+        </RadioGroup>
+
         <Button
             android:id="@+id/connectBtn"
             android:layout_width="400dp"
@@ -77,6 +106,45 @@
             android:textStyle="bold"
             android:background="@drawable/button_primary"
             android:layout_marginBottom="32dp" />
+
+        <!-- Activation-code entry (shown only when "I have an activation code" is
+             selected). The installer types a code pre-generated in the dashboard;
+             on submit the device claims itself into that code's workspace. -->
+        <LinearLayout
+            android:id="@+id/activationSection"
+            android:layout_width="400dp"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="32dp"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/activationCodeInput"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/input_background"
+                android:hint="6-digit activation code"
+                android:textColorHint="#64748B"
+                android:textColor="#F1F5F9"
+                android:textSize="16sp"
+                android:padding="12dp"
+                android:inputType="number"
+                android:digits="0123456789"
+                android:maxLength="6"
+                android:singleLine="true"
+                android:importantForAutofill="no"
+                android:layout_marginBottom="12dp" />
+
+            <Button
+                android:id="@+id/activateBtn"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:text="Activate this display"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:background="@drawable/button_primary" />
+        </LinearLayout>
 
         <ProgressBar
             android:id="@+id/progressBar"
