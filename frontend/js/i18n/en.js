@@ -496,6 +496,7 @@ export default {
   "provisioning.col_expires": "Expires",
   "provisioning.col_device": "Claimed by",
   "provisioning.col_qr": "QR",
+  "provisioning.col_actions": "Actions",
   "provisioning.status_unused": "Unused",
   "provisioning.status_claimed": "Claimed",
   "provisioning.status_expired": "Expired",
@@ -503,6 +504,12 @@ export default {
   "provisioning.qr_alt": "QR code for {code}",
   "provisioning.regenerate": "Regenerate",
   "provisioning.regenerated_toast": "New code generated (the expired one is kept for your records)",
+  "provisioning.delete": "Delete",
+  "provisioning.a_device": "a device",
+  "provisioning.delete_confirm": "Delete this registration code? This can't be undone.",
+  "provisioning.delete_confirm_claimed":
+    "This code was claimed by {device}. Deleting it removes the record of that claim. Delete anyway?",
+  "provisioning.deleted_toast": "Registration code deleted",
   "provisioning.no_admin_workspace":
     "You need workspace-admin access to generate registration codes.",
 

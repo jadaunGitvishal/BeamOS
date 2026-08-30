@@ -152,6 +152,31 @@ router.post('/registration-codes/:id/regenerate', asyncHandler(async (req, res) 
   res.status(201).json(serializeCode(row));
 }));
 
+// DELETE /api/provisioning/registration-codes/:id
+// -> removes a code from the list. An UNUSED (or expired-unused) code is freely
+// deletable. A CLAIMED code is a history record - which device claimed which
+// code, when - so it is refused (409, requires_confirmation:true) unless the
+// caller re-sends with ?force=true / { force: true }, which the UI does behind a
+// sterner confirm.
+router.delete('/registration-codes/:id', asyncHandler(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Registration code not found' });
+  const ws = await loadAdminWorkspace(req, res, row.workspace_id);
+  if (!ws) return;
+
+  const force = req.query.force === 'true' || req.query.force === '1'
+    || !!(req.body && req.body.force === true);
+  if (row.status === 'claimed' && !force) {
+    return res.status(409).json({
+      error: 'This code was claimed by a device. Deleting it removes the record of that claim. Re-send with force to delete it anyway.',
+      requires_confirmation: true,
+    });
+  }
+
+  await db.prepare('DELETE FROM registration_codes WHERE id = ?').run(row.id);
+  res.json({ success: true });
+}));
+
 // GET /api/provisioning/registration-codes?workspace_id=...
 // -> every code for that workspace, newest first, with the claiming device name.
 router.get('/registration-codes', asyncHandler(async (req, res) => {

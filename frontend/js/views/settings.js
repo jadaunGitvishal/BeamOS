@@ -676,7 +676,7 @@ export async function render(container) {
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_created")}</th>
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_expires")}</th>
               <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_device")}</th>
-              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_qr")}</th>
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_actions")}</th>
             </tr>
           </thead>
           <tbody>
@@ -690,15 +690,15 @@ export async function render(container) {
                 <td style="padding:10px 12px">${esc(fmtTokenDate(c.created_at))}</td>
                 <td style="padding:10px 12px${c.expired ? ";color:var(--danger)" : ""}">${c.expires_at ? esc(fmtTokenDate(c.expires_at)) : "—"}</td>
                 <td style="padding:10px 12px">${esc(c.claimed_by_device_name || "—")}</td>
-                <td style="padding:10px 12px">
+                <td style="padding:10px 12px;white-space:nowrap">
                   ${
                     c.expired
-                      ? `<button class="btn btn-secondary btn-sm prov-regen-btn" data-id="${esc(String(c.id))}">${t("provisioning.regenerate")}</button>`
+                      ? `<button class="btn btn-secondary btn-sm prov-regen-btn" data-id="${esc(String(c.id))}">${t("provisioning.regenerate")}</button> `
                       : c.status === "unused"
-                        ? `<button class="btn btn-secondary btn-sm prov-qr-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr")}</button>
-                  <div class="prov-qr-slot" data-id="${esc(String(c.id))}"></div>`
-                        : "—"
-                  }
+                        ? `<button class="btn btn-secondary btn-sm prov-qr-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr")}</button> `
+                        : ""
+                  }<button class="btn btn-danger btn-sm prov-del-btn" data-id="${esc(String(c.id))}" data-status="${esc(c.status)}" data-device="${esc(c.claimed_by_device_name || "")}">${t("provisioning.delete")}</button>
+                  <div class="prov-qr-slot" data-id="${esc(String(c.id))}"></div>
                 </td>
               </tr>
             `,
@@ -743,6 +743,29 @@ export async function render(container) {
           try {
             await api.regenerateRegistrationCode(btn.dataset.id);
             showToast(t("provisioning.regenerated_toast"), "success");
+            await loadProvisioning();
+          } catch (err) {
+            showToast(err.message, "error");
+            btn.disabled = false;
+          }
+        });
+      });
+
+      provList.querySelectorAll(".prov-del-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const claimed = btn.dataset.status === "claimed";
+          const confirmMsg = claimed
+            ? t("provisioning.delete_confirm_claimed", {
+                device: btn.dataset.device || t("provisioning.a_device"),
+              })
+            : t("provisioning.delete_confirm");
+          if (!confirm(confirmMsg)) return;
+          btn.disabled = true;
+          try {
+            // A claimed code is a history record — the server refuses it unless
+            // we pass force, which we do only after the sterner confirm above.
+            await api.deleteRegistrationCode(btn.dataset.id, claimed);
+            showToast(t("provisioning.deleted_toast"), "success");
             await loadProvisioning();
           } catch (err) {
             showToast(err.message, "error");

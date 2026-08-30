@@ -58,6 +58,9 @@ export const api = {
   // Mint a fresh code (+ expiry) from an expired-but-unused one, reusing its
   // workspace + planned name. The old row stays put (expired) for the audit trail.
   regenerateRegistrationCode: (id) => request(`/provisioning/registration-codes/${id}/regenerate`, { method: 'POST' }),
+  // Delete a code. An unused code goes freely; a claimed one is refused unless
+  // force=true (the UI passes it after a sterner confirm, since it's history).
+  deleteRegistrationCode: (id, force) => request(`/provisioning/registration-codes/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
   getRegistrationCodeQrUrl: async (id) => {
     const res = await fetch(`${API_BASE}/provisioning/registration-codes/${id}/qr`, { headers: getAuthHeaders() });
     if (!res.ok) throw new Error('Failed to load QR image');

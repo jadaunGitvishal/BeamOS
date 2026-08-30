@@ -358,3 +358,59 @@ test('list: claimed code surfaces the claiming device name', async () => {
   assert.equal(row.claimed_by_device_id, 'dev-claimed');
   assert.equal(row.claimed_by_device_name, 'Front Desk TV');
 });
+
+const del = (id, token, opts = '') => fetch(`${base}/api/provisioning/registration-codes/${id}${opts}`, {
+  method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+});
+
+test('delete: an unused code is removed from the list', async () => {
+  const { id, code } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
+  const res = await del(id, tok.admin);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { success: true });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 0, 'row gone');
+  const list = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
+  assert.ok(!list.some((c) => c.code === code));
+});
+
+test('delete: an expired unused code is freely deletable', async () => {
+  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
+  db.prepare('UPDATE registration_codes SET expires_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 100, id);
+  assert.equal((await del(id, tok.admin)).status, 200);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 0);
+});
+
+test('delete: a claimed code is refused without force (409, row kept)', async () => {
+  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
+  db.prepare("UPDATE registration_codes SET status = 'claimed' WHERE id = ?").run(id);
+
+  const res = await del(id, tok.admin);
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.requires_confirmation, true);
+  assert.match(body.error, /claimed by a device/i);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 1, 'row kept');
+});
+
+test('delete: a claimed code IS deletable with ?force=true', async () => {
+  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
+  db.prepare("UPDATE registration_codes SET status = 'claimed' WHERE id = ?").run(id);
+  assert.equal((await del(id, tok.admin, '?force=true')).status, 200);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 0);
+});
+
+test('delete: unknown id -> 404', async () => {
+  assert.equal((await del('nope', tok.admin)).status, 404);
+});
+
+test('delete: RBAC - workspace_viewer denied (403), row kept', async () => {
+  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
+  assert.equal((await del(id, tok.viewer)).status, 403);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 1);
+});
+
+test('delete: RBAC - an admin of another workspace cannot delete a ws-a code (403)', async () => {
+  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
+  assert.equal((await del(id, tok.outsider)).status, 403);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 1);
+});
