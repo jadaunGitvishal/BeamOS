@@ -9,13 +9,13 @@
 //   - a code generates correctly (6 digits, status 'unused', persisted)
 //   - codes are scoped to the workspace they were minted for
 //   - RBAC: only workspace_admin and above can generate / list codes
-//   - the QR endpoint returns a valid PNG that encodes the code
+//   - the QR endpoint returns a valid PNG that DECODES to the /activate/<code> URL
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
-const QRCode = require('qrcode');
 const sharp = require('sharp');
+const jsQR = require('jsqr');
 
 process.env.JWT_SECRET = 'test-secret-registration-codes';
 
@@ -299,7 +299,15 @@ test('validation: unknown workspace_id -> 404', async () => {
   assert.equal(res.status, 404);
 });
 
-test('QR: endpoint returns a valid PNG that encodes the code', async () => {
+// Decode a PNG QR buffer back to its string payload (real decode, not a
+// byte-compare) — sharp rasterizes, jsQR reads the modules.
+async function decodeQr(pngBuffer) {
+  const { data, info } = await sharp(pngBuffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const res = jsQR(new Uint8ClampedArray(data), info.width, info.height);
+  return res ? res.data : null;
+}
+
+test('QR: endpoint returns a valid PNG that DECODES to the /activate/<code> URL', async () => {
   const mkRes = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
   const { id, code } = await mkRes.json();
 
@@ -308,21 +316,21 @@ test('QR: endpoint returns a valid PNG that encodes the code', async () => {
   assert.equal(qrRes.headers.get('content-type'), 'image/png');
   const buf = Buffer.from(await qrRes.arrayBuffer());
 
-  // PNG magic number.
+  // PNG magic number + a real, decodable 320x320 image.
   assert.deepEqual([...buf.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47], 'starts with the PNG signature');
-
-  // It is a real, decodable 320x320 PNG (sharp parses the container + IDAT).
   const meta = await sharp(buf).metadata();
   assert.equal(meta.format, 'png');
   assert.equal(meta.width, 320);
   assert.equal(meta.height, 320);
 
-  // Byte-identical to a fresh render of THIS code with the endpoint's options,
-  // and NOT identical to a render of a different code -> the image encodes `code`.
-  const opts = { type: 'png', errorCorrectionLevel: 'M', margin: 2, width: 320 };
-  assert.ok(buf.equals(await QRCode.toBuffer(code, opts)), 'QR encodes the issued code');
-  const otherCode = code === '000000' ? '111111' : '000000';
-  assert.ok(!buf.equals(await QRCode.toBuffer(otherCode, opts)), 'QR is not a fixed image');
+  // ACTUALLY decode the QR (rasterize + read the modules) and check its payload.
+  const decoded = await decodeQr(buf);
+  assert.ok(decoded, 'the QR image decodes to a payload');
+  // `base` here is http://127.0.0.1:<port>; the endpoint builds the URL from
+  // req.protocol + req.get('host'), which is exactly that for this request.
+  assert.equal(decoded, `${base}/activate/${code}`, 'QR payload is the full activation URL');
+  assert.match(decoded, /^https?:\/\/[^/]+\/activate\/[0-9]{6}$/);
+  assert.notEqual(decoded, code, 'it is NOT the bare 6-digit code any more');
 });
 
 test('QR: unknown code id -> 404', async () => {

@@ -41,6 +41,7 @@
     "better-sqlite3": "^9.4.3",
     "esbuild": "^0.28.1",
     "js-yaml": "^4.2.0",
+    "jsqr": "^1.4.0",
     "socket.io-client": "^4.8.3",
     "vite": "^5.4.0"
   }

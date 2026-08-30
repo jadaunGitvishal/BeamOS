@@ -498,6 +498,14 @@ app.use("/api/contact", require("./routes/contact"));
 app.use("/api/player-debug", rateLimit(60000, 10));
 app.use("/api/player-debug", require("./routes/player-debug"));
 
+// Ref 30: public activation-code landing page. The registration-code QR encodes a
+// link here (not the bare 6-digit number) so a phone camera opens this clean page
+// instead of running a web search. No auth - the code is already on the QR the
+// installer is holding, and the rate-limited POST .../claim is the real security
+// boundary. Rate-limited anyway (per IP) since it hits the DB and is enumerable.
+app.use("/activate", rateLimit(60000, 60));
+app.get("/activate/:code", require("./lib/activate-page").activateHandler);
+
 // Public branding resolver (#15). Pre-login / pre-workspace contexts (the login
 // page especially) need branding without a token. Resolves custom-domain match
 // -> platform default -> hardcoded ScreenTinker. Domain comes from ?domain= or

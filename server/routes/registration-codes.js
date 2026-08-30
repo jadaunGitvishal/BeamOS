@@ -168,16 +168,20 @@ router.get('/registration-codes', asyncHandler(async (req, res) => {
 }));
 
 // GET /api/provisioning/registration-codes/:id/qr
-// -> image/png QR encoding the bare 6-digit code. Same workspace-admin gate as
-// the rest of the router (resolved from the code's own workspace_id). The
-// dashboard fetches this with the Authorization header and blob-URLs it into an
-// <img>, so it stays inside the standard JWT-only partition (no query-param token).
+// -> image/png QR encoding the LINK to the public /activate/<code> page (not the
+// bare 6-digit number - a bare number makes a phone camera run a web search).
+// Same workspace-admin gate as the rest of the router (resolved from the code's
+// own workspace_id). The dashboard fetches this with the Authorization header and
+// blob-URLs it into an <img>, so it stays inside the standard JWT-only partition.
 router.get('/registration-codes/:id/qr', asyncHandler(async (req, res) => {
   const row = await db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Registration code not found' });
   const ws = await loadAdminWorkspace(req, res, row.workspace_id);
   if (!ws) return;
-  const png = await QRCode.toBuffer(row.code, {
+  // trust proxy is on, so req.protocol / req.get('host') are the public-facing
+  // scheme + host (Cloudflare / reverse-proxy forwarded), not the internal ones.
+  const activateUrl = `${req.protocol}://${req.get('host')}/activate/${row.code}`;
+  const png = await QRCode.toBuffer(activateUrl, {
     type: 'png',
     errorCorrectionLevel: 'M',
     margin: 2,
