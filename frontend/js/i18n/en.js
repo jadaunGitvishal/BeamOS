@@ -479,6 +479,29 @@ export default {
   "apitoken.revoked_toast": "Token revoked",
   "apitoken.revoke_confirm":
     "Revoke this token? Any integration using it stops working immediately.",
+  // Device provisioning (Ref 30 Stage 1: advance registration codes)
+  "provisioning.title": "Device Provisioning",
+  "provisioning.desc":
+    "Generate a registration code before an install. The installer enters the code (or scans its QR) on the device to bind it to the chosen workspace — no admin needed on site.",
+  "provisioning.workspace": "Workspace",
+  "provisioning.planned_name": "Planned device name (optional)",
+  "provisioning.planned_name_placeholder": "e.g. Lobby screen — 2nd floor",
+  "provisioning.generate": "Generate code",
+  "provisioning.generated_toast": "Registration code generated",
+  "provisioning.none": "No registration codes for this workspace yet.",
+  "provisioning.col_code": "Code",
+  "provisioning.col_planned_name": "Planned name",
+  "provisioning.col_status": "Status",
+  "provisioning.col_created": "Created",
+  "provisioning.col_device": "Claimed by",
+  "provisioning.col_qr": "QR",
+  "provisioning.status_unused": "Unused",
+  "provisioning.status_claimed": "Claimed",
+  "provisioning.show_qr": "Show QR",
+  "provisioning.qr_alt": "QR code for {code}",
+  "provisioning.no_admin_workspace":
+    "You need workspace-admin access to generate registration codes.",
+
   "settings.save_profile": "Save Profile",
   "settings.email_alerts": "Email me when devices go offline",
   "settings.change_password": "Change Password",

@@ -48,6 +48,19 @@ export const api = {
     body: JSON.stringify({ pairing_code, name })
   }),
 
+  // Device registration codes (Ref 30 Stage 1). Workspace-admin only server-side
+  // (canAdminWorkspace gate). The QR image is fetched separately (blob) below.
+  getRegistrationCodes: (workspaceId) => request(`/provisioning/registration-codes?workspace_id=${encodeURIComponent(workspaceId)}`),
+  createRegistrationCode: (workspace_id, planned_device_name) => request('/provisioning/registration-codes', {
+    method: 'POST',
+    body: JSON.stringify({ workspace_id, planned_device_name: planned_device_name || null }),
+  }),
+  getRegistrationCodeQrUrl: async (id) => {
+    const res = await fetch(`${API_BASE}/provisioning/registration-codes/${id}/qr`, { headers: getAuthHeaders() });
+    if (!res.ok) throw new Error('Failed to load QR image');
+    return URL.createObjectURL(await res.blob());
+  },
+
   // Content
   getContent: (folderId) => {
     if (folderId === undefined) return request('/content');

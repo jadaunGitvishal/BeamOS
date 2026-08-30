@@ -42,6 +42,9 @@ const PUBLIC_ROUTERS = [
 const JWT_ONLY_ROUTERS = [
   { path: '/api/ai',          mod: './routes/ai',           tenancy: true },
   { path: '/api/provision',   mod: './routes/provisioning', tenancy: true },
+  // Ref 30 Stage 1: advance device registration codes. Targets a workspace by
+  // body/query param and gates per-handler (canAdminWorkspace), so no tenancy.
+  { path: '/api/provisioning', mod: './routes/registration-codes' },
   { path: '/api/teams',       mod: './routes/teams',        tenancy: true },
   { path: '/api/white-label', mod: './routes/white-label',  tenancy: true },
   { path: '/api/workspaces',  mod: './routes/workspaces' },

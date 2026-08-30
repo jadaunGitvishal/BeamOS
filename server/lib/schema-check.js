@@ -13,6 +13,7 @@
 const REQUIRED_TABLES = [
   'users', 'organizations', 'organization_members', 'workspaces', 'workspace_members',
   'devices', 'content', 'playlists', 'activity_log', 'schema_migrations',
+  'registration_codes', // Ref 30 Stage 1: advance device registration codes
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is

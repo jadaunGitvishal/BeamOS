@@ -894,6 +894,35 @@ CREATE TABLE IF NOT EXISTS device_usage_daily (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_usage_daily_day ON device_usage_daily(day);
 
+-- ===================== DEVICE REGISTRATION CODES (Ref 30) =====================
+-- Ref 30 Stage 1: advance device registration codes. A workspace_admin (or org /
+-- platform admin) generates a 6-digit code ahead of an install, optionally naming
+-- the device it is destined for. An installer later enters that code ON the device
+-- to bind it to the workspace - no admin present at install time.
+--
+-- Distinct from devices.pairing_code: there the DEVICE generates the code on first
+-- contact and the admin types it into the dashboard. Here the ADMIN generates the
+-- code and the device consumes it (the device-side claim is Stage 2, not built yet).
+--
+-- status: 'unused' (freshly generated, claimable) | 'claimed' (a device consumed it).
+-- A claimed row keeps its code value for the audit trail; new codes only avoid
+-- colliding with other 'unused' rows, and any live lookup filters status = 'unused'.
+CREATE TABLE IF NOT EXISTS registration_codes (
+    id                   VARCHAR(64) PRIMARY KEY,
+    code                 VARCHAR(6) NOT NULL UNIQUE,
+    workspace_id         VARCHAR(64) NOT NULL,
+    planned_device_name  VARCHAR(255),
+    status               VARCHAR(20) NOT NULL DEFAULT 'unused',
+    created_by           VARCHAR(64) NOT NULL,
+    created_at           BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    claimed_by_device_id VARCHAR(64),
+    claimed_at           BIGINT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id),
+    FOREIGN KEY (claimed_by_device_id) REFERENCES devices(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_registration_codes_workspace ON registration_codes(workspace_id, created_at DESC);
+
 -- ===================== SCHEMA MIGRATIONS =====================
 
 CREATE TABLE IF NOT EXISTS schema_migrations (

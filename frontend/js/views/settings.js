@@ -10,6 +10,9 @@ import {
 import { esc, isPlatformAdmin } from "../utils.js";
 import { resetBranding } from "../branding.js";
 
+// Ref 30: blob URLs for the Device Provisioning QR images, revoked on view exit.
+let provObjectUrls = [];
+
 export async function render(container) {
   const serverUrl = `${window.location.protocol}//${window.location.host}`;
   // Fetch fresh user from the server — plan_id and role may have been changed
@@ -22,6 +25,12 @@ export async function render(container) {
     user = JSON.parse(localStorage.getItem("user") || "{}");
   }
   const isSuperAdmin = isPlatformAdmin(user);
+  // Ref 30: workspaces the caller may administer (can_admin comes from /me).
+  // Drives the Device Provisioning section — generating registration codes is
+  // workspace-admin+ only, enforced again server-side (canAdminWorkspace).
+  const adminWorkspaces = (user.accessible_workspaces || []).filter(
+    (w) => w.can_admin,
+  );
   // #14: the legacy 'admin' platform role was normalized away; platform-level
   // admin is now just isPlatformAdmin. (Elevated capability otherwise comes from
   // org/workspace membership, gated in the members views, not users.role.)
@@ -125,6 +134,36 @@ export async function render(container) {
       <div id="tokenList"><p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p></div>
       <div id="tokenEditPanel" style="display:none"></div>
     </div>
+
+    ${
+      adminWorkspaces.length
+        ? `
+    <div class="settings-section" id="provisioningSection">
+      <h3>${t("provisioning.title")}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px">${t("provisioning.desc")}</p>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
+        <div class="form-group" style="margin-bottom:0;min-width:200px">
+          <label>${t("provisioning.workspace")}</label>
+          <select id="provWorkspace" class="input" style="background:var(--bg-input)">
+            ${adminWorkspaces
+              .map(
+                (w) =>
+                  `<option value="${esc(String(w.id))}">${esc(w.name || w.id)}${w.organization_name ? " · " + esc(w.organization_name) : ""}</option>`,
+              )
+              .join("")}
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px">
+          <label>${t("provisioning.planned_name")}</label>
+          <input type="text" id="provName" class="input" placeholder="${esc(t("provisioning.planned_name_placeholder"))}" maxlength="255">
+        </div>
+        <button class="btn btn-primary btn-sm" id="provGenerateBtn">${t("provisioning.generate")}</button>
+      </div>
+      <div id="provList"><p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p></div>
+    </div>
+    `
+        : ""
+    }
 
     ${
       isAdmin
@@ -586,6 +625,129 @@ export async function render(container) {
 
   loadTokens();
 
+  // ---- Ref 30: Device Provisioning (registration codes) ----
+  if (adminWorkspaces.length) {
+    const provList = document.getElementById("provList");
+    const provWsSel = document.getElementById("provWorkspace");
+    // Blob URLs for the lazily-loaded QR images; revoked in cleanup() so leaving
+    // the view doesn't leak them.
+    provObjectUrls.forEach((u) => URL.revokeObjectURL(u));
+    provObjectUrls = [];
+    const objectUrls = provObjectUrls;
+
+    const statusBadge = (s) => {
+      const claimed = s === "claimed";
+      const label = claimed
+        ? t("provisioning.status_claimed")
+        : t("provisioning.status_unused");
+      const color = claimed ? "var(--text-muted)" : "var(--success)";
+      return `<span style="color:${color};font-size:12px;font-weight:500">${esc(label)}</span>`;
+    };
+
+    async function loadProvisioning() {
+      const wsId = provWsSel.value;
+      if (!wsId) return;
+      provList.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p>`;
+      let codes;
+      try {
+        codes = await api.getRegistrationCodes(wsId);
+      } catch (err) {
+        provList.innerHTML = `<p style="color:var(--danger);font-size:13px">${esc(err.message)}</p>`;
+        return;
+      }
+      if (!codes.length) {
+        provList.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t("provisioning.none")}</p>`;
+        return;
+      }
+      provList.innerHTML = `
+        <div class="table-wrap">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:620px">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);text-align:left">
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_code")}</th>
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_planned_name")}</th>
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_status")}</th>
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_created")}</th>
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_device")}</th>
+              <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("provisioning.col_qr")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${codes
+              .map(
+                (c) => `
+              <tr style="border-bottom:1px solid var(--border)">
+                <td style="padding:10px 12px;font-family:monospace;font-weight:700;font-size:16px;letter-spacing:2px">${esc(c.code)}</td>
+                <td style="padding:10px 12px">${esc(c.planned_device_name || "—")}</td>
+                <td style="padding:10px 12px">${statusBadge(c.status)}</td>
+                <td style="padding:10px 12px">${esc(fmtTokenDate(c.created_at))}</td>
+                <td style="padding:10px 12px">${esc(c.claimed_by_device_name || "—")}</td>
+                <td style="padding:10px 12px">
+                  <button class="btn btn-secondary btn-sm prov-qr-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr")}</button>
+                  <div class="prov-qr-slot" data-id="${esc(String(c.id))}"></div>
+                </td>
+              </tr>
+            `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+        </div>
+      `;
+
+      provList.querySelectorAll(".prov-qr-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const slot = provList.querySelector(
+            `.prov-qr-slot[data-id="${CSS.escape(btn.dataset.id)}"]`,
+          );
+          if (slot.dataset.loaded) {
+            slot.style.display = slot.style.display === "none" ? "" : "none";
+            return;
+          }
+          btn.disabled = true;
+          try {
+            const url = await api.getRegistrationCodeQrUrl(btn.dataset.id);
+            objectUrls.push(url);
+            const img = document.createElement("img");
+            img.src = url;
+            img.alt = t("provisioning.qr_alt", { code: btn.dataset.code });
+            img.style.cssText =
+              "display:block;width:160px;height:160px;margin-top:8px;background:#fff;padding:6px;border-radius:6px";
+            slot.appendChild(img);
+            slot.dataset.loaded = "1";
+          } catch (err) {
+            showToast(err.message, "error");
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+
+    provWsSel.addEventListener("change", loadProvisioning);
+
+    document
+      .getElementById("provGenerateBtn")
+      ?.addEventListener("click", async () => {
+        const btn = document.getElementById("provGenerateBtn");
+        const wsId = provWsSel.value;
+        const name = document.getElementById("provName").value.trim();
+        btn.disabled = true;
+        try {
+          await api.createRegistrationCode(wsId, name);
+          document.getElementById("provName").value = "";
+          showToast(t("provisioning.generated_toast"), "success");
+          await loadProvisioning();
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+    loadProvisioning();
+  }
+
   // #73: agency scope reveals a playlist picker (the token's allowlist). Loaded lazily once.
   const tokScopeSel = document.getElementById("tokScope");
   let agencyPlaylistsLoaded = false;
@@ -945,4 +1107,7 @@ async function loadUsers() {
   }
 }
 
-export function cleanup() {}
+export function cleanup() {
+  provObjectUrls.forEach((u) => URL.revokeObjectURL(u));
+  provObjectUrls = [];
+}
