@@ -9,7 +9,11 @@ android {
 
     defaultConfig {
         applicationId = "com.remotedisplay.player"
-        minSdk = 24
+        // Ref 26: Android 5.0. 21 is the practical floor — OkHttp 4.x and
+        // androidx.security-crypto both require API 21, and the <ripple> button
+        // drawable is API 21. Core-library desugaring (below) backports java.time
+        // so ScheduleEval works on 21-25 where it isn't in the platform yet.
+        minSdk = 21
         targetSdk = 34
         versionCode = 41
         versionName = "1.9.2-patch3"
@@ -39,6 +43,11 @@ android {
     }
 
     compileOptions {
+        // Ref 26 / java.time crash guard: backport java.time (used by ScheduleEval.kt),
+        // java.util.stream, etc. down to minSdk. java.time only entered the platform at
+        // API 26, so without this ScheduleEval throws NoClassDefFoundError on API 21-25 —
+        // a real crash on the CURRENT minSdk 24, not just a future one.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -49,6 +58,10 @@ android {
 }
 
 dependencies {
+    // Ref 26: core-library desugaring runtime — backports java.time & friends to minSdk.
+    // 2.1.4 is the current recommended release for AGP 8.x (AGP 8.2 here).
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
     // AndroidX
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")

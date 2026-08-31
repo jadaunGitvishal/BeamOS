@@ -110,6 +110,12 @@ class PowerAccessibilityService : AccessibilityService() {
      * Works system-wide - can tap on system dialogs, other apps, etc.
      */
     fun injectTap(normalizedX: Float, normalizedY: Float) {
+        // dispatchGesture + GestureDescription are API 24. Below N the platform can't
+        // inject gestures at all, so this is a no-op (remote touch just won't work there).
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            Log.w(TAG, "injectTap: gesture injection needs API 24+, ignoring")
+            return
+        }
         val metrics = getScreenMetrics()
         val x = normalizedX * metrics.widthPixels
         val y = normalizedY * metrics.heightPixels
@@ -125,6 +131,10 @@ class PowerAccessibilityService : AccessibilityService() {
      * Inject a swipe gesture at normalized coordinates.
      */
     fun injectSwipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            Log.w(TAG, "injectSwipe: gesture injection needs API 24+, ignoring")
+            return
+        }
         val metrics = getScreenMetrics()
         val sx = startX * metrics.widthPixels
         val sy = startY * metrics.heightPixels

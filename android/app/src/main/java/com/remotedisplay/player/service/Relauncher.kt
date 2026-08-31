@@ -52,8 +52,10 @@ object Relauncher {
         }
 
         // 1. Overlay-direct: the most reliable bg-launch path when the overlay is granted.
+        // Settings.canDrawOverlays is API 23 (M) — on 21-22, SYSTEM_ALERT_WINDOW is an
+        // install-time permission that's always granted, so treat the overlay as available.
         var launched = false
-        if (Settings.canDrawOverlays(context)) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)) {
             try {
                 context.startActivity(launchIntent)
                 launched = true

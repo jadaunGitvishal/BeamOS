@@ -43,8 +43,13 @@ object ScheduleEval {
             val nowMin = zdt.hour * 60 + zdt.minute
             val date = zdt.toLocalDate()
             blocks.any { blockMatches(it, dow, nowMin, date) }
-        } catch (e: Exception) {
-            true // fail open
+        } catch (e: Throwable) {
+            // FAILS OPEN, for real: not just Exception. A missing java.time on an
+            // un-desugared API 21-25 build throws NoClassDefFoundError (an Error),
+            // and a bad IANA id can surface as an ExceptionInInitializerError - both
+            // are Throwable, not Exception. A blank screen is worse than an
+            // over-running promo, so ANY failure here plays the item.
+            true
         }
     }
 

@@ -1,5 +1,6 @@
 package com.remotedisplay.player.util
 
+import android.os.Build
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -8,6 +9,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.annotation.RequiresApi
 
 /**
  * Shared setup + helpers for the player's WebViews (zone widgets, fullscreen
@@ -39,11 +41,17 @@ object WebViewSupport {
         }
         webView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         webView.webViewClient = object : WebViewClient() {
+            // The WebResourceRequest/WebResourceError overloads are API 23; the framework
+            // only dispatches to them on API 23+ (21-22 gets the deprecated String overload,
+            // which we don't override — errors just aren't logged there). @RequiresApi keeps
+            // that contract explicit and lint-clean.
+            @RequiresApi(Build.VERSION_CODES.M)
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                 if (request?.isForMainFrame == true) {
                     DebugLog.e(tag, "WebView load error ${error?.errorCode} ${error?.description} url=${request.url}")
                 }
             }
+            @RequiresApi(Build.VERSION_CODES.M)
             override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
                 if (request?.isForMainFrame == true) {
                     DebugLog.e(tag, "WebView HTTP ${errorResponse?.statusCode} url=${request.url}")

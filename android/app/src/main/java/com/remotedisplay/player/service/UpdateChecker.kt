@@ -398,7 +398,10 @@ class UpdateChecker(private val context: Context) {
     // populated for ARCHIVE reads on API 28/29). Both yield the same cert for a normally-signed
     // APK; the caller compares as sets so an overlapping signer still verifies.
     private fun signingCertHashes(info: PackageInfo, useSigningInfo: Boolean): Set<String> {
-        val sigs: Array<Signature>? = if (useSigningInfo) {
+        // `useSigningInfo` is only ever passed true by callers that already gated on
+        // SDK_INT >= P/R; the extra SDK_INT check here makes PackageInfo.signingInfo
+        // (API 28) locally verifiable instead of relying on caller discipline.
+        val sigs: Array<Signature>? = if (useSigningInfo && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             info.signingInfo?.apkContentsSigners
         } else {
             @Suppress("DEPRECATION") info.signatures

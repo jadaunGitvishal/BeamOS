@@ -159,6 +159,10 @@ class DeviceInfo(private val context: Context) {
      * available. (#134 follow-up: "device reports 720p while the monitor shows a 1080 signal".)
      */
     private fun getOutputResolution(): Pair<Int, Int> {
+        // Display.getMode() / Display.Mode.physicalWidth are API 23. On 21-22 there is
+        // no separate "output mode" concept exposed, so fall straight through to the
+        // render-surface size. (The catch(Throwable) below is still the backstop.)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return renderSurfaceSize()
         return try {
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             @Suppress("DEPRECATION")

@@ -54,8 +54,14 @@ class SetupActivity : AppCompatActivity() {
 
         setContentView(R.layout.activity_setup)
 
+        // Battery-optimization exemption and the overlay permission are both API 23
+        // concepts (no Doze, and SYSTEM_ALERT_WINDOW is auto-granted, before M). Their
+        // Settings screens don't exist on 21-22, so hide those rows entirely there.
+        val preM = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+
         // App's UI is up — clear the boot "Starting display…" notification.
-        getSystemService(NotificationManager::class.java)?.cancel(999)
+        // (getSystemService(Class) is API 23 — use the string-constant overload.)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(999)
 
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = (
@@ -118,6 +124,11 @@ class SetupActivity : AppCompatActivity() {
         enableBatteryBtn = findViewById(R.id.enableBatteryBtn)
         overlayStatus = findViewById(R.id.overlayStatus)
         enableOverlayBtn = findViewById(R.id.enableOverlayBtn)
+
+        if (preM) {
+            findViewById<View>(R.id.batteryRow).visibility = View.GONE
+            findViewById<View>(R.id.overlayRow).visibility = View.GONE
+        }
 
         // Display-over-other-apps: alternate boot-launch path. With this granted the
         // boot receiver can directly start the activity from the background, which
@@ -219,15 +230,15 @@ class SetupActivity : AppCompatActivity() {
             enableFullscreenBtn.visibility = if (canFsi) View.GONE else View.VISIBLE
         }
 
-        // Battery optimization exemption
-        val ignoringBattery = (getSystemService(Context.POWER_SERVICE) as PowerManager)
-            .isIgnoringBatteryOptimizations(packageName)
+        // Battery optimization exemption (API 23+ — no Doze before M, so "exempt").
+        val ignoringBattery = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            (getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
         batteryStatus.text = if (ignoringBattery) "ON" else "OFF"
         batteryStatus.setTextColor(if (ignoringBattery) 0xFF22C55E.toInt() else 0xFFEF4444.toInt())
         enableBatteryBtn.visibility = if (ignoringBattery) View.GONE else View.VISIBLE
 
-        // Display over other apps
-        val canOverlay = Settings.canDrawOverlays(this)
+        // Display over other apps (Settings.canDrawOverlays is API 23 — auto-granted before M).
+        val canOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
         overlayStatus.text = if (canOverlay) "ON" else "OFF"
         overlayStatus.setTextColor(if (canOverlay) 0xFF22C55E.toInt() else 0xFFEF4444.toInt())
         enableOverlayBtn.visibility = if (canOverlay) View.GONE else View.VISIBLE
