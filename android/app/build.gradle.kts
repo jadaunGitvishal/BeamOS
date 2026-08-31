@@ -5,7 +5,10 @@ plugins {
 
 android {
     namespace = "com.remotedisplay.player"
-    compileSdk = 34
+    // Ref 26 (targetSdk arm): compile against Android 16 (API 36). AGP 8.2.0 was
+    // validated up to compileSdk 34; 36 works but needs the unsupported-compileSdk
+    // warning suppressed (android.suppressUnsupportedCompileSdk in gradle.properties).
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.remotedisplay.player"
@@ -14,7 +17,15 @@ android {
         // drawable is API 21. Core-library desugaring (below) backports java.time
         // so ScheduleEval works on 21-25 where it isn't in the platform yet.
         minSdk = 21
-        targetSdk = 34
+        // Ref 26 (targetSdk arm): opt in to Android 15/16 (API 35/36) behaviour.
+        // Audited behaviour changes that activate at this target: predictive back
+        // (MainActivity.onBackPressed is an empty kiosk override — still honoured via
+        // the platform compat callback), edge-to-edge enforcement (app is already
+        // windowFullscreen immersive), FGS-from-BOOT_COMPLETED restriction on the
+        // mediaPlayback type (Relauncher already catches the failure; MainActivity
+        // restarts the service from a foreground context), and 16 KB page size
+        // (no bundled native libs — non-applicable).
+        targetSdk = 36
         versionCode = 41
         versionName = "1.9.2-patch3"
     }
