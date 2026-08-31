@@ -1,12 +1,44 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { usePeriod } from "../hooks/usePeriod";
 import { apiFetch } from "../lib/api";
 import { n0, cPill, formatDuration, periodWindow, periodLabel } from "../lib/format";
 import StatTile from "../components/StatTile";
 
+// Authenticated download, not a plain <a href> - export needs the Bearer
+// token, which only fetch() can attach. Same fetch -> blob -> synthetic-<a>-click
+// pattern as DevicesView.jsx's downloadDevices.
+async function downloadContent(format, startISO) {
+  const token = localStorage.getItem("token");
+  const resp = await fetch(
+    `/api/dashboard/content/export?format=${format}&start=${encodeURIComponent(startISO)}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (!resp.ok) return;
+  const blob = await resp.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `content-${new Date().toISOString().slice(0, 10)}.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 export default function ContentView() {
   const { period } = usePeriod();
+
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportRef = useRef(null);
+  useEffect(() => {
+    if (!exportOpen) return;
+    const onClick = (e) => {
+      if (exportRef.current && !exportRef.current.contains(e.target)) setExportOpen(false);
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, [exportOpen]);
 
   const fetcher = useCallback(
     async ({ signal }) => {
@@ -44,6 +76,35 @@ export default function ContentView() {
         </span>
       </div>
       <p className="sub">Delivery measured against plays logged for each piece of content in this period.</p>
+
+      <div className="ctl mb10" style={{ justifyContent: "flex-end" }}>
+        <div className="export-menu-wrap" ref={exportRef}>
+          <button
+            className="btn"
+            onClick={() => setExportOpen((v) => !v)}
+            aria-haspopup="true"
+            aria-expanded={exportOpen}
+          >
+            Export
+          </button>
+          {exportOpen && (
+            <div className="export-menu" role="menu">
+              {["csv", "xlsx", "pdf"].map((format) => (
+                <button
+                  key={format}
+                  role="menuitem"
+                  onClick={() => {
+                    setExportOpen(false);
+                    downloadContent(format, periodWindow(period).start.toISOString());
+                  }}
+                >
+                  {format.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
 
       <div className="grid g4">
         <StatTile label="Total plays" value={n0(totalPlays)} card />
