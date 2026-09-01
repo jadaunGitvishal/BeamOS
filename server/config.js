@@ -288,6 +288,25 @@ module.exports = {
   // (admin toggle) overrides this once set. Default on (matches prior behavior).
   statusDebugEnabled: process.env.STATUS_DEBUG_ENABLED !== "false",
 
+  // Ref 51 (SLA Dashboard, Stage 1): env DEFAULTS for the platform-wide SLA
+  // targets. A persisted app_settings value (admin toggle) overrides these once
+  // set - see lib/app-settings.getNum() and routes/dashboard-reports.js
+  // GET /sla-overview. Platform-wide on purpose (not per-workspace).
+  slaUptimeTargetPct:
+    parseFloat(process.env.SLA_UPTIME_TARGET_PCT) || 99.0,
+  slaEscalationThresholdHours:
+    parseFloat(process.env.SLA_ESCALATION_THRESHOLD_HOURS) || 4,
+  // Ref 51 Stage 2: the long-term outage recorder (services/outage-history.js).
+  // Must run comfortably more often than statusLogRetentionDays so no outage's
+  // status-log rows age out between two sweeps — every 30 min vs a 3-day window
+  // is a ~144x margin. Lowered via env only for tests.
+  outageHistoryIntervalMs:
+    parseInt(process.env.OUTAGE_HISTORY_INTERVAL_MS) || 30 * 60 * 1000,
+  // outage_history retention, mirroring device_usage_daily's ~400 days. One row
+  // per outage on a low-write table; pruned chunked by the same service.
+  outageHistoryRetentionDays:
+    parseInt(process.env.OUTAGE_HISTORY_RETENTION_DAYS) || 400,
+
   // #146 BILLING — usage metering per the ByteTinker–Bold Media distribution agreement.
   // This is the contractual system-of-record; the DEFAULTS BELOW ARE THE AGREEMENT. Change
   // them only if the contract changes. Single GLOBAL rate card for now — per-tenant rate

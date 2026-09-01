@@ -1028,6 +1028,10 @@ async function boot() {
   const { startReportDigests } = require("./services/report-digest");
   startReportDigests();
 
+  // Ref 51: long-term outage recorder (feeds SLA MTTR beyond status-log retention)
+  const { startOutageHistoryRecorder } = require("./services/outage-history");
+  startOutageHistoryRecorder();
+
   // Start alert service
   const { startAlertService } = require("./services/alerts");
   startAlertService(io);

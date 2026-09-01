@@ -50,4 +50,14 @@ function getBool(key, envDefault) {
 }
 async function setBool(key, value) { await set(key, value ? 'true' : 'false'); }
 
-module.exports = { get, set, getBool, setBool, __reload: loadAll };
+// Numeric read with a caller-supplied default: the PERSISTED value wins once set,
+// else `dflt` (typically a config.js env default). A stored value that doesn't
+// parse as a finite number also falls back to `dflt`.
+function getNum(key, dflt) {
+  const v = get(key, undefined);
+  if (v === undefined) return dflt;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : dflt;
+}
+
+module.exports = { get, set, getBool, setBool, getNum, __reload: loadAll };

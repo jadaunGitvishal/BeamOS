@@ -880,6 +880,21 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Ref 51 (SLA Dashboard, Stage 1): PLATFORM-WIDE SLA targets. Deliberately in
+-- app_settings, not a per-workspace table or a new singleton table: the target is
+-- one number for the whole platform (not per-tenant), it's admin-toggleable at
+-- runtime, and app_settings already gives us the in-memory cache + set() API +
+-- an admin-route precedent (status_debug_enabled). A new table would need its own
+-- single-row enforcement, cache and CRUD for no benefit. INSERT IGNORE seeds the
+-- defaults so an admin sees a concrete current value; lib/app-settings.getNum()
+-- still falls back to the config.js env default if the row is ever absent.
+--   sla_uptime_target_pct          - uptime % at/above which a device is Compliant
+--   sla_escalation_threshold_hours - hours a device may be continuously offline
+--                                    before the ongoing outage is a live breach
+INSERT IGNORE INTO app_settings (`key`, value) VALUES
+    ('sla_uptime_target_pct', '99.0'),
+    ('sla_escalation_threshold_hours', '4');
+
 -- ===================== BILLING USAGE ROLLUP =====================
 -- #146 BILLING: durable daily usage rollup (contractual system-of-record). One tiny row
 -- per device per calendar day; accumulated incrementally off the heartbeat tick (NOT
@@ -893,6 +908,35 @@ CREATE TABLE IF NOT EXISTS device_usage_daily (
     PRIMARY KEY (device_id, day)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_usage_daily_day ON device_usage_daily(day);
+
+-- ===================== OUTAGE HISTORY (Ref 51, SLA Dashboard) =====================
+-- Durable record of COMPLETED device outages (offline -> back online), one row per
+-- outage. Exists for the SAME reason device_usage_daily does: device_status_log is
+-- pruned to ~3 days (config.statusLogRetentionDays), so MTTR computed straight off
+-- it can only ever look back 3 days. This is the long-term rollup that lifts that
+-- limit - accrued by services/outage-history.js, which every ~30 min runs the shared
+-- LAG/LEAD detector (lib/outage-detection.js, the SAME query GET /sla-overview uses
+-- for its live view) over a window well inside the retention horizon and inserts any
+-- completed outage not already here. NOT touched by the 3-day status-log prune;
+-- retained ~400 days and pruned chunked by that same service.
+--
+-- UNIQUE (device_id, started_at) is the idempotency key: a re-run of the recorder
+-- over an already-processed window is a safe no-op. Ongoing outages are NOT stored
+-- here (no ended_at yet) - the endpoint reads those live from device_status_log.
+CREATE TABLE IF NOT EXISTS outage_history (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id         VARCHAR(64) NOT NULL,
+    workspace_id      VARCHAR(64) NOT NULL,
+    started_at        BIGINT NOT NULL,
+    ended_at          BIGINT NOT NULL,
+    duration_seconds  BIGINT NOT NULL,
+    recorded_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    UNIQUE KEY uq_outage_history_device_started (device_id, started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+-- Serves the per-workspace, per-period MTTR query in GET /sla-overview.
+CREATE INDEX idx_outage_history_ws_started ON outage_history(workspace_id, started_at);
+-- Serves the recorder's "already recorded?" prefilter and the retention prune.
+CREATE INDEX idx_outage_history_started ON outage_history(started_at);
 
 -- ===================== DEVICE REGISTRATION CODES (Ref 30) =====================
 -- Ref 30 Stage 1: advance device registration codes. A workspace_admin (or org /
