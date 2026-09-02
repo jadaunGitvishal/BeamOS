@@ -5,6 +5,7 @@ const MAP = {
   "/overview": "Overview",
   "/devices": "Screens",
   "/content": "Content delivery",
+  "/regions": "Regions",
   "/issues": "Issues",
 };
 
