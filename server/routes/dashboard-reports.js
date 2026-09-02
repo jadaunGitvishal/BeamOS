@@ -9,6 +9,7 @@ const {
 const appSettings = require("../lib/app-settings");
 const config = require("../config");
 const { detectOutages } = require("../lib/outage-detection");
+const { deviceAvailabilityRows } = require("../lib/sla");
 
 // Merged in from BeamOS-Dashboard's routes/reports.js.
 
@@ -28,22 +29,11 @@ router.get(
       req.query.start || isoDate(new Date(Date.now() - 30 * 86400000));
     const endDate = req.query.end || isoDate(new Date());
 
-    const wsScope = getWorkspaceDeviceSubquery(req);
-    const rows = await db
-      .prepare(
-        `
-      SELECT
-        device_id,
-        SUM(online_seconds) AS total_online_seconds,
-        COUNT(*) AS days_counted,
-        ROUND(SUM(online_seconds) / (COUNT(*) * 86400) * 100, 1) AS avg_availability_pct
-      FROM device_usage_daily
-      WHERE day BETWEEN ? AND ?${wsScope.sql}
-      GROUP BY device_id
-    `,
-      )
-      .all(startDate, endDate, ...wsScope.params);
-
+    const rows = await deviceAvailabilityRows(db, {
+      startDate,
+      endDate,
+      scope: getWorkspaceDeviceSubquery(req),
+    });
     res.json(rows);
   }),
 );
@@ -173,24 +163,12 @@ router.get(
       )
       .all(req.workspaceId);
 
-    // --- 1. uptime % (same query as GET /availability) --------------------
-    const wsScope = getWorkspaceDeviceSubquery(req);
-    const availRows = await db
-      .prepare(
-        `
-      SELECT
-        device_id,
-        SUM(online_seconds) AS total_online_seconds,
-        COUNT(*) AS days_counted,
-        ROUND(SUM(online_seconds) * 100.0 / (COUNT(*) * 86400), 1) AS avg_availability_pct
-      FROM device_usage_daily
-      WHERE day BETWEEN ? AND ?${wsScope.sql}
-      GROUP BY device_id
-    `,
-      )
-      .all(startDate, endDate, ...wsScope.params);
-    // (mirrors GET /availability; * 100.0 keeps the division floating-point on
-    // every SQL engine, not just MySQL.)
+    // --- 1. uptime % (shared lib/sla.js query — same as GET /availability) ---
+    const availRows = await deviceAvailabilityRows(db, {
+      startDate,
+      endDate,
+      scope: getWorkspaceDeviceSubquery(req),
+    });
     const availByDevice = new Map(availRows.map((r) => [r.device_id, r]));
 
     // --- 2. completed outages / MTTR — from the durable rollup ------------

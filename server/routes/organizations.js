@@ -3,6 +3,8 @@ const crypto = require("crypto");
 const router = express.Router();
 const { db } = require("../db/database");
 const { canAdminOrg, canAccessOrg, canManageOrgRegions } = require("../lib/permissions");
+const { accessibleWorkspaceIds } = require("../lib/tenancy");
+const { isoDate, slaUptimeTarget, deviceAvailabilityRows, meanAvailability, slaStatus } = require("../lib/sla");
 const { isPlatformRole } = require("../middleware/auth");
 const { logActivity, getClientIp } = require("../services/activity");
 const { asyncHandler } = require("../lib/async-handler");
@@ -380,6 +382,105 @@ router.get(
       )
       .all(org.id);
     res.json(regions);
+  }),
+);
+
+// GET /:orgId/regions/sla-overview?start=YYYY-MM-DD&end=YYYY-MM-DD
+// Phase 3 Stage B — per-region SLA rollup. Spans workspaces, so it is NOT gated
+// on a single-workspace role: any user who can reach at least one workspace in
+// this org sees it, and the numbers are scoped to exactly the workspaces they
+// can reach (accessibleWorkspaceIds — the same cross-org access logic /me and
+// socket-room scoping use). Not org-admin-only: a plain workspace_member gets a
+// correct rollup covering only their workspace(s), never a leak of the rest.
+// Uses the shared lib/sla.js uptime calc so the numbers agree with the
+// per-device SLA overview. "Unassigned" is a bucket for region-less workspaces
+// (only shown if the caller can see one). A region with no visible workspace is
+// omitted entirely.
+router.get(
+  "/:orgId/regions/sla-overview",
+  asyncHandler(async (req, res) => {
+    const org = await db
+      .prepare("SELECT id, name FROM organizations WHERE id = ?")
+      .get(req.params.orgId);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+
+    const accessible = new Set(await accessibleWorkspaceIds(req.user.id, req.user.role));
+    const orgWorkspaces = await db
+      .prepare(
+        `SELECT w.id, w.region_id, r.name AS region_name
+         FROM workspaces w LEFT JOIN regions r ON r.id = w.region_id
+         WHERE w.organization_id = ?`,
+      )
+      .all(org.id);
+    const visible = orgWorkspaces.filter((w) => accessible.has(w.id));
+    if (!visible.length) {
+      return res.status(403).json({ error: "No accessible workspaces in this organization" });
+    }
+
+    const startDate = req.query.start || isoDate(new Date(Date.now() - 30 * 86400000));
+    const endDate = req.query.end || isoDate(new Date());
+    const target = slaUptimeTarget();
+
+    const visibleIds = visible.map((w) => w.id);
+    const ph = visibleIds.map(() => "?").join(",");
+
+    const deviceRows = await db
+      .prepare(`SELECT id, workspace_id FROM devices WHERE workspace_id IN (${ph})`)
+      .all(...visibleIds);
+    const availRows = await deviceAvailabilityRows(db, {
+      startDate,
+      endDate,
+      scope: {
+        sql: ` AND device_id IN (SELECT id FROM devices WHERE workspace_id IN (${ph}))`,
+        params: visibleIds,
+      },
+    });
+    const availByDevice = new Map(availRows.map((r) => [r.device_id, r]));
+    const wsRegionKey = new Map(visible.map((w) => [w.id, w.region_id || "__unassigned__"]));
+
+    const buckets = new Map();
+    for (const w of visible) {
+      const key = w.region_id || "__unassigned__";
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          region_id: w.region_id || null,
+          region_name: w.region_id ? w.region_name : "Unassigned",
+          workspaceCount: 0,
+          deviceIds: [],
+        });
+      }
+      buckets.get(key).workspaceCount += 1;
+    }
+    for (const d of deviceRows) {
+      buckets.get(wsRegionKey.get(d.workspace_id)).deviceIds.push(d.id);
+    }
+
+    const regions = [...buckets.values()]
+      .map((b) => {
+        const rows = b.deviceIds.map((id) => availByDevice.get(id)).filter(Boolean);
+        const { avgPct, devicesWithData } = meanAvailability(rows);
+        return {
+          region_id: b.region_id,
+          region_name: b.region_name,
+          workspace_count: b.workspaceCount,
+          device_count: b.deviceIds.length,
+          devices_with_data: devicesWithData,
+          avg_uptime_pct: avgPct,
+          sla_status: slaStatus(avgPct, target),
+        };
+      })
+      .sort(
+        (a, b) =>
+          (a.region_id === null) - (b.region_id === null) ||
+          a.region_name.localeCompare(b.region_name),
+      );
+
+    res.json({
+      organization_id: org.id,
+      target: { uptime_target_pct: target },
+      period: { start: startDate, end: endDate },
+      regions,
+    });
   }),
 );
 
