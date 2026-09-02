@@ -87,7 +87,7 @@ export default function DevicesView() {
   return (
     <>
       <div className="pt">
-        <h1>Devices</h1>
+        <h1>Screens</h1>
         <span className="stamp">
           {list.length} of {devices.length} devices
         </span>

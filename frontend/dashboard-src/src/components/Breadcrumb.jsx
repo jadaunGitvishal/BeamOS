@@ -3,7 +3,7 @@ import { useBreadcrumb } from "../hooks/useBreadcrumb";
 
 const MAP = {
   "/overview": "Overview",
-  "/devices": "Devices",
+  "/devices": "Screens",
   "/content": "Content delivery",
   "/issues": "Issues",
 };
@@ -16,7 +16,7 @@ export default function Breadcrumb() {
   if (path.startsWith("/device/")) {
     return (
       <div className="crumb">
-        <Link to="/devices">Devices</Link> <span>/</span> <b>{deviceCrumbName || "Device"}</b>
+        <Link to="/devices">Screens</Link> <span>/</span> <b>{deviceCrumbName || "Device"}</b>
       </div>
     );
   }

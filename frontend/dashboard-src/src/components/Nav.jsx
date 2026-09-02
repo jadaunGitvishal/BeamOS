@@ -3,7 +3,7 @@ import { useSession } from "../hooks/useSession";
 
 const BASE_NAV = [
   { path: "/overview", label: "Overview", countKey: null },
-  { path: "/devices", label: "Devices", countKey: "devices" },
+  { path: "/devices", label: "Screens", countKey: "devices" },
   { path: "/content", label: "Content delivery", countKey: null },
 ];
 
