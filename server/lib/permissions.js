@@ -163,9 +163,22 @@ async function canAdminOrg(db, user, org) {
   return !!om && om.role === 'org_owner';
 }
 
+// Phase 3 Stage A: manage ORG-scoped resources that aren't membership (regions,
+// and future org-level config). Broader than canAdminOrg (owner-only, because
+// membership mutations are high-stakes) but narrower than canAccessOrg (which
+// also lets a platform_operator in). Tier: platform owner-role, or org_owner /
+// org_admin of THIS org.
+async function canManageOrgRegions(db, user, org) {
+  if (!user || !org) return false;
+  if (isPlatformRole(user.role)) return true;
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+    .get(org.id, user.id);
+  return !!om && (om.role === 'org_owner' || om.role === 'org_admin');
+}
+
 module.exports = {
   // boolean predicates
-  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canAdminOrg, canAccessOrg, isOrgAdmin, isOrgOwner,
+  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canAdminOrg, canAccessOrg, canManageOrgRegions, isOrgAdmin, isOrgOwner,
   // express middleware
   requireWorkspace,
   requireWorkspaceRead,

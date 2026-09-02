@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
 const { db } = require("../db/database");
-const { canAdminWorkspace, canAccessWorkspace } = require("../lib/permissions");
+const { canAdminWorkspace, canAccessWorkspace, canManageOrgRegions } = require("../lib/permissions");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
@@ -553,6 +553,42 @@ router.delete(
       )
       .run(ws.id, req.params.userId);
     res.json({ success: true });
+  }),
+);
+
+// PATCH /:id/region  { region_id: <id> | null } — assign/unassign a workspace to
+// one of its ORG's regions. Phase 3 Stage A. Regions are an org-level concept:
+// gated on canManageOrgRegions (org_owner/org_admin of the workspace's org, or
+// platform owner-role) — a plain workspace_admin CANNOT change this.
+router.patch(
+  "/:id/region",
+  asyncHandler(async (req, res) => {
+    const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(req.params.id);
+    if (!ws) return res.status(404).json({ error: "Workspace not found" });
+    const org = await db.prepare("SELECT * FROM organizations WHERE id = ?").get(ws.organization_id);
+    if (!(await canManageOrgRegions(db, req.user, org))) {
+      return res.status(403).json({ error: "Organization admin access required" });
+    }
+    req.workspaceId = ws.id; // audit attribution (no resolveTenancy on this router)
+
+    if (!("region_id" in (req.body || {}))) {
+      return res.status(400).json({ error: "region_id required (send null to unassign)" });
+    }
+    let regionId = req.body.region_id;
+    if (regionId !== null) {
+      regionId = String(regionId);
+      const region = await db
+        .prepare("SELECT id FROM regions WHERE id = ? AND organization_id = ?")
+        .get(regionId, ws.organization_id);
+      if (!region) {
+        return res.status(400).json({ error: "Region not found in this workspace's organization" });
+      }
+    }
+
+    await db
+      .prepare("UPDATE workspaces SET region_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+      .run(regionId, ws.id);
+    res.json({ id: ws.id, region_id: regionId });
   }),
 );
 

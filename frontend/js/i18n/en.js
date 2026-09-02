@@ -513,6 +513,28 @@ export default {
   "provisioning.no_admin_workspace":
     "You need workspace-admin access to generate registration codes.",
 
+  // Regions (Phase 3 Stage A)
+  "regions.title": "Regions",
+  "regions.desc":
+    "Group this organization's workspaces into regions. Regions are managed per-organization; deleting one just unassigns its workspaces, it never deletes them.",
+  "regions.name_placeholder": "e.g. North America",
+  "regions.create": "Add region",
+  "regions.created_toast": "Region created",
+  "regions.renamed_toast": "Region renamed",
+  "regions.deleted_toast": "Region deleted",
+  "regions.none": "No regions yet. Add one above.",
+  "regions.col_name": "Region",
+  "regions.col_workspaces": "Workspaces",
+  "regions.col_actions": "Actions",
+  "regions.rename": "Rename",
+  "regions.rename_prompt": "New name for this region:",
+  "regions.delete": "Delete",
+  "regions.delete_confirm":
+    "Delete this region? Its {count} workspace(s) will become unassigned (not deleted).",
+  "regions.assign_heading": "Workspace assignments",
+  "regions.unassigned": "— No region —",
+  "regions.assigned_toast": "Workspace region updated",
+
   "settings.save_profile": "Save Profile",
   "settings.email_alerts": "Email me when devices go offline",
   "settings.change_password": "Change Password",

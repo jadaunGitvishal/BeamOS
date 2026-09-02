@@ -36,6 +36,19 @@ export async function render(container) {
   // org/workspace membership, gated in the members views, not users.role.)
   const isAdmin = isSuperAdmin;
 
+  // Phase 3 Stage A: Regions section — org-level, so gated on org_owner/org_admin
+  // of the current org (or a platform admin). The current org's own workspaces
+  // are the ones assignable to its regions. Server re-checks via canManageOrgRegions.
+  const regionOrg = user.current_organization || null;
+  const canManageRegions =
+    !!regionOrg &&
+    (isSuperAdmin ||
+      user.current_org_role === "org_owner" ||
+      user.current_org_role === "org_admin");
+  const regionOrgWorkspaces = (user.accessible_workspaces || []).filter(
+    (w) => regionOrg && w.organization_id === regionOrg.id,
+  );
+
   // #83: the "About" version was hardcoded (showed v1.4.1 regardless of the build).
   // Read it from the server (/api/version) the same way the admin view does.
   let appVersion = "";
@@ -160,6 +173,27 @@ export async function render(container) {
         <button class="btn btn-primary btn-sm" id="provGenerateBtn">${t("provisioning.generate")}</button>
       </div>
       <div id="provList"><p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p></div>
+    </div>
+    `
+        : ""
+    }
+
+    ${
+      canManageRegions
+        ? `
+    <div class="settings-section" id="regionsSection" data-org-id="${esc(regionOrg.id)}">
+      <h3>${t("regions.title")}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px">${esc(t("regions.desc"))}</p>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
+        <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px">
+          <label>${t("regions.col_name")}</label>
+          <input type="text" id="regionName" class="input" placeholder="${esc(t("regions.name_placeholder"))}" maxlength="80">
+        </div>
+        <button class="btn btn-primary btn-sm" id="regionCreateBtn">${t("regions.create")}</button>
+      </div>
+      <div id="regionList"><p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p></div>
+      <h4 style="font-size:14px;margin:20px 0 8px">${t("regions.assign_heading")}</h4>
+      <div id="regionAssignList"><p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p></div>
     </div>
     `
         : ""
@@ -797,6 +831,149 @@ export async function render(container) {
       });
 
     loadProvisioning();
+  }
+
+  // ---- Phase 3 Stage A: Regions ----
+  if (canManageRegions) {
+    const regionsSection = document.getElementById("regionsSection");
+    const orgId = regionsSection.dataset.orgId;
+    const regionList = document.getElementById("regionList");
+    const assignList = document.getElementById("regionAssignList");
+    let regions = [];
+
+    function renderRegionList() {
+      if (!regions.length) {
+        regionList.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t("regions.none")}</p>`;
+        return;
+      }
+      regionList.innerHTML = `
+        <div class="table-wrap">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:420px">
+          <thead><tr style="border-bottom:1px solid var(--border);text-align:left">
+            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("regions.col_name")}</th>
+            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("regions.col_workspaces")}</th>
+            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("regions.col_actions")}</th>
+          </tr></thead>
+          <tbody>
+            ${regions
+              .map(
+                (r) => `
+              <tr style="border-bottom:1px solid var(--border)">
+                <td style="padding:8px 12px">${esc(r.name)}</td>
+                <td style="padding:8px 12px">${r.workspace_count}</td>
+                <td style="padding:8px 12px">
+                  <button class="btn btn-secondary btn-sm region-rename-btn" data-id="${esc(r.id)}" data-name="${esc(r.name)}">${t("regions.rename")}</button>
+                  <button class="btn btn-danger btn-sm region-del-btn" data-id="${esc(r.id)}" data-name="${esc(r.name)}" data-count="${r.workspace_count}">${t("regions.delete")}</button>
+                </td>
+              </tr>`,
+              )
+              .join("")}
+          </tbody>
+        </table></div>`;
+
+      regionList.querySelectorAll(".region-rename-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const next = prompt(t("regions.rename_prompt"), btn.dataset.name);
+          if (next == null || !next.trim() || next.trim() === btn.dataset.name) return;
+          try {
+            await api.renameOrgRegion(orgId, btn.dataset.id, next.trim());
+            showToast(t("regions.renamed_toast"), "success");
+            await loadRegions();
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        });
+      });
+      regionList.querySelectorAll(".region-del-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!confirm(t("regions.delete_confirm", { count: btn.dataset.count }))) return;
+          btn.disabled = true;
+          try {
+            await api.deleteOrgRegion(orgId, btn.dataset.id);
+            showToast(t("regions.deleted_toast"), "success");
+            await loadRegions();
+          } catch (err) {
+            showToast(err.message, "error");
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+
+    function renderAssignList() {
+      if (!regionOrgWorkspaces.length) {
+        assignList.innerHTML = `<p style="color:var(--text-muted);font-size:13px">—</p>`;
+        return;
+      }
+      const opts = (selected) =>
+        `<option value="">${esc(t("regions.unassigned"))}</option>` +
+        regions
+          .map((r) => `<option value="${esc(r.id)}"${r.id === selected ? " selected" : ""}>${esc(r.name)}</option>`)
+          .join("");
+      assignList.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:8px">
+          ${regionOrgWorkspaces
+            .map(
+              (w) => `
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <span style="flex:1;min-width:160px">${esc(w.name || w.id)}</span>
+              <select class="input region-assign-sel" data-ws="${esc(w.id)}" style="min-width:200px;background:var(--bg-input)">
+                ${opts(w.region_id || "")}
+              </select>
+            </div>`,
+            )
+            .join("")}
+        </div>`;
+
+      assignList.querySelectorAll(".region-assign-sel").forEach((sel) => {
+        sel.addEventListener("change", async () => {
+          const prev = sel.dataset.prev || "";
+          try {
+            await api.setWorkspaceRegion(sel.dataset.ws, sel.value || null);
+            const w = regionOrgWorkspaces.find((x) => x.id === sel.dataset.ws);
+            if (w) w.region_id = sel.value || null;
+            showToast(t("regions.assigned_toast"), "success");
+            await loadRegions(); // refresh the per-region workspace counts
+          } catch (err) {
+            showToast(err.message, "error");
+            sel.value = prev; // revert on failure
+          }
+        });
+        sel.dataset.prev = sel.value;
+      });
+    }
+
+    async function loadRegions() {
+      try {
+        regions = await api.getOrgRegions(orgId);
+      } catch (err) {
+        regionList.innerHTML = `<p style="color:var(--danger);font-size:13px">${esc(err.message)}</p>`;
+        assignList.innerHTML = "";
+        return;
+      }
+      renderRegionList();
+      renderAssignList();
+    }
+
+    document.getElementById("regionCreateBtn")?.addEventListener("click", async () => {
+      const input = document.getElementById("regionName");
+      const name = input.value.trim();
+      if (!name) return;
+      const btn = document.getElementById("regionCreateBtn");
+      btn.disabled = true;
+      try {
+        await api.createOrgRegion(orgId, name);
+        input.value = "";
+        showToast(t("regions.created_toast"), "success");
+        await loadRegions();
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    loadRegions();
   }
 
   // #73: agency scope reveals a playlist picker (the token's allowlist). Loaded lazily once.

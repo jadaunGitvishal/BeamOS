@@ -150,12 +150,29 @@ CREATE TABLE IF NOT EXISTS organization_members (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_organization_members_user ON organization_members(user_id);
 
+-- ===================== REGIONS (Phase 3 Stage A) =====================
+-- Per-organization regional structure. Each org manages its own independent set
+-- of regions; a workspace optionally belongs to one (workspaces.region_id, below,
+-- ON DELETE SET NULL — deleting a region unassigns its workspaces, never deletes
+-- them). Admin-managed via /api/organizations/:id/regions (org_admin+).
+CREATE TABLE IF NOT EXISTS regions (
+    id              VARCHAR(64) PRIMARY KEY,
+    organization_id VARCHAR(64) NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    UNIQUE (organization_id, name),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_regions_organization ON regions(organization_id);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     id                    VARCHAR(64) PRIMARY KEY,
     organization_id       VARCHAR(64) NOT NULL,
     name                  VARCHAR(255) NOT NULL,
     slug                  VARCHAR(255),
     created_by            VARCHAR(64),
+    region_id             VARCHAR(64),
     billing_type          VARCHAR(50) DEFAULT 'client_billable',
     billing_notes         TEXT,
     billing_contact_email VARCHAR(255),
@@ -164,7 +181,13 @@ CREATE TABLE IF NOT EXISTS workspaces (
     updated_at            BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     UNIQUE(organization_id, slug),
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
-    FOREIGN KEY (created_by) REFERENCES users(id)
+    FOREIGN KEY (created_by) REFERENCES users(id),
+    -- Phase 3 Stage A: never force-delete a workspace because its region went away.
+    -- (InnoDB auto-creates an index for this FK column — on both the fresh CREATE
+    -- here and the ALTER ... ADD CONSTRAINT repair in lib/schema-check.js — so no
+    -- standalone CREATE INDEX is needed, and a standalone one would in fact fail
+    -- on an existing DB where region_id isn't added until the schema-check pass.)
+    FOREIGN KEY (region_id) REFERENCES regions(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_workspaces_organization ON workspaces(organization_id);
 

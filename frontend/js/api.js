@@ -67,6 +67,24 @@ export const api = {
     return URL.createObjectURL(await res.blob());
   },
 
+  // Regions (Phase 3 Stage A). Org-level: org_owner/org_admin (or platform admin)
+  // of the org, enforced server-side (canManageOrgRegions).
+  getOrgRegions: (orgId) => request(`/organizations/${encodeURIComponent(orgId)}/regions`),
+  createOrgRegion: (orgId, name) => request(`/organizations/${encodeURIComponent(orgId)}/regions`, {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  }),
+  renameOrgRegion: (orgId, id, name) => request(`/organizations/${encodeURIComponent(orgId)}/regions/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  }),
+  deleteOrgRegion: (orgId, id) => request(`/organizations/${encodeURIComponent(orgId)}/regions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // region_id: a region id, or null to unassign.
+  setWorkspaceRegion: (workspaceId, region_id) => request(`/workspaces/${encodeURIComponent(workspaceId)}/region`, {
+    method: 'PATCH',
+    body: JSON.stringify({ region_id }),
+  }),
+
   // Content
   getContent: (folderId) => {
     if (folderId === undefined) return request('/content');

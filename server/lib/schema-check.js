@@ -16,6 +16,7 @@ const REQUIRED_TABLES = [
   'registration_codes', // Ref 30 Stage 1: advance device registration codes
   'outage_history',     // Ref 51: SLA MTTR reads from this durable rollup
   'device_events',      // Phase 2 Stage A: audit-trail endpoint + device:report-event
+  'regions',            // Phase 3 Stage A: per-org regional structure
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
@@ -34,6 +35,11 @@ const REQUIRED_COLUMNS = [
   // expires_at, so an un-migrated DB (table created before this column existed)
   // needs the repair. Nullable - a pre-TTL row with NULL expires_at never expires.
   ['registration_codes', 'expires_at', "ALTER TABLE registration_codes ADD COLUMN expires_at BIGINT NULL"],
+  // Phase 3 Stage A: optional region a workspace belongs to. Nullable; ON DELETE
+  // SET NULL so removing a region never force-deletes its workspaces. The
+  // `regions` table is created by schema.sql (which runs before this check), so
+  // the FK target exists by the time this repair fires on an existing DB.
+  ['workspaces', 'region_id', "ALTER TABLE workspaces ADD COLUMN region_id VARCHAR(64) NULL, ADD CONSTRAINT fk_workspaces_region FOREIGN KEY (region_id) REFERENCES regions(id) ON DELETE SET NULL"],
 ];
 
 function defaultOnMissing(missing) {

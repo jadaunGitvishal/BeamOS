@@ -1,7 +1,8 @@
 const express = require("express");
+const crypto = require("crypto");
 const router = express.Router();
 const { db } = require("../db/database");
-const { canAdminOrg, canAccessOrg } = require("../lib/permissions");
+const { canAdminOrg, canAccessOrg, canManageOrgRegions } = require("../lib/permissions");
 const { isPlatformRole } = require("../middleware/auth");
 const { logActivity, getClientIp } = require("../services/activity");
 const { asyncHandler } = require("../lib/async-handler");
@@ -325,6 +326,157 @@ router.delete(
     );
 
     res.json({ success: true });
+  }),
+);
+
+// ===================== Regions (Phase 3 Stage A) =====================
+// Per-org regional structure. Tier: org_owner / org_admin of THIS org, or a
+// platform owner-role (canManageOrgRegions — deliberately broader than the
+// owner-only canAdminOrg used for membership, narrower than canAccessOrg which
+// also admits platform_operator). URL param is :orgId here (nested resource);
+// the members routes above use :id — both resolve on this one router fine.
+
+const REGION_NAME_MAX = 80;
+
+async function loadOrgForRegions(req, res) {
+  const org = await db
+    .prepare("SELECT * FROM organizations WHERE id = ?")
+    .get(req.params.orgId);
+  if (!org) {
+    res.status(404).json({ error: "Organization not found" });
+    return null;
+  }
+  if (!(await canManageOrgRegions(db, req.user, org))) {
+    res.status(403).json({ error: "Organization admin access required" });
+    return null;
+  }
+  return org;
+}
+
+function validRegionName(res, raw) {
+  const name = String(raw || "").trim();
+  if (!name) {
+    res.status(400).json({ error: "Name required" });
+    return null;
+  }
+  if (name.length > REGION_NAME_MAX) {
+    res.status(400).json({ error: `Name must be ${REGION_NAME_MAX} characters or fewer` });
+    return null;
+  }
+  return name;
+}
+
+// GET /:orgId/regions — list this org's regions + how many workspaces each holds.
+router.get(
+  "/:orgId/regions",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const regions = await db
+      .prepare(
+        `SELECT r.id, r.name, r.created_at, r.updated_at,
+                (SELECT COUNT(*) FROM workspaces w WHERE w.region_id = r.id) AS workspace_count
+         FROM regions r WHERE r.organization_id = ? ORDER BY r.name`,
+      )
+      .all(org.id);
+    res.json(regions);
+  }),
+);
+
+// POST /:orgId/regions  { name }
+router.post(
+  "/:orgId/regions",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const name = validRegionName(res, req.body?.name);
+    if (!name) return;
+
+    const dup = await db
+      .prepare("SELECT 1 FROM regions WHERE organization_id = ? AND name = ?")
+      .get(org.id, name);
+    if (dup) return res.status(409).json({ error: "A region with that name already exists" });
+
+    const id = crypto.randomUUID();
+    await db
+      .prepare("INSERT INTO regions (id, organization_id, name) VALUES (?, ?, ?)")
+      .run(id, org.id, name);
+    logActivity(
+      req.user.id,
+      "region_created",
+      `org: ${org.name} (${org.id}), region: ${name}`,
+      null,
+      getClientIp(req),
+      null,
+    );
+    res.status(201).json({ id, organization_id: org.id, name, workspace_count: 0 });
+  }),
+);
+
+// PATCH /:orgId/regions/:id  { name } — rename
+router.patch(
+  "/:orgId/regions/:id",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const region = await db
+      .prepare("SELECT * FROM regions WHERE id = ? AND organization_id = ?")
+      .get(req.params.id, org.id);
+    if (!region) return res.status(404).json({ error: "Region not found" });
+
+    const name = validRegionName(res, req.body?.name);
+    if (!name) return;
+    if (name !== region.name) {
+      const dup = await db
+        .prepare("SELECT 1 FROM regions WHERE organization_id = ? AND name = ? AND id <> ?")
+        .get(org.id, name, region.id);
+      if (dup) return res.status(409).json({ error: "A region with that name already exists" });
+    }
+
+    await db
+      .prepare("UPDATE regions SET name = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+      .run(name, region.id);
+    logActivity(
+      req.user.id,
+      "region_renamed",
+      `org: ${org.name} (${org.id}), region: ${region.name} -> ${name}`,
+      null,
+      getClientIp(req),
+      null,
+    );
+    res.json({ id: region.id, organization_id: org.id, name });
+  }),
+);
+
+// DELETE /:orgId/regions/:id — workspaces assigned to it are UNASSIGNED
+// (region_id -> NULL), never deleted. The explicit UPDATE below is the contract;
+// the workspaces.region_id ON DELETE SET NULL FK is a backstop for other delete
+// paths (e.g. org cascade).
+router.delete(
+  "/:orgId/regions/:id",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const region = await db
+      .prepare("SELECT * FROM regions WHERE id = ? AND organization_id = ?")
+      .get(req.params.id, org.id);
+    if (!region) return res.status(404).json({ error: "Region not found" });
+
+    const unassigned = (
+      await db.prepare("SELECT COUNT(*) AS c FROM workspaces WHERE region_id = ?").get(region.id)
+    ).c;
+    await db.prepare("UPDATE workspaces SET region_id = NULL WHERE region_id = ?").run(region.id);
+    await db.prepare("DELETE FROM regions WHERE id = ?").run(region.id);
+
+    logActivity(
+      req.user.id,
+      "region_deleted",
+      `org: ${org.name} (${org.id}), region: ${region.name}, workspaces unassigned: ${unassigned}`,
+      null,
+      getClientIp(req),
+      null,
+    );
+    res.json({ success: true, workspaces_unassigned: unassigned });
   }),
 );
 
