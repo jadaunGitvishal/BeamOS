@@ -297,4 +297,40 @@ router.get(
   }),
 );
 
+// GET /api/dashboard/reports/sla-trend?days=N  (default 30, clamped 1..365)
+// Ref 51 Step 4 — fleet-wide uptime trend for the Overview SLA section. One
+// point per UTC day: the mean across this workspace's devices of that day's
+// online-seconds as a percentage of the whole day. Same device_usage_daily
+// rollup + workspace scoping (getWorkspaceDeviceSubquery) as GET /availability;
+// * 100.0 keeps the division floating-point on every SQL engine. Returns
+// [{ day: 'YYYY-MM-DD', avg_uptime_pct: number }] ordered oldest-first (days
+// with no usage rows are simply absent — the client draws a continuous line
+// through the points it has).
+router.get(
+  "/sla-trend",
+  asyncHandler(async (req, res) => {
+    let days = parseInt(req.query.days, 10);
+    if (!Number.isFinite(days) || days < 1) days = 30;
+    if (days > 365) days = 365;
+
+    const startDate = isoDate(new Date(Date.now() - (days - 1) * 86400000));
+    const endDate = isoDate(new Date());
+
+    const wsScope = getWorkspaceDeviceSubquery(req);
+    const rows = await db
+      .prepare(
+        `
+      SELECT day, ROUND(AVG(online_seconds * 100.0 / 86400), 1) AS avg_uptime_pct
+      FROM device_usage_daily
+      WHERE day BETWEEN ? AND ?${wsScope.sql}
+      GROUP BY day
+      ORDER BY day
+    `,
+      )
+      .all(startDate, endDate, ...wsScope.params);
+
+    res.json(rows);
+  }),
+);
+
 module.exports = router;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from "react";
 import { Link } from "react-router-dom";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine } from "recharts";
 import { useApi } from "../hooks/useApi";
 import { useSession } from "../hooks/useSession";
 import { usePeriod } from "../hooks/usePeriod";
@@ -19,18 +20,21 @@ export default function OverviewView() {
   const fetcher = useCallback(
     async ({ signal }) => {
       const { start } = periodWindow(period);
-      const [overview, devices, sla] = await Promise.all([
+      // 24h view still gets a 7-day trend line — one point isn't a trend.
+      const trendDays = period === 1 ? 7 : period;
+      // Ref 51: SLA overview + trend. Any workspace member can read them, so
+      // they're fetched for everyone — but a 403 (or any non-auth failure) must
+      // NOT blank the whole page, so each degrades to null and its SLA section
+      // shows a note / is hidden.
+      const softFail = (e) => {
+        if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
+        return null;
+      };
+      const [overview, devices, sla, slaTrend] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
-        // Ref 51: SLA overview. Any workspace member can read it, so it's fetched
-        // for everyone — but a 403 (or any non-auth failure) must NOT blank the
-        // whole page, so it degrades to null and the SLA sections show a note.
-        apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(
-          (e) => {
-            if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
-            return null;
-          },
-        ),
+        apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(softFail),
+        apiFetch(`/api/dashboard/reports/sla-trend?days=${trendDays}`, { signal }).catch(softFail),
       ]);
       let issues = null;
       if (isAdmin) {
@@ -43,7 +47,7 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues, sla };
+      return { overview, devices, issues, sla, slaTrend };
     },
     [period, isAdmin],
   );
@@ -98,6 +102,16 @@ export default function OverviewView() {
     .map((d) => Number(d.availability_pct))
     .filter((v) => Number.isFinite(v));
   const fleetUptime = uptimeVals.length ? uptimeVals.reduce((a, v) => a + v, 0) / uptimeVals.length : null;
+
+  // Fleet uptime trend: one point per day with data. Y axis zooms to the data
+  // (+ the target line) so real day-to-day movement is visible rather than a
+  // flat line pinned near 100 — top stays at 100 (uptime's real ceiling).
+  const trend = (data.slaTrend ?? [])
+    .map((p) => ({ day: p.day, pct: Number(p.avg_uptime_pct) }))
+    .filter((p) => Number.isFinite(p.pct));
+  const trendFloor = trend.length
+    ? Math.max(0, Math.floor(Math.min(...trend.map((p) => p.pct), slaTarget ?? 100) / 5) * 5 - 5)
+    : 0;
 
   return (
     <>
@@ -253,6 +267,57 @@ export default function OverviewView() {
                 card
               />
             </div>
+
+            {trend.length >= 2 ? (
+              <div className="card mt16">
+                <div className="ch">
+                  <h2>Fleet uptime trend</h2>
+                  <span className="hint">daily average vs the {slaTarget ?? "—"}% target</span>
+                </div>
+                <div style={{ width: "100%", height: 190 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={trend} margin={{ top: 8, right: 14, bottom: 0, left: 4 }}>
+                      <XAxis
+                        dataKey="day"
+                        tick={{ fontSize: 10, fill: "var(--ink3)" }}
+                        tickFormatter={(d) => d.slice(5)}
+                        tickMargin={6}
+                        interval="preserveStartEnd"
+                        minTickGap={24}
+                      />
+                      <YAxis
+                        domain={[trendFloor, 100]}
+                        tick={{ fontSize: 10, fill: "var(--ink3)" }}
+                        tickMargin={4}
+                        width={44}
+                        allowDecimals={false}
+                        unit="%"
+                      />
+                      <Tooltip
+                        formatter={(v) => [`${v}%`, "Uptime"]}
+                        contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid var(--line)" }}
+                      />
+                      {slaTarget != null ? (
+                        <ReferenceLine
+                          y={slaTarget}
+                          stroke="var(--ink2)"
+                          strokeDasharray="4 3"
+                          label={{ value: `${slaTarget}% target`, position: "insideTopRight", fontSize: 9, fill: "var(--ink3)" }}
+                        />
+                      ) : null}
+                      <Line
+                        type="monotone"
+                        dataKey="pct"
+                        stroke="var(--accent)"
+                        strokeWidth={2.25}
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            ) : null}
           </>
         ) : (
           <div className="card">
