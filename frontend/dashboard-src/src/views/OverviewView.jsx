@@ -90,6 +90,14 @@ export default function OverviewView() {
   const liveBreaches = slaDevices
     .filter((d) => d.live_breach)
     .sort((a, b) => b.ongoing_outage_seconds - a.ongoing_outage_seconds);
+  // Fleet uptime = plain mean of per-device availability_pct. Devices with no
+  // usage data in the period (availability_pct === null) are excluded, not
+  // counted as 0 — filter `!= null` BEFORE Number(), since Number(null) is 0.
+  const uptimeVals = slaDevices
+    .filter((d) => d.availability_pct != null)
+    .map((d) => Number(d.availability_pct))
+    .filter((v) => Number.isFinite(v));
+  const fleetUptime = uptimeVals.length ? uptimeVals.reduce((a, v) => a + v, 0) / uptimeVals.length : null;
 
   return (
     <>
@@ -195,7 +203,7 @@ export default function OverviewView() {
               {slaThresholdH !== null ? `, escalating a breach after ${slaThresholdH}h continuously offline` : ""}.
             </p>
 
-            <div className="grid g3">
+            <div className="grid g4">
               <StatTile
                 label="Compliance status"
                 value={
@@ -224,6 +232,24 @@ export default function OverviewView() {
                   <span style={{ color: liveBreaches.length ? "var(--bad)" : "var(--ok)" }}>{n0(liveBreaches.length)}</span>
                 }
                 sub={liveBreaches.length ? `past the ${slaThresholdH ?? "escalation"}h threshold` : "none right now"}
+                card
+              />
+              <StatTile
+                label="Fleet uptime"
+                value={
+                  fleetUptime !== null ? (
+                    <span style={{ color: slaTarget !== null && fleetUptime >= slaTarget ? "var(--ok)" : "var(--bad)" }}>
+                      {fleetUptime.toFixed(1)}%
+                    </span>
+                  ) : (
+                    "—"
+                  )
+                }
+                sub={
+                  fleetUptime !== null
+                    ? `avg across ${n0(uptimeVals.length)} device${uptimeVals.length === 1 ? "" : "s"} with data`
+                    : "no data yet"
+                }
                 card
               />
             </div>
