@@ -5,7 +5,7 @@ import { useSession } from "../hooks/useSession";
 import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
-import { n0, cCol, periodWindow, periodLabel } from "../lib/format";
+import { n0, cCol, periodWindow, periodLabel, isoDateOnly, formatDuration } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import StatTile from "../components/StatTile";
 import AttentionCard from "../components/AttentionCard";
@@ -19,9 +19,18 @@ export default function OverviewView() {
   const fetcher = useCallback(
     async ({ signal }) => {
       const { start } = periodWindow(period);
-      const [overview, devices] = await Promise.all([
+      const [overview, devices, sla] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
+        // Ref 51: SLA overview. Any workspace member can read it, so it's fetched
+        // for everyone — but a 403 (or any non-auth failure) must NOT blank the
+        // whole page, so it degrades to null and the SLA sections show a note.
+        apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(
+          (e) => {
+            if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
+            return null;
+          },
+        ),
       ]);
       let issues = null;
       if (isAdmin) {
@@ -34,7 +43,7 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues };
+      return { overview, devices, issues, sla };
     },
     [period, isAdmin],
   );
@@ -57,12 +66,30 @@ export default function OverviewView() {
   }
   if (!data) return <p className="sub">Loading…</p>;
 
-  const { overview, devices, issues } = data;
+  const { overview, devices, issues, sla } = data;
   const total = overview.total_devices,
     online = overview.online,
     offline = overview.offline;
   const completion = overview.completion_pct;
   const attention = devices.filter((d) => isAtRisk(d) || isWeakSignal(d));
+
+  // --- Ref 51: SLA compliance (merged into this page, not a separate view) ---
+  const slaTarget = sla?.target?.uptime_target_pct ?? null;
+  const slaThresholdH = sla?.target?.escalation_threshold_hours ?? null;
+  const slaDevices = sla?.devices ?? [];
+  const slaSummary = sla?.summary ?? null;
+  // Workspace verdict: Breach if any device is below target, else Compliant.
+  const slaVerdict = slaSummary && slaSummary.devices_total > 0 ? (slaSummary.devices_breach > 0 ? "Breach" : "Compliant") : null;
+  // Fleet MTTR = total completed-outage time / total completed outages (so a
+  // device with more outages weighs proportionally, not one-device-one-vote).
+  const mttrDevices = slaDevices.filter((d) => d.completed_outages > 0);
+  const mttrOutages = mttrDevices.reduce((a, d) => a + d.completed_outages, 0);
+  const fleetMttr = mttrOutages
+    ? Math.round(mttrDevices.reduce((a, d) => a + d.mttr_seconds * d.completed_outages, 0) / mttrOutages)
+    : null;
+  const liveBreaches = slaDevices
+    .filter((d) => d.live_breach)
+    .sort((a, b) => b.ongoing_outage_seconds - a.ongoing_outage_seconds);
 
   return (
     <>
@@ -155,6 +182,89 @@ export default function OverviewView() {
         <div className="grid g2 mt16">
           <StatTile label="Workspaces in org" value={n0(overview.org.workspace_count)} card />
           <StatTile label="Devices in org" value={n0(overview.org.device_count)} card />
+        </div>
+      ) : null}
+
+      <div className="sec">
+        <h2>SLA compliance</h2>
+        {sla ? (
+          <>
+            <p className="sub" style={{ margin: "0 0 12px" }}>
+              The SLA target is platform-wide for now
+              {slaTarget !== null ? ` — ${slaTarget}% uptime` : ""}
+              {slaThresholdH !== null ? `, escalating a breach after ${slaThresholdH}h continuously offline` : ""}.
+            </p>
+
+            <div className="grid g3">
+              <StatTile
+                label="Compliance status"
+                value={
+                  slaVerdict ? (
+                    <span style={{ color: slaVerdict === "Compliant" ? "var(--ok)" : "var(--bad)" }}>{slaVerdict}</span>
+                  ) : (
+                    "—"
+                  )
+                }
+                sub={
+                  slaSummary
+                    ? `${n0(slaSummary.devices_compliant)} of ${n0(slaSummary.devices_total)} devices meet the target`
+                    : "no data yet"
+                }
+                card
+              />
+              <StatTile
+                label="Mean time to recovery"
+                value={fleetMttr !== null ? formatDuration(fleetMttr) : "—"}
+                sub={mttrOutages ? `across ${n0(mttrOutages)} completed outage${mttrOutages === 1 ? "" : "s"}` : "no completed outages in range"}
+                card
+              />
+              <StatTile
+                label="Live breaches"
+                value={
+                  <span style={{ color: liveBreaches.length ? "var(--bad)" : "var(--ok)" }}>{n0(liveBreaches.length)}</span>
+                }
+                sub={liveBreaches.length ? `past the ${slaThresholdH ?? "escalation"}h threshold` : "none right now"}
+                card
+              />
+            </div>
+          </>
+        ) : (
+          <div className="card">
+            <p className="empty" style={{ padding: 0 }}>
+              SLA data isn’t available for this view.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {sla && liveBreaches.length ? (
+        <div className="sec">
+          <h2>Live SLA breaches</h2>
+          <div className="grid" style={{ gap: 8 }}>
+            {liveBreaches.map((d) => (
+              <div className="exc rise" style={{ borderLeftColor: "var(--bad)" }} key={d.device_id}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <h3>{d.device_name}</h3>
+                    <p>
+                      Offline for {formatDuration(d.ongoing_outage_seconds)} — past the{" "}
+                      {slaThresholdH ?? "escalation"}h escalation threshold.
+                    </p>
+                  </div>
+                  <span className="plain p-bad">live breach</span>
+                </div>
+                <div className="meta">
+                  <span>uptime {d.availability_pct !== null ? `${d.availability_pct}%` : "—"} this period</span>
+                  {d.completed_outages ? <span>{n0(d.completed_outages)} earlier outage(s)</span> : null}
+                </div>
+                <div className="ctl mt16">
+                  <Link className="btn" to={`/device/${encodeURIComponent(d.device_id)}`}>
+                    Open device
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
 
