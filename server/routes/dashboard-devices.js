@@ -7,7 +7,31 @@ const { accessContext } = require("../lib/tenancy");
 const { getWorkspaceDeviceFilter } = require("../lib/workspace-scope");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
-const { buildDeviceAuditTrail } = require("../lib/device-audit");
+const { buildDeviceAuditTrail, buildStatusHeatmap } = require("../lib/device-audit");
+
+// Shared gate for the per-device sub-resources (status-history, audit-trail,
+// status-heatmap): load the device, require it to be in a workspace the caller
+// can access. Returns the device row, or null after having sent the 404/403.
+async function resolveDeviceForRead(req, res) {
+  const device = await db
+    .prepare("SELECT id, workspace_id FROM devices WHERE id = ?")
+    .get(req.params.id);
+  if (!device) {
+    res.status(404).json({ error: "Device not found" });
+    return null;
+  }
+  if (!device.workspace_id) {
+    res.status(403).json({ error: "Device not assigned to a workspace" });
+    return null;
+  }
+  const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(device.workspace_id);
+  const ctx = ws && (await accessContext(req.user.id, req.user.role, ws));
+  if (!ctx) {
+    res.status(403).json({ error: "Access denied" });
+    return null;
+  }
+  return device;
+}
 
 // Merged in from BeamOS-Dashboard's routes/devices.js. Its standalone-app
 // GET /:id/screenshot proxy (which forwarded a dash_token cookie to BeamOS's
@@ -219,15 +243,7 @@ router.get(
 router.get(
   "/:id/status-history",
   asyncHandler(async (req, res) => {
-    const device = await db
-      .prepare("SELECT id, workspace_id FROM devices WHERE id = ?")
-      .get(req.params.id);
-    if (!device) return res.status(404).json({ error: "Device not found" });
-    if (!device.workspace_id) return res.status(403).json({ error: "Device not assigned to a workspace" });
-
-    const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(device.workspace_id);
-    const ctx = ws && (await accessContext(req.user.id, req.user.role, ws));
-    if (!ctx) return res.status(403).json({ error: "Access denied" });
+    if (!(await resolveDeviceForRead(req, res))) return;
 
     const { start, end } = req.query;
     const startEpoch = start
@@ -256,15 +272,7 @@ router.get(
 router.get(
   "/:id/audit-trail",
   asyncHandler(async (req, res) => {
-    const device = await db
-      .prepare("SELECT id, workspace_id FROM devices WHERE id = ?")
-      .get(req.params.id);
-    if (!device) return res.status(404).json({ error: "Device not found" });
-    if (!device.workspace_id) return res.status(403).json({ error: "Device not assigned to a workspace" });
-
-    const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(device.workspace_id);
-    const ctx = ws && (await accessContext(req.user.id, req.user.role, ws));
-    if (!ctx) return res.status(403).json({ error: "Access denied" });
+    if (!(await resolveDeviceForRead(req, res))) return;
 
     const sinceEpoch = req.query.since
       ? Math.floor(new Date(req.query.since).getTime() / 1000)
@@ -274,6 +282,18 @@ router.get(
       sinceEpoch: Number.isFinite(sinceEpoch) ? sinceEpoch : undefined,
     });
     res.json(trail);
+  }),
+);
+
+// GET /api/dashboard/devices/:id/status-heatmap?days=7
+// Phase 2 Stage C — device_status_log bucketed server-side into a day x hour
+// online-% grid + a simple "bad on 3+ consecutive days at the same hours"
+// pattern flag (see lib/device-audit.js buildStatusHeatmap). Same RBAC.
+router.get(
+  "/:id/status-heatmap",
+  asyncHandler(async (req, res) => {
+    if (!(await resolveDeviceForRead(req, res))) return;
+    res.json(await buildStatusHeatmap(db, req.params.id, { days: req.query.days }));
   }),
 );
 

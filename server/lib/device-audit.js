@@ -149,4 +149,150 @@ async function buildDeviceAuditTrail(dbh, deviceId, opts = {}) {
   return windowed.slice(0, limit);
 }
 
-module.exports = { recordDeviceEvent, buildDeviceAuditTrail, phraseEvent, EVENT_PHRASING };
+// --- Phase 2 Stage C: 7-day online/offline heatmap ---------------------
+// Buckets device_status_log into a day x hour grid of online-% per hour, plus a
+// simple "same hours bad on 3+ consecutive days" pattern flag. Bucketing is done
+// here (server-side) so the wire payload is ~168 small cells, not the raw
+// transition log. Only cells with real coverage are returned; hours with no
+// status_log data (older than the ~3-day retention, or gaps) are simply absent
+// and the client renders them as "no data".
+
+const OFFLINE_STATES = new Set(['offline', 'offline_timeout']);
+const HEATMAP_PROBLEM_PCT = 50; // an hour with online_pct below this is "a problem"
+const HEATMAP_MIN_RUN = 3; // consecutive problem days needed to call it a pattern
+
+function utcMidnight(sec) {
+  return Math.floor(sec / 86400) * 86400;
+}
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+// dbh: db handle. opts: { days = 7 (1..14), nowMs }.
+// Returns { days, start, cells: [{day,hour,online_pct,covered_sec}], pattern|null }.
+async function buildStatusHeatmap(dbh, deviceId, opts = {}) {
+  const days = Math.min(Math.max(parseInt(opts.days, 10) || 7, 1), 14);
+  const nowSec = Math.floor((opts.nowMs != null ? opts.nowMs : Date.now()) / 1000);
+  const startSec = utcMidnight(nowSec) - (days - 1) * 86400; // 00:00 UTC, (days-1) days back
+  const startIso = isoDayFromSec(startSec);
+
+  // state as of `startSec`: the last transition strictly before the window.
+  const prior = await dbh
+    .prepare(
+      'SELECT status FROM device_status_log WHERE device_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1',
+    )
+    .get(deviceId, startSec);
+  const inWindow = await dbh
+    .prepare(
+      'SELECT status, timestamp FROM device_status_log WHERE device_id = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC, id ASC',
+    )
+    .all(deviceId, startSec, nowSec);
+
+  // Build [state, from, to) segments across [coverageStart, nowSec].
+  const online = new Float64Array(days * 24);
+  const offline = new Float64Array(days * 24);
+  let coverageStart = startSec;
+  let state = prior ? !OFFLINE_STATES.has(prior.status) : null; // null = unknown until first row
+  if (state === null && inWindow.length) {
+    coverageStart = inWindow[0].timestamp;
+    state = !OFFLINE_STATES.has(inWindow[0].status);
+  }
+  const addSegment = (from, to, isOnline) => {
+    if (to <= from) return;
+    let t = from;
+    while (t < to) {
+      const idx = Math.floor((t - startSec) / 3600);
+      const bucketEnd = startSec + (idx + 1) * 3600;
+      const chunkEnd = Math.min(to, bucketEnd);
+      if (idx >= 0 && idx < days * 24) (isOnline ? online : offline)[idx] += chunkEnd - t;
+      t = chunkEnd;
+    }
+  };
+  if (state !== null) {
+    let cursor = coverageStart;
+    for (const row of inWindow) {
+      if (row.timestamp <= cursor) {
+        state = !OFFLINE_STATES.has(row.status);
+        continue;
+      }
+      addSegment(cursor, row.timestamp, state);
+      state = !OFFLINE_STATES.has(row.status);
+      cursor = row.timestamp;
+    }
+    addSegment(cursor, nowSec, state);
+  }
+
+  const cells = [];
+  const grid = Array.from({ length: days }, () => new Array(24).fill(null));
+  for (let i = 0; i < days * 24; i++) {
+    const covered = online[i] + offline[i];
+    if (covered <= 0) continue;
+    const d = Math.floor(i / 24);
+    const h = i % 24;
+    const pct = Math.round((online[i] / covered) * 100);
+    grid[d][h] = pct;
+    cells.push({
+      day: isoDayFromSec(startSec + d * 86400),
+      hour: h,
+      online_pct: pct,
+      covered_sec: Math.round(covered),
+    });
+  }
+
+  return { days, start: startIso, cells, pattern: detectHeatmapPattern(grid, days) };
+}
+
+function isoDayFromSec(sec) {
+  return new Date(sec * 1000).toISOString().slice(0, 10);
+}
+
+// Simple pattern match: for each hour, the longest run of CONSECUTIVE days whose
+// cell is present and below the problem threshold. If any hour hits the minimum
+// run, collapse the qualifying hours into a contiguous range and describe it.
+function detectHeatmapPattern(grid, days) {
+  const runByHour = new Array(24).fill(0);
+  for (let h = 0; h < 24; h++) {
+    let run = 0;
+    let best = 0;
+    for (let d = 0; d < days; d++) {
+      const v = grid[d][h];
+      if (v != null && v < HEATMAP_PROBLEM_PCT) {
+        run += 1;
+        if (run > best) best = run;
+      } else {
+        run = 0;
+      }
+    }
+    runByHour[h] = best;
+  }
+
+  const badHours = [];
+  for (let h = 0; h < 24; h++) if (runByHour[h] >= HEATMAP_MIN_RUN) badHours.push(h);
+  if (!badHours.length) return null;
+
+  // pick the contiguous block containing the hour with the biggest run
+  let peakHour = badHours[0];
+  for (const h of badHours) if (runByHour[h] > runByHour[peakHour]) peakHour = h;
+  let lo = peakHour;
+  let hi = peakHour;
+  while (lo - 1 >= 0 && runByHour[lo - 1] >= HEATMAP_MIN_RUN) lo -= 1;
+  while (hi + 1 < 24 && runByHour[hi + 1] >= HEATMAP_MIN_RUN) hi += 1;
+
+  const consecutive = runByHour[peakHour];
+  return {
+    detected: true,
+    hour_start: lo,
+    hour_end: hi + 1, // exclusive end, so a 15–16 block reads "15:00–17:00"
+    consecutive_days: consecutive,
+    message: `Repeated issue detected: offline around ${pad2(lo)}:00–${pad2(hi + 1)}:00 on ${consecutive} of the last ${days} days`,
+  };
+}
+
+module.exports = {
+  recordDeviceEvent,
+  buildDeviceAuditTrail,
+  buildStatusHeatmap,
+  detectHeatmapPattern,
+  phraseEvent,
+  EVENT_PHRASING,
+};

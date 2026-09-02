@@ -48,7 +48,7 @@ const dbModulePath = require.resolve('../db/database');
 require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
 
 const config = require('../config');
-const { recordDeviceEvent, buildDeviceAuditTrail, phraseEvent } = require('../lib/device-audit');
+const { recordDeviceEvent, buildDeviceAuditTrail, phraseEvent, buildStatusHeatmap, detectHeatmapPattern } = require('../lib/device-audit');
 const express = require('express');
 const { generateToken, requireAuth } = require('../middleware/auth');
 const { resolveTenancy } = require('../lib/tenancy');
@@ -219,4 +219,87 @@ test('route: 404 unknown device, 403 unassigned, 403 no workspace access', async
   assert.equal((await at('nope', tokAdmin)).status, 404);
   assert.equal((await at('dev-unassigned', tokAdmin)).status, 403);
   assert.equal((await at('dev1', tokOut)).status, 403);
+});
+
+// --- Phase 2 Stage C: status heatmap + pattern detection -------------
+const HM_NOW = 1_800_000_000_000; // fixed clock (ms)
+const HM_NOW_SEC = Math.floor(HM_NOW / 1000);
+const HM_MID = Math.floor(HM_NOW_SEC / 86400) * 86400; // 00:00 UTC "today"
+const HM_START = HM_MID - 6 * 86400; // 7-day window start (00:00 UTC, 6 days back)
+const hm = (device, status, dayIdx, hour) =>
+  db.prepare('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)')
+    .run(device, status, HM_START + dayIdx * 86400 + hour * 3600);
+
+db.prepare("INSERT INTO devices (id, workspace_id, name) VALUES ('dev-hm', 'ws', 'Heatmap')").run();
+// online from before the window; then offline 15:00 -> online 17:00 on day indices 3, 4, 5
+db.prepare('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)')
+  .run('dev-hm', 'online', HM_START - 3600);
+for (const d of [3, 4, 5]) { hm('dev-hm', 'offline', d, 15); hm('dev-hm', 'online', d, 17); }
+
+// a device with the same afternoon dip on only 2 consecutive days -> no pattern
+db.prepare("INSERT INTO devices (id, workspace_id, name) VALUES ('dev-hm2', 'ws', 'Heatmap2')").run();
+db.prepare('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)')
+  .run('dev-hm2', 'online', HM_START - 3600);
+for (const d of [4, 5]) { hm('dev-hm2', 'offline', d, 15); hm('dev-hm2', 'online', d, 17); }
+
+const hmDay = (dayIdx) => new Date((HM_START + dayIdx * 86400) * 1000).toISOString().slice(0, 10);
+
+test('heatmap: hour buckets carry the right online percentage', async () => {
+  const grid = await buildStatusHeatmap(db, 'dev-hm', { days: 7, nowMs: HM_NOW });
+  const cell = (day, hour) => grid.cells.find((c) => c.hour === hour && c.day === hmDay(day));
+  // day 3, 15:00 and 16:00 -> fully offline -> 0%
+  assert.equal(cell(3, 15).online_pct, 0);
+  assert.equal(cell(3, 16).online_pct, 0);
+  // day 3, 14:00 and 18:00 -> fully online -> 100%
+  assert.equal(cell(3, 14).online_pct, 100);
+  assert.equal(cell(3, 18).online_pct, 100);
+  // day 0 (oldest full day) noon -> online carried from the prior row
+  assert.equal(cell(0, 12).online_pct, 100);
+});
+
+test('heatmap: detects the repeated 15:00-17:00 offline pattern across 3 consecutive days', async () => {
+  const { pattern } = await buildStatusHeatmap(db, 'dev-hm', { days: 7, nowMs: HM_NOW });
+  assert.ok(pattern && pattern.detected);
+  assert.equal(pattern.hour_start, 15);
+  assert.equal(pattern.hour_end, 17);
+  assert.equal(pattern.consecutive_days, 3);
+  assert.match(pattern.message, /offline around 15:00–17:00 on 3 of the last 7 days/);
+});
+
+test('heatmap: 2 consecutive bad days is NOT a pattern', async () => {
+  const { pattern } = await buildStatusHeatmap(db, 'dev-hm2', { days: 7, nowMs: HM_NOW });
+  assert.equal(pattern, null);
+});
+
+test('heatmap: device with no status_log history -> empty grid, no pattern', async () => {
+  db.prepare("INSERT INTO devices (id, workspace_id, name) VALUES ('dev-hm3', 'ws', 'Empty')").run();
+  const grid = await buildStatusHeatmap(db, 'dev-hm3', { days: 7, nowMs: HM_NOW });
+  assert.deepEqual(grid.cells, []);
+  assert.equal(grid.pattern, null);
+});
+
+test('detectHeatmapPattern: pure — 3-in-a-row fires, gaps reset the run', () => {
+  const days = 7;
+  const grid = Array.from({ length: days }, () => new Array(24).fill(100));
+  // hour 9 bad on days 1,2,3 (consecutive) -> pattern
+  for (const d of [1, 2, 3]) grid[d][9] = 10;
+  // hour 20 bad on days 0,1 and 5,6 (never 3 in a row) -> no pattern
+  for (const d of [0, 1, 5, 6]) grid[d][20] = 10;
+  const p = detectHeatmapPattern(grid, days);
+  assert.equal(p.hour_start, 9);
+  assert.equal(p.hour_end, 10);
+  assert.equal(p.consecutive_days, 3);
+});
+
+test('route: status-heatmap 200 + RBAC (404 / 403 / 403)', async () => {
+  const hmReq = (id, tok, qs = '') => fetch(`${base}/api/dashboard/devices/${id}/status-heatmap${qs}`, { headers: { Authorization: `Bearer ${tok}` } });
+  const ok = await hmReq('dev-hm', tokAdmin, '?days=7');
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.equal(body.days, 7);
+  assert.ok(Array.isArray(body.cells) && typeof body.start === 'string');
+  assert.ok(body.pattern === null || body.pattern.detected === true);
+  assert.equal((await hmReq('nope', tokAdmin)).status, 404);
+  assert.equal((await hmReq('dev-unassigned', tokAdmin)).status, 403);
+  assert.equal((await hmReq('dev-hm', tokOut)).status, 403);
 });

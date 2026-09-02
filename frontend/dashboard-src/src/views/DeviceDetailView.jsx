@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { useApi } from "../hooks/useApi";
 import { usePeriod } from "../hooks/usePeriod";
 import { useBreadcrumb } from "../hooks/useBreadcrumb";
-import { apiFetch } from "../lib/api";
+import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, periodWindow, periodLabel, isoDateOnly, fmtCoords, osmUrl } from "../lib/format";
 import { isWeakSignal } from "../lib/risk";
 import { buildStatusStrip } from "../lib/transmissionStrip";
@@ -11,6 +11,8 @@ import StatTile from "../components/StatTile";
 import StatusTag from "../components/StatusTag";
 import TransmissionStrip from "../components/TransmissionStrip";
 import { DetailScreenshot } from "../components/DeviceScreenshot";
+import AuditTrail from "../components/AuditTrail";
+import StatusHeatmap from "../components/StatusHeatmap";
 
 export default function DeviceDetailView() {
   const { id } = useParams();
@@ -26,7 +28,13 @@ export default function DeviceDetailView() {
       const { start, end } = periodWindow(period);
       const startISO = start.toISOString(),
         endISO = end.toISOString();
-      const [devices, history, uptimeRows, availRows] = await Promise.all([
+      // Phase 2 Stage C: the audit trail + heatmap must degrade to null on a 403
+      // (or any non-auth failure) so the rest of the detail page still renders.
+      const softFail = (e) => {
+        if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
+        return null;
+      };
+      const [devices, history, uptimeRows, availRows, trail, heatmap] = await Promise.all([
         apiFetch("/api/dashboard/devices", { signal }),
         apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/status-history?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`, {
           signal,
@@ -35,8 +43,10 @@ export default function DeviceDetailView() {
           signal,
         }),
         apiFetch(`/api/dashboard/reports/availability?start=${isoDateOnly(start)}&end=${isoDateOnly(end)}`, { signal }),
+        apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/audit-trail?limit=60`, { signal }).catch(softFail),
+        apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/status-heatmap?days=7`, { signal }).catch(softFail),
       ]);
-      return { devices, history, uptimeRows, availRows, start, end };
+      return { devices, history, uptimeRows, availRows, trail, heatmap, start, end };
     },
     [period, id],
   );
@@ -61,7 +71,7 @@ export default function DeviceDetailView() {
   if (!device) return <h1>Device not found</h1>;
 
   const d = device;
-  const { history, uptimeRows, availRows, start, end } = data;
+  const { history, uptimeRows, availRows, trail, heatmap, start, end } = data;
   const uptimeRow = uptimeRows[0];
   const availRow = availRows.find((a) => a.device_id === id);
   const segs = buildStatusStrip(history, start.getTime(), end.getTime());
@@ -149,6 +159,14 @@ export default function DeviceDetailView() {
         </div>
       </div>
 
+      <div className="card mt16">
+        <div className="ch">
+          <h2>Online / offline heatmap — last 7 days</h2>
+          <span className="hint">hour-by-hour, from the status log</span>
+        </div>
+        <StatusHeatmap heatmap={heatmap} />
+      </div>
+
       <div className="grid g2 mt16">
         <div className="card">
           <div className="ch">
@@ -170,26 +188,10 @@ export default function DeviceDetailView() {
         </div>
         <div className="card">
           <div className="ch">
-            <h2>Recent status changes</h2>
-            <span className="hint">{history.length} in window</span>
+            <h2>Audit trail</h2>
+            <span className="hint">{trail ? `${trail.length} recent` : "unavailable"}</span>
           </div>
-          <div className="log">
-            {history.length ? (
-              history
-                .slice(-20)
-                .reverse()
-                .map((h, i) => (
-                  <div key={i}>
-                    <time>{new Date(h.timestamp * 1000).toLocaleString()}</time>
-                    <p>Went {h.status}.</p>
-                  </div>
-                ))
-            ) : (
-              <p className="empty" style={{ padding: 0 }}>
-                No status changes recorded in this window.
-              </p>
-            )}
-          </div>
+          <AuditTrail trail={trail} />
         </div>
       </div>
     </>
