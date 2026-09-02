@@ -16,6 +16,7 @@ const { resolveIdentity } = require('../lib/device-identity');
 const logCoalescer = require('../lib/log-coalescer');
 const loopLag = require('../services/loop-lag');
 const { sanitizeCoords } = require('../lib/geo');
+const deviceAudit = require('../lib/device-audit');
 
 // Debounce window for marking a device offline on socket disconnect. Brief
 // flap (Wi-Fi blip, Engine.IO ping miss, server-side eviction-then-reconnect)
@@ -825,6 +826,28 @@ module.exports = function setupDeviceSocket(io) {
       if (!device_id || device_id !== currentDeviceId) return;
       await db.prepare("UPDATE devices SET ota_status = ?, ota_target_version = ?, ota_attempts = ?, ota_updated_at = UNIX_TIMESTAMP() WHERE id = ?")
         .run(ota_status ?? 'none', ota_target_version ?? null, ota_attempts ?? 0, device_id);
+    });
+
+    // Phase 2 Stage A: the player reports a discrete device-side event
+    // (playlist_resumed, update_installed, update_failed, ... — event_type is
+    // open-ended). Persisted to device_events for the plain-language audit trail
+    // (GET /api/dashboard/devices/:id/audit-trail). Same guards as the handlers
+    // above; recordDeviceEvent snapshots workspace_id from the device and bounds
+    // the table per device.
+    socket.on('device:report-event', async (data) => {
+      if (!requireDeviceAuth()) return;
+      const { device_id, event_type } = data || {};
+      if (!device_id || device_id !== currentDeviceId) return;
+      const message = typeof data.message === 'string' ? data.message
+        : typeof data.details === 'string' ? data.details : null;
+      const id = await deviceAudit.recordDeviceEvent(db, device_id, event_type, message);
+      if (!id) return; // missing/blank event_type — nothing recorded
+      await emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:device-event', {
+        device_id,
+        event_type: String(event_type).trim().slice(0, 64),
+        message: message ? message.slice(0, 2000) : null,
+        occurred_at: Math.floor(Date.now() / 1000),
+      });
     });
 
     // Play event logging (proof-of-play). Offline-resilient: clients persist events locally

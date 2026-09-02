@@ -317,6 +317,19 @@ module.exports = {
   // meaningful to a recipient who knows their instance host).
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, ""),
 
+  // Phase 2 Stage A — device audit trail (lib/device-audit.js).
+  // Thresholds for the ON-READ Wi-Fi / storage "crossed below" events derived
+  // from consecutive device_telemetry rows. weakWifiRssiDbm matches the weak-
+  // signal cutoff used everywhere else (frontend isWeakSignal, the dashboard
+  // devices filter); lowStorageFreeMb matches the existing low-storage cutoff.
+  weakWifiRssiDbm: parseInt(process.env.WEAK_WIFI_RSSI_DBM) || -75,
+  lowStorageFreeMb: parseInt(process.env.LOW_STORAGE_FREE_MB) || 500,
+  // Per-device row cap on device_events (device-writable via device:report-event).
+  // Enforced insert-time — same "bounded from day one" discipline as
+  // device_telemetry's 6000-row cap; no separate sweep needed.
+  deviceEventsMaxPerDevice:
+    parseInt(process.env.DEVICE_EVENTS_MAX_PER_DEVICE) || 500,
+
   // #146 BILLING — usage metering per the ByteTinker–Bold Media distribution agreement.
   // This is the contractual system-of-record; the DEFAULTS BELOW ARE THE AGREEMENT. Change
   // them only if the contract changes. Single GLOBAL rate card for now — per-tenant rate

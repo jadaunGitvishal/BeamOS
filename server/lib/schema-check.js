@@ -15,6 +15,7 @@ const REQUIRED_TABLES = [
   'devices', 'content', 'playlists', 'activity_log', 'schema_migrations',
   'registration_codes', // Ref 30 Stage 1: advance device registration codes
   'outage_history',     // Ref 51: SLA MTTR reads from this durable rollup
+  'device_events',      // Phase 2 Stage A: audit-trail endpoint + device:report-event
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is

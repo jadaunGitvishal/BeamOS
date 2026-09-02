@@ -747,6 +747,27 @@ CREATE TABLE IF NOT EXISTS device_status_log (
 -- for audit purposes, and the retention sweep prunes it independently.
 CREATE INDEX idx_device_status_log_device_ts ON device_status_log(device_id, timestamp);
 
+-- ===================== DEVICE EVENTS (Phase 2 Stage A) =====================
+-- Discrete device-side events the Android player reports over the socket
+-- (device:report-event -> lib/device-audit.js recordDeviceEvent): playlist_resumed,
+-- update_installed, update_failed, ... event_type is deliberately open-ended
+-- (VARCHAR, no enum) so a new Android build can add a type without a schema change;
+-- lib/device-audit.js phraseEvent() maps known types to a sentence and renders
+-- unknown ones generically. workspace_id is snapshotted from the device at write
+-- time (nullable: a not-yet-paired device has none). Feeds the plain-language
+-- audit trail. Bounded per device insert-time (config.deviceEventsMaxPerDevice),
+-- like device_telemetry — no separate sweep.
+CREATE TABLE IF NOT EXISTS device_events (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id       VARCHAR(64) NOT NULL,
+    workspace_id    VARCHAR(64),
+    event_type      VARCHAR(64) NOT NULL,
+    message         TEXT,
+    occurred_at     BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_device_events_device_time ON device_events(device_id, occurred_at DESC);
+
 -- ===================== EVENT LOOP LAG (#142) =====================
 -- Event-loop delay telemetry from perf_hooks.monitorEventLoopDelay(). Bounded
 -- from day one: indexed on sampled_at and pruned on a schedule (see

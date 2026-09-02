@@ -7,6 +7,7 @@ const { accessContext } = require("../lib/tenancy");
 const { getWorkspaceDeviceFilter } = require("../lib/workspace-scope");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
+const { buildDeviceAuditTrail } = require("../lib/device-audit");
 
 // Merged in from BeamOS-Dashboard's routes/devices.js. Its standalone-app
 // GET /:id/screenshot proxy (which forwarded a dash_token cookie to BeamOS's
@@ -245,6 +246,34 @@ router.get(
       )
       .all(req.params.id, startEpoch, endEpoch);
     res.json(rows);
+  }),
+);
+
+// GET /api/dashboard/devices/:id/audit-trail?limit=&since=
+// Phase 2 Stage A — one plain-language, reverse-chronological feed for a device,
+// merging status_log transitions + reported device_events + on-read Wi-Fi/storage
+// threshold crossings (see lib/device-audit.js). Same RBAC as /:id/status-history.
+router.get(
+  "/:id/audit-trail",
+  asyncHandler(async (req, res) => {
+    const device = await db
+      .prepare("SELECT id, workspace_id FROM devices WHERE id = ?")
+      .get(req.params.id);
+    if (!device) return res.status(404).json({ error: "Device not found" });
+    if (!device.workspace_id) return res.status(403).json({ error: "Device not assigned to a workspace" });
+
+    const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(device.workspace_id);
+    const ctx = ws && (await accessContext(req.user.id, req.user.role, ws));
+    if (!ctx) return res.status(403).json({ error: "Access denied" });
+
+    const sinceEpoch = req.query.since
+      ? Math.floor(new Date(req.query.since).getTime() / 1000)
+      : undefined;
+    const trail = await buildDeviceAuditTrail(db, req.params.id, {
+      limit: req.query.limit,
+      sinceEpoch: Number.isFinite(sinceEpoch) ? sinceEpoch : undefined,
+    });
+    res.json(trail);
   }),
 );
 
