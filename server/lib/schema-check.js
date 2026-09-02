@@ -17,6 +17,7 @@ const REQUIRED_TABLES = [
   'outage_history',     // Ref 51: SLA MTTR reads from this durable rollup
   'device_events',      // Phase 2 Stage A: audit-trail endpoint + device:report-event
   'regions',            // Phase 3 Stage A: per-org regional structure
+  'tickets',            // Phase 4 Stage A: operational ticketing
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is

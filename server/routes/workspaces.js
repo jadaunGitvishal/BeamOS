@@ -2,7 +2,8 @@ const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
 const { db } = require("../db/database");
-const { canAdminWorkspace, canAccessWorkspace, canManageOrgRegions } = require("../lib/permissions");
+const { canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canManageOrgRegions } = require("../lib/permissions");
+const { logActivity, getClientIp } = require("../services/activity");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
@@ -589,6 +590,270 @@ router.patch(
       .prepare("UPDATE workspaces SET region_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
       .run(regionId, ws.id);
     res.json({ id: ws.id, region_id: regionId });
+  }),
+);
+
+// ==================== Tickets (Phase 4 Stage A) ====================
+//
+// Manual operational ticketing against a workspace (optionally a device). No
+// automatic creation, no Operations UI yet - those are later Phase 4 stages.
+// Read = any workspace member (canAccessWorkspace). Create/update =
+// workspace_editor+ (canWriteWorkspace). Cross-workspace access is denied by
+// those same checks (they evaluate against the URL-param workspace, and this
+// router has no resolveTenancy). Every mutation also writes activity_log.
+
+// owner_category is a plain VARCHAR in the schema (see schema.sql tickets note);
+// this is the known set the API validates against today. Adding a value here is
+// a one-line change with no migration.
+const TICKET_OWNER_CATEGORIES = ["customer_it", "store_staff", "platform", "hardware", "unassigned"];
+const TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"];
+const TICKET_PRIORITIES = ["low", "medium", "high"];
+const TICKET_TITLE_MAX = 255;
+const TICKET_DESC_MAX = 10000;
+// Entering one of these stamps resolved_at; leaving it (back to open/in_progress) clears it.
+const TICKET_DONE_STATUSES = new Set(["resolved", "closed"]);
+
+const TICKET_SELECT = `
+  SELECT t.*, u.email AS created_by_email, d.name AS device_name
+  FROM tickets t
+  LEFT JOIN users u ON u.id = t.created_by
+  LEFT JOIN devices d ON d.id = t.device_id
+`;
+
+function ticketRow(t) {
+  return {
+    id: t.id,
+    workspace_id: t.workspace_id,
+    device_id: t.device_id,
+    device_name: t.device_name ?? null,
+    title: t.title,
+    description: t.description ?? null,
+    owner_category: t.owner_category,
+    status: t.status,
+    priority: t.priority,
+    created_by: t.created_by,
+    created_by_email: t.created_by_email ?? null,
+    created_at: t.created_at,
+    updated_at: t.updated_at,
+    resolved_at: t.resolved_at ?? null,
+  };
+}
+
+// 404 unknown workspace, 403 unless caller is workspace_editor+ (or org/platform).
+// Stamps req.workspaceId for audit attribution (no resolveTenancy on this router).
+async function loadWorkspaceForTicketWrite(req, res) {
+  const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(req.params.id);
+  if (!ws) {
+    res.status(404).json({ error: "Workspace not found" });
+    return null;
+  }
+  if (!(await canWriteWorkspace(db, req.user, ws))) {
+    res.status(403).json({ error: "Workspace editor or admin required" });
+    return null;
+  }
+  req.workspaceId = ws.id;
+  return ws;
+}
+
+// POST /:id/tickets - create a ticket. workspace_editor+.
+router.post(
+  "/:id/tickets",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForTicketWrite(req, res);
+    if (!ws) return;
+
+    const title = String(req.body?.title || "").trim();
+    if (!title) return res.status(400).json({ error: "title is required" });
+    if (title.length > TICKET_TITLE_MAX) {
+      return res.status(400).json({ error: `title must be ${TICKET_TITLE_MAX} characters or fewer` });
+    }
+
+    let description = req.body?.description;
+    if (description === undefined || description === null || description === "") {
+      description = null;
+    } else {
+      description = String(description);
+      if (description.length > TICKET_DESC_MAX) {
+        return res.status(400).json({ error: `description must be ${TICKET_DESC_MAX} characters or fewer` });
+      }
+    }
+
+    const ownerCategory =
+      req.body?.owner_category === undefined ? "unassigned" : String(req.body.owner_category);
+    if (!TICKET_OWNER_CATEGORIES.includes(ownerCategory)) {
+      return res.status(400).json({ error: `owner_category must be one of: ${TICKET_OWNER_CATEGORIES.join(", ")}` });
+    }
+    const priority = req.body?.priority === undefined ? "medium" : String(req.body.priority);
+    if (!TICKET_PRIORITIES.includes(priority)) {
+      return res.status(400).json({ error: `priority must be one of: ${TICKET_PRIORITIES.join(", ")}` });
+    }
+
+    let deviceId = req.body?.device_id;
+    if (deviceId === undefined || deviceId === null || deviceId === "") {
+      deviceId = null;
+    } else {
+      deviceId = String(deviceId);
+      const device = await db.prepare("SELECT id, workspace_id FROM devices WHERE id = ?").get(deviceId);
+      if (!device) return res.status(404).json({ error: "Device not found" });
+      if (device.workspace_id !== ws.id) {
+        return res.status(400).json({ error: "Device is not in this workspace" });
+      }
+    }
+
+    const id = crypto.randomUUID();
+    await db
+      .prepare(
+        `INSERT INTO tickets (id, workspace_id, device_id, title, description, owner_category, status, priority, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+      )
+      .run(id, ws.id, deviceId, title, description, ownerCategory, priority, req.user.id);
+
+    logActivity(
+      req.user.id,
+      "ticket_created",
+      `workspace: ${ws.name} (${ws.id}), ticket: ${title}, priority: ${priority}, owner: ${ownerCategory}` +
+        (deviceId ? `, device: ${deviceId}` : ""),
+      deviceId,
+      getClientIp(req),
+      ws.id,
+    );
+
+    const row = await db.prepare(`${TICKET_SELECT} WHERE t.id = ?`).get(id);
+    res.status(201).json(ticketRow(row));
+  }),
+);
+
+// GET /:id/tickets - list tickets in a workspace. Any workspace member.
+// Optional filters: ?status= ?owner_category= ?priority=
+router.get(
+  "/:id/tickets",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, false);
+    if (!ws) return;
+
+    const filters = ["t.workspace_id = ?"];
+    const params = [ws.id];
+
+    if (req.query.status !== undefined) {
+      if (!TICKET_STATUSES.includes(req.query.status)) {
+        return res.status(400).json({ error: `status filter must be one of: ${TICKET_STATUSES.join(", ")}` });
+      }
+      filters.push("t.status = ?");
+      params.push(req.query.status);
+    }
+    if (req.query.priority !== undefined) {
+      if (!TICKET_PRIORITIES.includes(req.query.priority)) {
+        return res.status(400).json({ error: `priority filter must be one of: ${TICKET_PRIORITIES.join(", ")}` });
+      }
+      filters.push("t.priority = ?");
+      params.push(req.query.priority);
+    }
+    // owner_category is open-ended - an unknown value simply matches nothing.
+    if (req.query.owner_category !== undefined) {
+      filters.push("t.owner_category = ?");
+      params.push(String(req.query.owner_category));
+    }
+
+    const rows = await db
+      .prepare(`${TICKET_SELECT} WHERE ${filters.join(" AND ")} ORDER BY t.created_at DESC, t.id DESC`)
+      .all(...params);
+    res.json(rows.map(ticketRow));
+  }),
+);
+
+// GET /:id/tickets/:ticketId - single ticket. Any workspace member.
+router.get(
+  "/:id/tickets/:ticketId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, false);
+    if (!ws) return;
+    const row = await db
+      .prepare(`${TICKET_SELECT} WHERE t.id = ? AND t.workspace_id = ?`)
+      .get(req.params.ticketId, ws.id);
+    if (!row) return res.status(404).json({ error: "Ticket not found" });
+    res.json(ticketRow(row));
+  }),
+);
+
+// PATCH /:id/tickets/:ticketId - update status / owner_category / priority.
+// workspace_editor+. resolved_at is managed off the status change.
+router.patch(
+  "/:id/tickets/:ticketId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForTicketWrite(req, res);
+    if (!ws) return;
+    const ticket = await db
+      .prepare("SELECT * FROM tickets WHERE id = ? AND workspace_id = ?")
+      .get(req.params.ticketId, ws.id);
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+
+    const sawKey = ["status", "owner_category", "priority"].some((k) => req.body?.[k] !== undefined);
+    if (!sawKey) {
+      return res.status(400).json({ error: "Send at least one of: status, owner_category, priority" });
+    }
+
+    const updates = [];
+    const values = [];
+    const changed = [];
+
+    if (req.body?.status !== undefined) {
+      const status = String(req.body.status);
+      if (!TICKET_STATUSES.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${TICKET_STATUSES.join(", ")}` });
+      }
+      if (status !== ticket.status) {
+        updates.push("status = ?");
+        values.push(status);
+        changed.push(`status: ${ticket.status} -> ${status}`);
+        const wasDone = TICKET_DONE_STATUSES.has(ticket.status);
+        const nowDone = TICKET_DONE_STATUSES.has(status);
+        if (nowDone && !wasDone) updates.push("resolved_at = UNIX_TIMESTAMP()");
+        else if (!nowDone && wasDone) updates.push("resolved_at = NULL");
+      }
+    }
+    if (req.body?.owner_category !== undefined) {
+      const oc = String(req.body.owner_category);
+      if (!TICKET_OWNER_CATEGORIES.includes(oc)) {
+        return res.status(400).json({ error: `owner_category must be one of: ${TICKET_OWNER_CATEGORIES.join(", ")}` });
+      }
+      if (oc !== ticket.owner_category) {
+        updates.push("owner_category = ?");
+        values.push(oc);
+        changed.push(`owner: ${ticket.owner_category} -> ${oc}`);
+      }
+    }
+    if (req.body?.priority !== undefined) {
+      const p = String(req.body.priority);
+      if (!TICKET_PRIORITIES.includes(p)) {
+        return res.status(400).json({ error: `priority must be one of: ${TICKET_PRIORITIES.join(", ")}` });
+      }
+      if (p !== ticket.priority) {
+        updates.push("priority = ?");
+        values.push(p);
+        changed.push(`priority: ${ticket.priority} -> ${p}`);
+      }
+    }
+
+    if (!updates.length) {
+      // Valid keys, but every value already matches - return the row unchanged.
+      return res.json(ticketRow(await db.prepare(`${TICKET_SELECT} WHERE t.id = ?`).get(ticket.id)));
+    }
+
+    updates.push("updated_at = UNIX_TIMESTAMP()");
+    values.push(ticket.id);
+    await db.prepare(`UPDATE tickets SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+
+    logActivity(
+      req.user.id,
+      "ticket_updated",
+      `workspace: ${ws.name} (${ws.id}), ticket: ${ticket.title}, ${changed.join(", ")}`,
+      ticket.device_id,
+      getClientIp(req),
+      ws.id,
+    );
+
+    const row = await db.prepare(`${TICKET_SELECT} WHERE t.id = ?`).get(ticket.id);
+    res.json(ticketRow(row));
   }),
 );
 

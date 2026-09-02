@@ -1043,6 +1043,43 @@ CREATE TABLE IF NOT EXISTS registration_codes (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_registration_codes_workspace ON registration_codes(workspace_id, created_at DESC);
 
+-- ===================== TICKETS (Phase 4 Stage A) =====================
+-- Operational tickets against a workspace (and optionally a specific device).
+-- Stage A is manual-only: a workspace_editor+ opens one by hand. Later stages
+-- add automatic creation (created_by stays NULL for those) and an Operations
+-- page. Every mutation is mirrored to activity_log by the route handlers.
+--
+-- owner_category is a plain VARCHAR, NOT an ENUM - same philosophy as
+-- device_events.event_type: the route validates against a known set
+-- (routes/workspaces.js TICKET_OWNER_CATEGORIES) that can grow without a
+-- schema migration. Current expected values: 'customer_it', 'store_staff',
+-- 'platform', 'hardware', 'unassigned'.
+-- status:   'open' | 'in_progress' | 'resolved' | 'closed'
+-- priority: 'low' | 'medium' | 'high'
+-- resolved_at is stamped when status first moves to resolved/closed and
+-- cleared if it moves back to open/in_progress.
+-- device_id ON DELETE SET NULL: a removed device leaves its ticket history
+-- intact. created_by ON DELETE SET NULL: same for a removed user.
+CREATE TABLE IF NOT EXISTS tickets (
+    id              VARCHAR(64) PRIMARY KEY,
+    workspace_id    VARCHAR(64) NOT NULL,
+    device_id       VARCHAR(64),
+    title           VARCHAR(255) NOT NULL,
+    description     TEXT,
+    owner_category  VARCHAR(50) NOT NULL DEFAULT 'unassigned',
+    status          VARCHAR(50) NOT NULL DEFAULT 'open',
+    priority        VARCHAR(50) NOT NULL DEFAULT 'medium',
+    created_by      VARCHAR(64),
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    resolved_at     BIGINT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_tickets_workspace ON tickets(workspace_id, status, created_at DESC);
+CREATE INDEX idx_tickets_device ON tickets(device_id);
+
 -- ===================== SCHEMA MIGRATIONS =====================
 
 CREATE TABLE IF NOT EXISTS schema_migrations (

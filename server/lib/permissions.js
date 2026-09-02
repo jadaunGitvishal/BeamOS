@@ -134,6 +134,22 @@ async function canAccessWorkspace(db, user, workspace) {
   return !!wm;
 }
 
+// Write-access companion sitting between canAccessWorkspace (any member) and
+// canAdminWorkspace (workspace_admin only): platform staff, org_owner/org_admin,
+// or a workspace_admin / workspace_editor of the target workspace. Same
+// (user, workspace) shape, for URL-param-target routes with no resolveTenancy
+// on the request (Phase 4: workspace tickets).
+async function canWriteWorkspace(db, user, workspace) {
+  if (!user || !workspace) return false;
+  if (isPlatformStaff(user.role)) return true;
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+    .get(workspace.organization_id, user.id);
+  if (om && (om.role === 'org_owner' || om.role === 'org_admin')) return true;
+  const wm = await db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+    .get(workspace.id, user.id);
+  return !!wm && (wm.role === 'workspace_admin' || wm.role === 'workspace_editor');
+}
+
 // Decoupled org-level companions to canAdminWorkspace/canAccessWorkspace above -
 // same shape (explicit (user, org) pair, not req), for routes that operate on a
 // target org specified by URL param (server/routes/organizations.js) rather than
@@ -178,7 +194,7 @@ async function canManageOrgRegions(db, user, org) {
 
 module.exports = {
   // boolean predicates
-  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canAdminOrg, canAccessOrg, canManageOrgRegions, isOrgAdmin, isOrgOwner,
+  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canAdminOrg, canAccessOrg, canManageOrgRegions, isOrgAdmin, isOrgOwner,
   // express middleware
   requireWorkspace,
   requireWorkspaceRead,
