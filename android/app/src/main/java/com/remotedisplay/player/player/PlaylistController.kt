@@ -45,7 +45,13 @@ class PlaylistController(
     // Fired when an item has failed to play MAX_CONSECUTIVE_FAILURES times in a row and
     // there is nothing else schedule-active to skip to. Falls back to onNothingScheduled/
     // onPlaylistEmpty if not supplied.
-    private val onContentUnavailable: ((PlaylistItem) -> Unit)? = null
+    private val onContentUnavailable: ((PlaylistItem) -> Unit)? = null,
+    // Phase 2 Stage B: discrete device-side events for the server audit trail
+    // (device:report-event). Only "playlist_resumed" so far — fired from
+    // startIfNeeded() when playback had actually STOPPED/broken and is coming
+    // back, NOT on routine next-item advancement (see next()) or the first cold
+    // start. Side effect only: never awaited, failures swallowed by the caller.
+    private val onReportEvent: ((eventType: String, message: String?) -> Unit)? = null
 ) {
     companion object {
         private const val MAX_CONSECUTIVE_FAILURES = 3
@@ -57,6 +63,11 @@ class PlaylistController(
     private val handler = Handler(Looper.getMainLooper())
     private var advanceRunnable: Runnable? = null
     private var isRunning = false
+    // Phase 2 Stage B: true once start() has run at least once. Distinguishes a
+    // genuine resume (playback was stopped/broke, now coming back through
+    // startIfNeeded()) from the first-ever cold start — only the former reports
+    // "playlist_resumed".
+    private var hasEverStarted = false
     // #74/#75: per-item scheduling state
     @Volatile private var effectiveTimezone: String? = null
     private var retryRunnable: Runnable? = null
@@ -225,6 +236,7 @@ class PlaylistController(
 
     fun start() {
         isRunning = true
+        hasEverStarted = true
         if (items.isEmpty()) { onPlaylistEmpty(); return }
         // #74/#75: begin on the first schedule-active item; idle if none.
         val idx = firstActiveIndex()
@@ -256,6 +268,13 @@ class PlaylistController(
         // start(), which reverts to firstActiveIndex(). isRunning/currentIndex logged
         // here so we can see exactly which condition failed.
         DebugLog.i("PlaylistController", "TEMP_DEBUG startIfNeeded(): guard bypassed (isRunning=$isRunning, currentIndex=$currentIndex, items.size=${items.size}) -> calling start()")
+        // Phase 2 Stage B: the "already playing" guard didn't hold and we've run
+        // before — playback had stopped (multi-zone switch) or broke (stale
+        // index / items changed) and is resuming now. Routine advancement goes
+        // through next(), never here. Reporting is a side effect only.
+        if (hasEverStarted) {
+            try { onReportEvent?.invoke("playlist_resumed", null) } catch (_: Throwable) {}
+        }
         start()
     }
 

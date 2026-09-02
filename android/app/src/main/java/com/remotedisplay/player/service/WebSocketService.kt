@@ -716,6 +716,23 @@ class WebSocketService : Service() {
         } catch (e: Throwable) { Log.w("WebSocketService", "sendOtaStatus: ${e.message}") }
     }
 
+    // Phase 2 Stage B: report a discrete device-side event (playlist_resumed,
+    // update_installed, update_failed, ...) for the server-side audit trail
+    // (device:report-event -> device_events). Fire-and-forget and fully guarded
+    // like every other emitter here — a not-connected socket or a JSON hiccup
+    // must never disturb the playback / update logic that calls this.
+    fun sendDeviceEvent(eventType: String, message: String? = null) {
+        if (eventType.isBlank()) return
+        if (socket?.connected() != true) return
+        try {
+            socket?.emit("device:report-event", JSONObject().apply {
+                put("device_id", config.deviceId)
+                put("event_type", eventType)
+                if (!message.isNullOrBlank()) put("message", message)
+            })
+        } catch (e: Throwable) { Log.w("WebSocketService", "sendDeviceEvent($eventType): ${e.message}") }
+    }
+
     // Proof-of-play (offline-resilient). MainActivity writes every play_start/play_end to
     // PlayEventQueue BEFORE calling this — this only ever tries to drain what's already
     // durably queued, and never deletes a row itself except via the ack in sendOne(). Only the

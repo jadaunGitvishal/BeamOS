@@ -199,7 +199,11 @@ class MainActivity : AppCompatActivity() {
                 Log.w("MainActivity", "Content unavailable after repeated playback errors: ${item.filename}")
                 if (::mediaPlayer.isInitialized) mediaPlayer.stop()
                 showStatus(getString(R.string.content_unavailable))
-            }
+            },
+            // Phase 2 Stage B: forward device-side events to the server audit trail.
+            // wsService is null until bound and sendDeviceEvent no-ops on a dead
+            // socket, so this is a pure side effect — never blocks playback.
+            onReportEvent = { eventType, message -> wsService?.sendDeviceEvent(eventType, message) }
         )
 
         // Setup media player
@@ -275,6 +279,9 @@ class MainActivity : AppCompatActivity() {
         // #139 Phase 2 (Option B): announce OTA status transitions (clear / enter-backoff) so the
         // dashboard badge clears/lights up promptly without waiting for a reconnect.
         updateChecker.otaStatusReporter = { wsService?.sendOtaStatus() }
+        // Phase 2 Stage B: durable update-outcome events (update_installed / update_failed)
+        // for the device audit trail. Same lazy wsService read; sendDeviceEvent no-ops offline.
+        updateChecker.eventReporter = { eventType, message -> wsService?.sendDeviceEvent(eventType, message) }
         updateChecker.startPeriodicCheck()
 
     }

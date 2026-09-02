@@ -58,6 +58,16 @@ class UpdateChecker(private val context: Context) {
     var otaStatusReporter: (() -> Unit)? = null
     private fun announceOtaStatus() { try { otaStatusReporter?.invoke() } catch (_: Throwable) {} }
 
+    // Phase 2 Stage B: report a discrete update outcome (update_installed /
+    // update_failed) to the device audit trail. Wired by MainActivity to
+    // WebSocketService.sendDeviceEvent; lazy/null-safe/swallowing so a reporting
+    // failure can never disturb the install flow. Distinct from otaLogReporter
+    // (transient dashboard badge, state transitions only) and otaStatusReporter.
+    var eventReporter: ((eventType: String, message: String?) -> Unit)? = null
+    private fun reportEvent(eventType: String, message: String?) {
+        try { eventReporter?.invoke(eventType, message) } catch (_: Throwable) {}
+    }
+
     // The PackageInstaller session reports its status (incl. STATUS_PENDING_USER_ACTION,
     // which Android 13+ returns for non-device-owner installers) via this broadcast.
     // Without handling it the committed session just stalls and the update never
@@ -67,7 +77,9 @@ class UpdateChecker(private val context: Context) {
         if (installReceiverRegistered) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
-                when (intent.getIntExtra(android.content.pm.PackageInstaller.EXTRA_STATUS, -999)) {
+                val status = intent.getIntExtra(android.content.pm.PackageInstaller.EXTRA_STATUS, -999)
+                val statusMsg = intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE)
+                when (status) {
                     android.content.pm.PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                         val confirm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                             intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
@@ -81,8 +93,13 @@ class UpdateChecker(private val context: Context) {
                     // Logcat only — NOT report(): these fire per attempt, and #139 keeps the
                     // device:log/dashboard channel to state transitions (enter-backoff, clear).
                     android.content.pm.PackageInstaller.STATUS_SUCCESS -> Log.i(TAG, "Update installed successfully")
-                    else -> Log.w(TAG, "Install status: ${intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE)}")
+                    else -> Log.w(TAG, "Install status: $statusMsg")
                 }
+                // Phase 2 Stage B: SUCCESS / any FAILURE_* also lands in the durable
+                // device audit trail (device_events), independent of the transient
+                // #139 dashboard-badge channel above. PENDING_USER_ACTION -> null.
+                InstallEvent.forStatus(status, statusMsg, config.otaTargetVersion.ifBlank { getAppVersion() })
+                    ?.let { (type, msg) -> reportEvent(type, msg) }
             }
         }
         val filter = IntentFilter("com.remotedisplay.player.INSTALL_COMPLETE")
