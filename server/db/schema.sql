@@ -938,6 +938,31 @@ CREATE INDEX idx_outage_history_ws_started ON outage_history(workspace_id, start
 -- Serves the recorder's "already recorded?" prefilter and the retention prune.
 CREATE INDEX idx_outage_history_started ON outage_history(started_at);
 
+-- ===================== OUTAGE ESCALATIONS (Ref 51, SLA Dashboard) =====================
+-- One row per ONGOING outage that has been escalated by email (services/
+-- outage-escalation.js). This table IS the anti-spam mechanism, not a report:
+-- the escalation sweep runs every ~15 min, and before emailing it checks for a
+-- row matching (device_id, outage_start) — present means "already alerted for
+-- THIS incident, do nothing". Same idempotency pattern as outage_history's
+-- unique key.
+--
+-- outage_start comes from the shared detector (lib/outage-detection.js), so if a
+-- device recovers and then breaks again it gets a NEW outage_start and therefore
+-- a fresh escalation — correct, that is a genuinely new incident. recipient_email
+-- is the comma-joined list of workspace_admins actually mailed (informational;
+-- the unique key is the real guard).
+CREATE TABLE IF NOT EXISTS outage_escalations (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id        VARCHAR(64) NOT NULL,
+    workspace_id     VARCHAR(64) NOT NULL,
+    outage_start     BIGINT NOT NULL,
+    alerted_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    recipient_email  VARCHAR(500) NOT NULL,
+    UNIQUE KEY uq_outage_escalations_device_start (device_id, outage_start)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+-- Serves the sweep's "already escalated?" prefilter.
+CREATE INDEX idx_outage_escalations_start ON outage_escalations(outage_start);
+
 -- ===================== DEVICE REGISTRATION CODES (Ref 30) =====================
 -- Ref 30 Stage 1: advance device registration codes. A workspace_admin (or org /
 -- platform admin) generates a 6-digit code ahead of an install, optionally naming

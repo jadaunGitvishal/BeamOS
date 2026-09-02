@@ -1032,6 +1032,10 @@ async function boot() {
   const { startOutageHistoryRecorder } = require("./services/outage-history");
   startOutageHistoryRecorder();
 
+  // Ref 51: SLA breach escalation emails (ongoing outage past the threshold -> alert workspace admins once)
+  const { startOutageEscalations } = require("./services/outage-escalation");
+  startOutageEscalations();
+
   // Start alert service
   const { startAlertService } = require("./services/alerts");
   startAlertService(io);

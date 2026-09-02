@@ -306,6 +306,16 @@ module.exports = {
   // per outage on a low-write table; pruned chunked by the same service.
   outageHistoryRetentionDays:
     parseInt(process.env.OUTAGE_HISTORY_RETENTION_DAYS) || 400,
+  // Ref 51 Step 2+3: SLA breach escalation emails (services/outage-escalation.js).
+  // Sweeps for ONGOING outages past sla_escalation_threshold_hours and emails the
+  // workspace_admin(s) once per incident (outage_escalations table dedupes).
+  // Lowered via env only for tests.
+  outageEscalationIntervalMs:
+    parseInt(process.env.OUTAGE_ESCALATION_INTERVAL_MS) || 15 * 60 * 1000,
+  // Absolute base URL for links in outbound email (e.g. the device page a breach
+  // alert points to). Unset -> a root-relative path is used instead (still
+  // meaningful to a recipient who knows their instance host).
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, ""),
 
   // #146 BILLING — usage metering per the ByteTinker–Bold Media distribution agreement.
   // This is the contractual system-of-record; the DEFAULTS BELOW ARE THE AGREEMENT. Change

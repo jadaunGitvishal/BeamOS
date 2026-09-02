@@ -143,4 +143,4 @@ function sendEmailAlert(to, name, { subject, body }) {
   });
 }
 
-module.exports = { startAlertService, sendEmailAlert };
+module.exports = { startAlertService, sendEmailAlert, buildAlertHtml };
