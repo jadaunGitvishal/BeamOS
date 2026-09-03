@@ -6,6 +6,7 @@ const BASE_NAV = [
   { path: "/devices", label: "Screens", countKey: "devices" },
   { path: "/content", label: "Content delivery", countKey: null },
   { path: "/regions", label: "Regions", countKey: null },
+  { path: "/operations", label: "Operations", countKey: null },
 ];
 
 export default function Nav() {

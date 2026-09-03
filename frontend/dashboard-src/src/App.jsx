@@ -12,6 +12,7 @@ import DeviceDetailView from "./views/DeviceDetailView";
 import ContentView from "./views/ContentView";
 import IssuesView from "./views/IssuesView";
 import RegionsView from "./views/RegionsView";
+import OperationsView from "./views/OperationsView";
 
 export default function App() {
   return (
@@ -45,6 +46,7 @@ function SessionGate() {
         <Route path="device/:id" element={<DeviceDetailView />} />
         <Route path="content" element={<ContentView />} />
         <Route path="regions" element={<RegionsView />} />
+        <Route path="operations" element={<OperationsView />} />
         <Route path="issues" element={<IssuesView />} />
         <Route path="*" element={<OverviewView />} />
       </Route>
