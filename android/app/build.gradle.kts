@@ -28,6 +28,9 @@ android {
         targetSdk = 36
         versionCode = 41
         versionName = "1.9.2-patch3"
+
+        // Ref 42: instrumented tests for RTSP/HLS MediaSource routing + real HLS playback.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -87,6 +90,11 @@ dependencies {
     // ExoPlayer / Media3
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-ui:1.2.1")
+    // Ref 42: RTSP/HLS streaming support. DefaultMediaSourceFactory reflectively picks
+    // up these modules from the classpath - no code change in MediaPlayerManager needed;
+    // MediaItem.fromUri() auto-routes by URI (rtsp:// scheme -> RTSP, .m3u8 -> HLS).
+    implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.2.1")
 
     // Socket.IO client
     implementation("io.socket:socket.io-client:2.1.0")
@@ -110,6 +118,11 @@ dependencies {
 
     // #74/#75: unit tests for the Kotlin schedule evaluator (vector drift guard)
     testImplementation("junit:junit:4.13.2")
+
+    // Ref 42: instrumented tests (real device/emulator) for streaming MediaSource routing.
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test:rules:1.5.0")
 }
 
 // #74/#75: point the evaluator drift-guard test at the SHARED vector contract
