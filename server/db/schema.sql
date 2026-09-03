@@ -1043,11 +1043,12 @@ CREATE TABLE IF NOT EXISTS registration_codes (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_registration_codes_workspace ON registration_codes(workspace_id, created_at DESC);
 
--- ===================== TICKETS (Phase 4 Stage A) =====================
+-- ===================== TICKETS (Phase 4 Stage A + B) =====================
 -- Operational tickets against a workspace (and optionally a specific device).
--- Stage A is manual-only: a workspace_editor+ opens one by hand. Later stages
--- add automatic creation (created_by stays NULL for those) and an Operations
--- page. Every mutation is mirrored to activity_log by the route handlers.
+-- Stage A is manual: a workspace_editor+ opens one by hand. Stage B adds
+-- automatic creation on a live SLA breach (services/sla-breach-ticket.js,
+-- driven off the outage-escalation tick). Every route mutation is mirrored to
+-- activity_log by the route handlers.
 --
 -- owner_category is a plain VARCHAR, NOT an ENUM - same philosophy as
 -- device_events.event_type: the route validates against a known set
@@ -1060,22 +1061,38 @@ CREATE INDEX idx_registration_codes_workspace ON registration_codes(workspace_id
 -- cleared if it moves back to open/in_progress.
 -- device_id ON DELETE SET NULL: a removed device leaves its ticket history
 -- intact. created_by ON DELETE SET NULL: same for a removed user.
+--
+-- Stage B auto-creation tracking:
+--   auto_source          NULL for a hand-made ticket; 'sla_breach' for one the
+--                        SLA monitor opened. (created_by is also NULL for those,
+--                        so system tickets are distinguishable two ways.)
+--   source_outage_start  the detectOutages() outage_start epoch the ticket was
+--                        opened for. Together with device_id this is the
+--                        idempotency key: UNIQUE (device_id, source_outage_start)
+--                        stops a second ticket for the same ongoing outage
+--                        across ticks / concurrent sweeps - the exact pattern
+--                        outage_escalations uses. Manual tickets leave
+--                        source_outage_start NULL and MySQL does not collide
+--                        NULLs, so any number of them coexist.
 CREATE TABLE IF NOT EXISTS tickets (
-    id              VARCHAR(64) PRIMARY KEY,
-    workspace_id    VARCHAR(64) NOT NULL,
-    device_id       VARCHAR(64),
-    title           VARCHAR(255) NOT NULL,
-    description     TEXT,
-    owner_category  VARCHAR(50) NOT NULL DEFAULT 'unassigned',
-    status          VARCHAR(50) NOT NULL DEFAULT 'open',
-    priority        VARCHAR(50) NOT NULL DEFAULT 'medium',
-    created_by      VARCHAR(64),
-    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
-    updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
-    resolved_at     BIGINT,
+    id                  VARCHAR(64) PRIMARY KEY,
+    workspace_id        VARCHAR(64) NOT NULL,
+    device_id           VARCHAR(64),
+    title               VARCHAR(255) NOT NULL,
+    description         TEXT,
+    owner_category      VARCHAR(50) NOT NULL DEFAULT 'unassigned',
+    status              VARCHAR(50) NOT NULL DEFAULT 'open',
+    priority            VARCHAR(50) NOT NULL DEFAULT 'medium',
+    created_by          VARCHAR(64),
+    auto_source         VARCHAR(50),
+    source_outage_start BIGINT,
+    created_at          BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at          BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    resolved_at         BIGINT,
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
     FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE SET NULL,
-    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_tickets_source_outage (device_id, source_outage_start)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_tickets_workspace ON tickets(workspace_id, status, created_at DESC);
 CREATE INDEX idx_tickets_device ON tickets(device_id);

@@ -38,6 +38,17 @@ db.exec(`
     outage_start INTEGER NOT NULL, alerted_at INTEGER NOT NULL DEFAULT 0, recipient_email TEXT NOT NULL,
     UNIQUE (device_id, outage_start)
   );
+  -- Phase 4 Stage B: the escalation tick now also drives the SLA-breach ticket
+  -- sweep off the same detector pass. Present so that path runs clean here;
+  -- sla-breach-ticket.test.js is where its behaviour is exercised in depth.
+  CREATE TABLE tickets (
+    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, device_id TEXT,
+    title TEXT NOT NULL, description TEXT, owner_category TEXT NOT NULL DEFAULT 'unassigned',
+    status TEXT NOT NULL DEFAULT 'open', priority TEXT NOT NULL DEFAULT 'medium',
+    created_by TEXT, auto_source TEXT, source_outage_start INTEGER,
+    created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, resolved_at INTEGER,
+    UNIQUE (device_id, source_outage_start)
+  );
 `);
 
 const dbModulePath = require.resolve('../db/database');
@@ -102,6 +113,11 @@ test('first tick: exactly one alert fires for the breaching device, emailed to b
   assert.equal(r.sent, 1, 'only dev1 has a workspace_admin to alert');
   assert.equal(r.skipped, 0);
   assert.equal(r.noRecipients, 1, 'dev-noadmin: past threshold but no workspace_admin');
+
+  // Phase 4 Stage B: the same tick opens a ticket for BOTH breaches (ticket
+  // creation, unlike email, does not need a workspace_admin).
+  assert.equal(r.autoTickets.created, 2, 'a ticket for dev1 and for dev-noadmin');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM tickets WHERE auto_source = 'sla_breach'").get().n, 2);
 
   // one escalation row for dev1's outage_start
   assert.equal(rowCount(), 1);

@@ -41,6 +41,13 @@ const REQUIRED_COLUMNS = [
   // `regions` table is created by schema.sql (which runs before this check), so
   // the FK target exists by the time this repair fires on an existing DB.
   ['workspaces', 'region_id', "ALTER TABLE workspaces ADD COLUMN region_id VARCHAR(64) NULL, ADD CONSTRAINT fk_workspaces_region FOREIGN KEY (region_id) REFERENCES regions(id) ON DELETE SET NULL"],
+  // Phase 4 Stage B: SLA-breach auto-ticket tracking. `tickets` is created by
+  // schema.sql (runs before this check), so on a DB that predates Stage B these
+  // add the two columns. The UNIQUE key rides on the source_outage_start ALTER;
+  // manual tickets have source_outage_start NULL (MySQL never collides NULLs) so
+  // it can be added regardless of existing rows.
+  ['tickets', 'auto_source', "ALTER TABLE tickets ADD COLUMN auto_source VARCHAR(50) NULL"],
+  ['tickets', 'source_outage_start', "ALTER TABLE tickets ADD COLUMN source_outage_start BIGINT NULL, ADD UNIQUE KEY uq_tickets_source_outage (device_id, source_outage_start)"],
 ];
 
 function defaultOnMissing(missing) {

@@ -34,21 +34,8 @@ const { detectOutages } = require('../lib/outage-detection');
 const { sendEmail: defaultSendEmail } = require('./email');
 const { resolveWorkspaceAdmins } = require('./report-digest');
 const { buildAlertHtml } = require('./alerts');
-
-// MySQL ER_DUP_ENTRY (1062) / better-sqlite3 SQLITE_CONSTRAINT_* — the unique
-// constraint firing is the expected "another tick already claimed this" path.
-function isDuplicateKeyError(e) {
-  const s = `${e && e.code} ${e && e.message}`;
-  return /ER_DUP_ENTRY|SQLITE_CONSTRAINT|Duplicate entry|UNIQUE constraint failed/i.test(s);
-}
-
-function humanOutage(sec) {
-  const h = Math.floor(sec / 3600);
-  const m = Math.round((sec % 3600) / 60);
-  if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
-  if (h >= 1) return m ? `${h}h ${m}m` : `${h}h`;
-  return `${m}m`;
-}
+const { autoCreateBreachTickets } = require('./sla-breach-ticket');
+const { isDuplicateKeyError, humanOutage } = require('../lib/outage-format');
 
 function deviceUrl(deviceId) {
   return `${config.publicBaseUrl}/dashboard#/device/${encodeURIComponent(deviceId)}`;
@@ -56,7 +43,10 @@ function deviceUrl(deviceId) {
 
 // Testable core. Injectables: `dbh` (defaults to shared pool handle),
 // `opts.now` (ms|Date), `opts.thresholdHours`, `opts.sendEmail`.
-// Returns { ongoing, breaching, sent, skipped, noRecipients }. Never throws.
+// Returns { ongoing, breaching, sent, skipped, noRecipients, autoTickets }.
+// Never throws. autoTickets is the Phase 4 Stage B ticket sweep's result
+// ({ breaching, created, skipped, resolved }); it runs off the SAME detector
+// pass and is guarded independently so a ticketing failure can't stop emails.
 async function runOutageEscalations(dbh = defaultDb, opts = {}) {
   const sendEmail = opts.sendEmail || defaultSendEmail;
   const nowSec = Math.floor((opts.now ? new Date(opts.now).getTime() : Date.now()) / 1000);
@@ -74,9 +64,28 @@ async function runOutageEscalations(dbh = defaultDb, opts = {}) {
   let sent = 0;
   let skipped = 0;
   let noRecipients = 0;
+  let autoTickets = { breaching: 0, created: 0, skipped: 0, resolved: 0 };
 
   try {
     const outages = await detectOutages(dbh, { sinceEpoch, untilEpoch: nowSec });
+
+    // Phase 4 Stage B: open a ticket for each fresh live breach, and resolve
+    // any untouched auto-ticket whose outage has recovered — off THIS detector
+    // result, not a second scan. Independently guarded: a ticketing error is
+    // logged and swallowed so it can never block the escalation emails below.
+    try {
+      autoTickets = await autoCreateBreachTickets(dbh, outages, { nowSec, thresholdSec, sinceEpoch });
+      if (autoTickets.created || autoTickets.resolved) {
+        console.log(
+          `[sla-breach-ticket] tick: ${autoTickets.created} ticket(s) opened, ` +
+            `${autoTickets.resolved} auto-resolved on recovery` +
+            (autoTickets.skipped ? `, ${autoTickets.skipped} already open` : ''),
+        );
+      }
+    } catch (e) {
+      console.error(`[sla-breach-ticket] tick failed: ${e.stack || e.message}`);
+    }
+
     const live = outages.filter((o) => o.outage_end == null && o.workspace_id != null);
     ongoing = live.length;
 
@@ -86,7 +95,7 @@ async function runOutageEscalations(dbh = defaultDb, opts = {}) {
       console.log(
         `[outage-escalation] tick: ${ongoing} ongoing outage(s), 0 past the ${thresholdHours}h threshold`,
       );
-      return { ongoing, breaching, sent, skipped, noRecipients };
+      return { ongoing, breaching, sent, skipped, noRecipients, autoTickets };
     }
 
     // Prefilter: which (device_id, outage_start) are already escalated.
@@ -165,7 +174,7 @@ async function runOutageEscalations(dbh = defaultDb, opts = {}) {
     console.error(`[outage-escalation] tick failed: ${e.stack || e.message}`);
   }
 
-  return { ongoing, breaching, sent, skipped, noRecipients };
+  return { ongoing, breaching, sent, skipped, noRecipients, autoTickets };
 }
 
 function startOutageEscalations() {

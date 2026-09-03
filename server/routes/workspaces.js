@@ -633,6 +633,10 @@ function ticketRow(t) {
     priority: t.priority,
     created_by: t.created_by,
     created_by_email: t.created_by_email ?? null,
+    // Phase 4 Stage B: auto_source is null for hand-made tickets, 'sla_breach'
+    // for one the SLA monitor opened (created_by is null for those too).
+    auto_source: t.auto_source ?? null,
+    source_outage_start: t.source_outage_start ?? null,
     created_at: t.created_at,
     updated_at: t.updated_at,
     resolved_at: t.resolved_at ?? null,
