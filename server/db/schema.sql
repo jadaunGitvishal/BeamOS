@@ -1107,6 +1107,45 @@ CREATE TABLE IF NOT EXISTS tickets (
 CREATE INDEX idx_tickets_workspace ON tickets(workspace_id, status, created_at DESC);
 CREATE INDEX idx_tickets_device ON tickets(device_id);
 
+-- ===================== CAMPAIGNS (Phase 5 Stage A) =====================
+-- A campaign is a scheduling / tracking WRAPPER around an existing playlist -
+-- it does not own or duplicate content. playlist_id is nullable and ON DELETE
+-- SET NULL: deleting the playlist leaves the campaign as an (orphaned) shell
+-- rather than cascading; deleting the CAMPAIGN (route DELETE) only removes this
+-- wrapper row and never touches the playlist or its content, which may be
+-- assigned to devices or reused by other campaigns.
+--
+-- status is NOT stored - it is derived on read from start_date / end_date vs
+-- today (routes/workspaces.js campaignRow -> lib/campaign-status.js), the same
+-- rationale as tickets' response_status: the lifecycle is a pure function of
+-- the dates and the current day, so storing it would need a nightly job to
+-- flip draft->live->completed and would drift if that job ever missed a run.
+--   draft     today < start_date
+--   live      start_date <= today <= end_date
+--   completed today > end_date
+-- start_date / end_date are 'YYYY-MM-DD' strings (day granularity); the route
+-- validates the format and that end_date >= start_date (a single-day campaign
+-- is allowed). target_plays_per_day is an optional goal for Stage B's delivery
+-- tracking; nothing reads it yet.
+CREATE TABLE IF NOT EXISTS campaigns (
+    id                   VARCHAR(64) PRIMARY KEY,
+    workspace_id         VARCHAR(64) NOT NULL,
+    playlist_id          VARCHAR(64),
+    name                 VARCHAR(255) NOT NULL,
+    description          TEXT,
+    start_date           VARCHAR(10) NOT NULL,
+    end_date             VARCHAR(10) NOT NULL,
+    target_plays_per_day INT,
+    created_by           VARCHAR(64),
+    created_at           BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at           BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_campaigns_workspace ON campaigns(workspace_id, start_date);
+CREATE INDEX idx_campaigns_playlist ON campaigns(playlist_id);
+
 -- ===================== SCHEMA MIGRATIONS =====================
 
 CREATE TABLE IF NOT EXISTS schema_migrations (

@@ -18,6 +18,7 @@ const REQUIRED_TABLES = [
   'device_events',      // Phase 2 Stage A: audit-trail endpoint + device:report-event
   'regions',            // Phase 3 Stage A: per-org regional structure
   'tickets',            // Phase 4 Stage A: operational ticketing
+  'campaigns',          // Phase 5 Stage A: campaign wrappers around playlists
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is

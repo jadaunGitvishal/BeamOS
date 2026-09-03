@@ -10,6 +10,7 @@ const {
   ticketSlaTargets,
   summariseTicketSla,
 } = require("../lib/ticket-sla");
+const { campaignStatus } = require("../lib/campaign-status");
 const { logActivity, getClientIp } = require("../services/activity");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
@@ -658,8 +659,9 @@ function ticketRow(t, nowSec = Math.floor(Date.now() / 1000)) {
 }
 
 // 404 unknown workspace, 403 unless caller is workspace_editor+ (or org/platform).
-// Stamps req.workspaceId for audit attribution (no resolveTenancy on this router).
-async function loadWorkspaceForTicketWrite(req, res) {
+// Stamps req.workspaceId for audit attribution (no resolveTenancy on this
+// router). Shared by the ticket (Phase 4) and campaign (Phase 5) write routes.
+async function loadWorkspaceForWrite(req, res) {
   const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(req.params.id);
   if (!ws) {
     res.status(404).json({ error: "Workspace not found" });
@@ -677,7 +679,7 @@ async function loadWorkspaceForTicketWrite(req, res) {
 router.post(
   "/:id/tickets",
   asyncHandler(async (req, res) => {
-    const ws = await loadWorkspaceForTicketWrite(req, res);
+    const ws = await loadWorkspaceForWrite(req, res);
     if (!ws) return;
 
     const title = String(req.body?.title || "").trim();
@@ -827,7 +829,7 @@ router.get(
 router.patch(
   "/:id/tickets/:ticketId",
   asyncHandler(async (req, res) => {
-    const ws = await loadWorkspaceForTicketWrite(req, res);
+    const ws = await loadWorkspaceForWrite(req, res);
     if (!ws) return;
     const ticket = await db
       .prepare("SELECT * FROM tickets WHERE id = ? AND workspace_id = ?")
@@ -901,6 +903,318 @@ router.patch(
 
     const row = await db.prepare(`${TICKET_SELECT} WHERE t.id = ?`).get(ticket.id);
     res.json(ticketRow(row));
+  }),
+);
+
+// ==================== Campaigns (Phase 5 Stage A) ====================
+//
+// A campaign is a scheduling / tracking WRAPPER around an existing playlist
+// (playlist_id, nullable). It never owns or duplicates content. Read = any
+// workspace member; create/update/delete = workspace_editor+ (canWriteWorkspace,
+// via loadWorkspaceForWrite). status is derived on read from the date range
+// (lib/campaign-status.js), not stored. DELETE removes only the wrapper row -
+// the playlist and its content are left untouched (they may be assigned to
+// devices or reused elsewhere). Every mutation writes activity_log.
+
+const CAMPAIGN_NAME_MAX = 255;
+const CAMPAIGN_DESC_MAX = 10000;
+const CAMPAIGN_TARGET_MAX = 100000;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// true only for a real calendar date in YYYY-MM-DD form (rejects 2026-13-40).
+function isValidDateStr(s) {
+  if (typeof s !== "string" || !ISO_DATE_RE.test(s)) return false;
+  const d = new Date(s + "T00:00:00Z");
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+const CAMPAIGN_SELECT = `
+  SELECT c.*, u.email AS created_by_email, p.name AS playlist_name
+  FROM campaigns c
+  LEFT JOIN users u ON u.id = c.created_by
+  LEFT JOIN playlists p ON p.id = c.playlist_id
+`;
+
+function campaignRow(c) {
+  return {
+    id: c.id,
+    workspace_id: c.workspace_id,
+    playlist_id: c.playlist_id ?? null,
+    playlist_name: c.playlist_name ?? null,
+    name: c.name,
+    description: c.description ?? null,
+    start_date: c.start_date,
+    end_date: c.end_date,
+    target_plays_per_day: c.target_plays_per_day ?? null,
+    status: campaignStatus(c),
+    created_by: c.created_by ?? null,
+    created_by_email: c.created_by_email ?? null,
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+  };
+}
+
+// Validate a playlist_id belongs to this workspace. Returns { ok, value } or
+// sends a response and returns { ok:false }. null/"" -> no playlist (ok).
+async function resolveCampaignPlaylist(res, raw, ws) {
+  if (raw === undefined || raw === null || raw === "") return { ok: true, value: null };
+  const id = String(raw);
+  const playlist = await db.prepare("SELECT id, workspace_id FROM playlists WHERE id = ?").get(id);
+  if (!playlist) {
+    res.status(404).json({ error: "Playlist not found" });
+    return { ok: false };
+  }
+  if (playlist.workspace_id !== ws.id) {
+    res.status(400).json({ error: "Playlist is not in this workspace" });
+    return { ok: false };
+  }
+  return { ok: true, value: id };
+}
+
+// Shared numeric validation for target_plays_per_day. Returns { ok, value }.
+function parseTarget(res, raw) {
+  if (raw === undefined || raw === null || raw === "") return { ok: true, value: null };
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > CAMPAIGN_TARGET_MAX) {
+    res.status(400).json({ error: `target_plays_per_day must be an integer between 1 and ${CAMPAIGN_TARGET_MAX}` });
+    return { ok: false };
+  }
+  return { ok: true, value: n };
+}
+
+// POST /:id/campaigns
+router.post(
+  "/:id/campaigns",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForWrite(req, res);
+    if (!ws) return;
+
+    const name = String(req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ error: "name is required" });
+    if (name.length > CAMPAIGN_NAME_MAX) {
+      return res.status(400).json({ error: `name must be ${CAMPAIGN_NAME_MAX} characters or fewer` });
+    }
+
+    let description = req.body?.description;
+    if (description === undefined || description === null || description === "") {
+      description = null;
+    } else {
+      description = String(description);
+      if (description.length > CAMPAIGN_DESC_MAX) {
+        return res.status(400).json({ error: `description must be ${CAMPAIGN_DESC_MAX} characters or fewer` });
+      }
+    }
+
+    const startDate = req.body?.start_date;
+    const endDate = req.body?.end_date;
+    if (!isValidDateStr(startDate) || !isValidDateStr(endDate)) {
+      return res.status(400).json({ error: "start_date and end_date are required, as YYYY-MM-DD" });
+    }
+    if (endDate < startDate) {
+      return res.status(400).json({ error: "end_date must not be before start_date" });
+    }
+
+    const target = parseTarget(res, req.body?.target_plays_per_day);
+    if (!target.ok) return;
+    const playlist = await resolveCampaignPlaylist(res, req.body?.playlist_id, ws);
+    if (!playlist.ok) return;
+
+    const id = crypto.randomUUID();
+    await db
+      .prepare(
+        `INSERT INTO campaigns (id, workspace_id, playlist_id, name, description, start_date, end_date, target_plays_per_day, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, ws.id, playlist.value, name, description, startDate, endDate, target.value, req.user.id);
+
+    logActivity(
+      req.user.id,
+      "campaign_created",
+      `workspace: ${ws.name} (${ws.id}), campaign: ${name}, ${startDate}..${endDate}` +
+        (playlist.value ? `, playlist: ${playlist.value}` : ""),
+      null,
+      getClientIp(req),
+      ws.id,
+    );
+
+    res.status(201).json(campaignRow(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(id)));
+  }),
+);
+
+// GET /:id/campaigns - list. Any workspace member. Optional ?status= filter.
+router.get(
+  "/:id/campaigns",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, false);
+    if (!ws) return;
+    const rows = await db
+      .prepare(`${CAMPAIGN_SELECT} WHERE c.workspace_id = ? ORDER BY c.start_date DESC, c.id DESC`)
+      .all(ws.id);
+    let out = rows.map(campaignRow);
+    if (req.query.status !== undefined) {
+      if (!["draft", "live", "completed"].includes(req.query.status)) {
+        return res.status(400).json({ error: "status filter must be one of: draft, live, completed" });
+      }
+      out = out.filter((c) => c.status === req.query.status);
+    }
+    res.json(out);
+  }),
+);
+
+// GET /:id/campaigns/:campaignId - detail. Any workspace member.
+router.get(
+  "/:id/campaigns/:campaignId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, false);
+    if (!ws) return;
+    const row = await db
+      .prepare(`${CAMPAIGN_SELECT} WHERE c.id = ? AND c.workspace_id = ?`)
+      .get(req.params.campaignId, ws.id);
+    if (!row) return res.status(404).json({ error: "Campaign not found" });
+    res.json(campaignRow(row));
+  }),
+);
+
+// PATCH /:id/campaigns/:campaignId - update name / description / playlist_id /
+// start_date / end_date / target_plays_per_day. workspace_editor+.
+router.patch(
+  "/:id/campaigns/:campaignId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForWrite(req, res);
+    if (!ws) return;
+    const campaign = await db
+      .prepare("SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?")
+      .get(req.params.campaignId, ws.id);
+    if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+
+    const b = req.body || {};
+    const fields = ["name", "description", "playlist_id", "start_date", "end_date", "target_plays_per_day"];
+    if (!fields.some((k) => b[k] !== undefined)) {
+      return res.status(400).json({ error: `Send at least one of: ${fields.join(", ")}` });
+    }
+
+    const updates = [];
+    const values = [];
+    const changed = [];
+
+    if (b.name !== undefined) {
+      const name = String(b.name).trim();
+      if (!name) return res.status(400).json({ error: "name cannot be empty" });
+      if (name.length > CAMPAIGN_NAME_MAX) {
+        return res.status(400).json({ error: `name must be ${CAMPAIGN_NAME_MAX} characters or fewer` });
+      }
+      if (name !== campaign.name) {
+        updates.push("name = ?");
+        values.push(name);
+        changed.push(`name: ${campaign.name} -> ${name}`);
+      }
+    }
+
+    if (b.description !== undefined) {
+      let d = b.description;
+      if (d === null || d === "") d = null;
+      else {
+        d = String(d);
+        if (d.length > CAMPAIGN_DESC_MAX) {
+          return res.status(400).json({ error: `description must be ${CAMPAIGN_DESC_MAX} characters or fewer` });
+        }
+      }
+      updates.push("description = ?");
+      values.push(d);
+      changed.push("description updated");
+    }
+
+    if (b.target_plays_per_day !== undefined) {
+      const t = parseTarget(res, b.target_plays_per_day);
+      if (!t.ok) return;
+      updates.push("target_plays_per_day = ?");
+      values.push(t.value);
+      changed.push(`target/day: ${campaign.target_plays_per_day ?? "none"} -> ${t.value ?? "none"}`);
+    }
+
+    if (b.playlist_id !== undefined) {
+      const p = await resolveCampaignPlaylist(res, b.playlist_id, ws);
+      if (!p.ok) return;
+      updates.push("playlist_id = ?");
+      values.push(p.value);
+      changed.push(`playlist: ${campaign.playlist_id ?? "none"} -> ${p.value ?? "none"}`);
+    }
+
+    // Validate the resulting date window (whichever of the two is being changed
+    // is checked against the other's new-or-existing value).
+    let newStart = campaign.start_date;
+    let newEnd = campaign.end_date;
+    if (b.start_date !== undefined) {
+      if (!isValidDateStr(b.start_date)) return res.status(400).json({ error: "start_date must be YYYY-MM-DD" });
+      newStart = b.start_date;
+    }
+    if (b.end_date !== undefined) {
+      if (!isValidDateStr(b.end_date)) return res.status(400).json({ error: "end_date must be YYYY-MM-DD" });
+      newEnd = b.end_date;
+    }
+    if (newEnd < newStart) {
+      return res.status(400).json({ error: "end_date must not be before start_date" });
+    }
+    if (b.start_date !== undefined && newStart !== campaign.start_date) {
+      updates.push("start_date = ?");
+      values.push(newStart);
+      changed.push(`start: ${campaign.start_date} -> ${newStart}`);
+    }
+    if (b.end_date !== undefined && newEnd !== campaign.end_date) {
+      updates.push("end_date = ?");
+      values.push(newEnd);
+      changed.push(`end: ${campaign.end_date} -> ${newEnd}`);
+    }
+
+    if (!updates.length) {
+      return res.json(campaignRow(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(campaign.id)));
+    }
+
+    updates.push("updated_at = UNIX_TIMESTAMP()");
+    values.push(campaign.id);
+    await db.prepare(`UPDATE campaigns SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+
+    logActivity(
+      req.user.id,
+      "campaign_updated",
+      `workspace: ${ws.name} (${ws.id}), campaign: ${campaign.name}, ${changed.join(", ")}`,
+      null,
+      getClientIp(req),
+      ws.id,
+    );
+
+    res.json(campaignRow(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(campaign.id)));
+  }),
+);
+
+// DELETE /:id/campaigns/:campaignId - removes ONLY the campaign wrapper row.
+// The playlist and its content are deliberately left intact: a campaign is a
+// schedule/tracking layer over content that lives on its own and may be
+// assigned to devices or wrapped by another campaign. Mirrors the region
+// delete, which unassigns workspaces rather than deleting them.
+router.delete(
+  "/:id/campaigns/:campaignId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForWrite(req, res);
+    if (!ws) return;
+    const campaign = await db
+      .prepare("SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?")
+      .get(req.params.campaignId, ws.id);
+    if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+
+    await db.prepare("DELETE FROM campaigns WHERE id = ?").run(campaign.id);
+
+    logActivity(
+      req.user.id,
+      "campaign_deleted",
+      `workspace: ${ws.name} (${ws.id}), campaign: ${campaign.name}` +
+        (campaign.playlist_id ? `, playlist ${campaign.playlist_id} left intact` : ""),
+      null,
+      getClientIp(req),
+      ws.id,
+    );
+
+    res.json({ success: true });
   }),
 );
 
