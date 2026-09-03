@@ -135,6 +135,11 @@ export default function DeviceDetailView() {
           }
           card
         />
+        {/* App / Android version are peers (app updates vs OS move
+            independently), so two tiles rather than one combined — matching the
+            one-metric-per-tile pattern of the tiles above. */}
+        <StatTile label="App version" value={d.app_version || "—"} card />
+        <StatTile label="Android version" value={d.android_version || "—"} card />
       </div>
 
       <div className="card mt16">
