@@ -8,6 +8,7 @@ import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, cCol, periodWindow, periodLabel, isoDateOnly, formatDuration } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
+import { PRIORITY_COLOR, RESPONSE_STATUS, causeHint, rankOpenTickets } from "../lib/tickets";
 import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import AttentionCard from "../components/AttentionCard";
@@ -17,6 +18,7 @@ export default function OverviewView() {
   const { period } = usePeriod();
   const asof = useClock();
   const isAdmin = !!me?.is_platform_admin;
+  const wsId = me?.current_workspace_id || null;
 
   const fetcher = useCallback(
     async ({ signal }) => {
@@ -31,11 +33,16 @@ export default function OverviewView() {
         if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
         return null;
       };
-      const [overview, devices, sla, slaTrend] = await Promise.all([
+      const [overview, devices, sla, slaTrend, tickets] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
         apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(softFail),
         apiFetch(`/api/dashboard/reports/sla-trend?days=${trendDays}`, { signal }).catch(softFail),
+        // Priority-actions teaser — same endpoint Operations uses. Soft-fails to
+        // null so a 403/500 hides the teaser rather than blanking the page.
+        wsId
+          ? apiFetch(`/api/workspaces/${encodeURIComponent(wsId)}/tickets`, { signal }).catch(softFail)
+          : Promise.resolve(null),
       ]);
       let issues = null;
       if (isAdmin) {
@@ -48,12 +55,12 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues, sla, slaTrend };
+      return { overview, devices, issues, sla, slaTrend, tickets };
     },
-    [period, isAdmin],
+    [period, isAdmin, wsId],
   );
 
-  const { data, error } = useApi(fetcher, { pollMs: 60000, deps: [period, isAdmin] });
+  const { data, error } = useApi(fetcher, { pollMs: 60000, deps: [period, isAdmin, wsId] });
 
   useEffect(() => {
     if (!data) return;
@@ -71,12 +78,18 @@ export default function OverviewView() {
   }
   if (!data) return <p className="sub">Loading…</p>;
 
-  const { overview, devices, issues, sla } = data;
+  const { overview, devices, issues, sla, tickets } = data;
   const total = overview.total_devices,
     online = overview.online,
     offline = overview.offline;
   const completion = overview.completion_pct;
   const attention = devices.filter((d) => isAtRisk(d) || isWeakSignal(d));
+
+  // --- Overview Stage B: "Priority actions" teaser — top 3 of the same ranked
+  // open-ticket queue the Operations page shows. tickets === null (fetch soft-
+  // failed or no workspace) hides the section entirely.
+  const openQueue = tickets == null ? null : rankOpenTickets(tickets);
+  const topActions = openQueue ? openQueue.slice(0, 3) : [];
 
   // --- Ref 51: SLA compliance (merged into this page, not a separate view) ---
   const slaTarget = sla?.target?.uptime_target_pct ?? null;
@@ -310,6 +323,51 @@ export default function OverviewView() {
           </div>
         )}
       </div>
+
+      {openQueue != null ? (
+        <div className="sec">
+          <div className="ch">
+            <h2>Priority actions</h2>
+            {openQueue.length ? <span className="hint">{n0(openQueue.length)} open · top 3</span> : null}
+          </div>
+          {topActions.length ? (
+            <div className="card">
+              <div className="paq">
+                {topActions.map((t) => {
+                  const rs = RESPONSE_STATUS[t.response_status];
+                  const cause = causeHint(t);
+                  return (
+                    <div className="paq-row" key={t.id}>
+                      <div style={{ minWidth: 0 }}>
+                        <span className="paq-title">{t.title}</span>
+                        {cause ? <span className="paq-cause">Likely cause: {cause}</span> : null}
+                      </div>
+                      <div className="paq-meta">
+                        <span style={{ color: PRIORITY_COLOR[t.priority], textTransform: "capitalize" }}>{t.priority}</span>
+                        {rs ? <span style={{ color: rs.color }}>{rs.label}</span> : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt16">
+                <Link className="btn" to="/operations">
+                  View all in Operations
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <div className="card">
+              <p className="empty" style={{ padding: 0 }}>
+                All clear — no open operational tickets right now.{" "}
+                <Link to="/operations" style={{ color: "var(--accent)" }}>
+                  Operations
+                </Link>
+              </p>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       {sla && liveBreaches.length ? (
         <div className="sec">

@@ -5,6 +5,7 @@ import { useClock } from "../hooks/useClock";
 import { useToast } from "../hooks/useToast";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, formatDuration } from "../lib/format";
+import { PRIORITY_COLOR, RESPONSE_STATUS, CAUSE_LABELS, rankOpenTickets } from "../lib/tickets";
 import StatTile from "../components/StatTile";
 
 // Phase 4 Stage D — the Operations page. Pulls the ticket list (Stage A) and the
@@ -23,23 +24,10 @@ const OWNER_LABELS = {
 const OWNER_OPTIONS = ["unassigned", "customer_it", "store_staff", "platform", "hardware"];
 const STATUS_OPTIONS = ["open", "in_progress", "resolved", "closed"];
 const STATUS_LABELS = { open: "Open", in_progress: "In progress", resolved: "Resolved", closed: "Closed" };
-const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
-const PRIORITY_COLOR = { high: "var(--bad)", medium: "var(--warn)", low: "var(--ink3)" };
-const RESPONSE = {
-  breached: { label: "Breached", color: "var(--bad)" },
-  due_today: { label: "Due today", color: "var(--warn)" },
-  within_sla: { label: "Within SLA", color: "var(--ok)" },
-};
 const ownerLabel = (c) => OWNER_LABELS[c] || c;
 
-// Step 5 Stage B: human-readable outage root-cause hint for auto-created
-// tickets. 'unknown' (and null) deliberately map to nothing - showing "Unknown"
-// as if it were a finding is worse than showing nothing.
-const CAUSE_LABELS = {
-  weak_wifi: "Weak Wi-Fi",
-  low_storage: "Low storage",
-  correlated_outage: "Multiple screens affected",
-};
+// Ticket priority/response/cause vocabulary + the priority-then-age sort live in
+// lib/tickets.js, shared with the Overview "Priority actions" teaser.
 
 async function patchTicket(wsId, ticketId, body) {
   const resp = await fetch(
@@ -130,13 +118,7 @@ export default function OperationsView() {
   const summary = data.summary || { counts: { breached: 0, due_today: 0, within_sla: 0 }, targets: {}, total_open: 0 };
 
   // Ranked queue: open + in_progress, priority first, then oldest first.
-  const queue = allTickets
-    .filter((t) => t.status === "open" || t.status === "in_progress")
-    .sort(
-      (a, b) =>
-        (PRIORITY_ORDER[a.priority] ?? 9) - (PRIORITY_ORDER[b.priority] ?? 9) ||
-        a.created_at - b.created_at,
-    );
+  const queue = rankOpenTickets(allTickets);
 
   // Per-owner open count.
   const ownerCounts = {};
@@ -264,7 +246,7 @@ export default function OperationsView() {
               </thead>
               <tbody>
                 {queue.map((t) => {
-                  const rs = RESPONSE[t.response_status];
+                  const rs = RESPONSE_STATUS[t.response_status];
                   const isEditing = editing === t.id;
                   return (
                     <Fragment key={t.id}>
