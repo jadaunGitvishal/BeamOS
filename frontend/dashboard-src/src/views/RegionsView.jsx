@@ -5,17 +5,14 @@ import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, cCol, periodWindow, periodLabel, isoDateOnly } from "../lib/format";
+import { REGION_STATUS as STATUS } from "../lib/regions";
 
 // Phase 3 Stage C — per-region SLA rollup, read off
 // GET /api/organizations/:orgId/regions/sla-overview (Stage B). The endpoint
 // already scopes to exactly the workspaces the caller can see and returns an
 // "Unassigned" bucket for region-less workspaces, so this view just renders it.
-
-const STATUS = {
-  compliant: { label: "Compliant", color: "var(--ok)" },
-  breach: { label: "Breach", color: "var(--bad)" },
-  unknown: { label: "No data", color: "var(--ink3)" },
-};
+// Status label/colour vocabulary lives in lib/regions.js, shared with the
+// Overview "Regions" teaser.
 
 export default function RegionsView() {
   const { me } = useSession();

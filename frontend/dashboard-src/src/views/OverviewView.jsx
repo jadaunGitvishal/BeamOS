@@ -9,6 +9,7 @@ import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, cCol, periodWindow, periodLabel, isoDateOnly, formatDuration } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import { PRIORITY_COLOR, RESPONSE_STATUS, causeHint, rankOpenTickets } from "../lib/tickets";
+import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
 import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import AttentionCard from "../components/AttentionCard";
@@ -19,6 +20,7 @@ export default function OverviewView() {
   const asof = useClock();
   const isAdmin = !!me?.is_platform_admin;
   const wsId = me?.current_workspace_id || null;
+  const orgId = me?.current_organization?.id || null;
 
   const fetcher = useCallback(
     async ({ signal }) => {
@@ -33,7 +35,7 @@ export default function OverviewView() {
         if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
         return null;
       };
-      const [overview, devices, sla, slaTrend, tickets] = await Promise.all([
+      const [overview, devices, sla, slaTrend, tickets, regions] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
         apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(softFail),
@@ -42,6 +44,14 @@ export default function OverviewView() {
         // null so a 403/500 hides the teaser rather than blanking the page.
         wsId
           ? apiFetch(`/api/workspaces/${encodeURIComponent(wsId)}/tickets`, { signal }).catch(softFail)
+          : Promise.resolve(null),
+        // Regions teaser — same rollup the Regions page uses. Soft-fails to null
+        // (also null when there's no org context) so the section just hides.
+        orgId
+          ? apiFetch(
+              `/api/organizations/${encodeURIComponent(orgId)}/regions/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`,
+              { signal },
+            ).catch(softFail)
           : Promise.resolve(null),
       ]);
       let issues = null;
@@ -55,12 +65,12 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues, sla, slaTrend, tickets };
+      return { overview, devices, issues, sla, slaTrend, tickets, regions };
     },
-    [period, isAdmin, wsId],
+    [period, isAdmin, wsId, orgId],
   );
 
-  const { data, error } = useApi(fetcher, { pollMs: 60000, deps: [period, isAdmin, wsId] });
+  const { data, error } = useApi(fetcher, { pollMs: 60000, deps: [period, isAdmin, wsId, orgId] });
 
   useEffect(() => {
     if (!data) return;
@@ -78,7 +88,7 @@ export default function OverviewView() {
   }
   if (!data) return <p className="sub">Loading…</p>;
 
-  const { overview, devices, issues, sla, tickets } = data;
+  const { overview, devices, issues, sla, tickets, regions } = data;
   const total = overview.total_devices,
     online = overview.online,
     offline = overview.offline;
@@ -90,6 +100,19 @@ export default function OverviewView() {
   // failed or no workspace) hides the section entirely.
   const openQueue = tickets == null ? null : rankOpenTickets(tickets);
   const topActions = openQueue ? openQueue.slice(0, 3) : [];
+
+  // --- Overview Stage C: "Regions" teaser — the per-region SLA rollup the
+  // Regions page shows, condensed to name / status / avg uptime, problems
+  // first. Regions are an opt-in org feature: the section shows ONLY once at
+  // least one named region exists. A null rollup (no org / soft-fail) or an
+  // org that has defined no regions => hide entirely, no "set one up" nag
+  // (unlike Stage B's "All clear", "no regions" is a config state, not a live
+  // status worth a permanent placeholder).
+  const regionTarget = regions?.target?.uptime_target_pct ?? null;
+  const regionRows =
+    regions && Array.isArray(regions.regions) && regions.regions.some((r) => r.region_id !== null)
+      ? rankRegionsByAttention(regions.regions)
+      : null;
 
   // --- Ref 51: SLA compliance (merged into this page, not a separate view) ---
   const slaTarget = sla?.target?.uptime_target_pct ?? null;
@@ -366,6 +389,50 @@ export default function OverviewView() {
               </p>
             </div>
           )}
+        </div>
+      ) : null}
+
+      {regionRows ? (
+        <div className="sec">
+          <div className="ch">
+            <h2>Regions</h2>
+            <span className="hint">
+              SLA by region{regionTarget !== null ? ` · target ${regionTarget}%` : ""}
+            </span>
+          </div>
+          <div className="card">
+            <div className="paq">
+              {regionRows.map((r) => {
+                const s = REGION_STATUS[r.sla_status] || REGION_STATUS.unknown;
+                return (
+                  <div className="paq-row" key={r.region_id || "__unassigned__"}>
+                    <div style={{ minWidth: 0 }}>
+                      <span
+                        className="paq-title"
+                        style={r.region_id === null ? { color: "var(--ink3)" } : undefined}
+                      >
+                        {r.region_name}
+                      </span>
+                    </div>
+                    <div className="paq-meta">
+                      {/* status carries the colour signal; the uptime number
+                          stays neutral so a "Breach" region whose absolute
+                          uptime is still >90 doesn't read red-then-green. */}
+                      <span style={{ color: s.color }}>{s.label}</span>
+                      <span style={{ color: r.avg_uptime_pct !== null ? "var(--ink2)" : "var(--ink3)" }}>
+                        {r.avg_uptime_pct !== null ? `${r.avg_uptime_pct}%` : "—"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt16">
+              <Link className="btn" to="/regions">
+                View all in Regions
+              </Link>
+            </div>
+          </div>
         </div>
       ) : null}
 
