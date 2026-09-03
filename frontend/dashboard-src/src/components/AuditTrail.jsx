@@ -38,17 +38,13 @@ export default function AuditTrail({ trail }) {
             </span>
           ))}
       </div>
-      <div className="log">
+      <div className="log log-scroll">
         {trail.map((e, i) => {
           const s = TYPE_STYLE[e.type] || TYPE_STYLE.status;
           return (
-            <div key={i} style={{ alignItems: "flex-start" }}>
-              <time style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span
-                  className="dot"
-                  style={{ background: s.color, marginTop: 1 }}
-                  title={s.label}
-                ></span>
+            <div key={i}>
+              <time>
+                <span className="dot" style={{ background: s.color }} title={s.label}></span>
                 {new Date(e.timestamp * 1000).toLocaleString()}
               </time>
               <p>{e.message}</p>
