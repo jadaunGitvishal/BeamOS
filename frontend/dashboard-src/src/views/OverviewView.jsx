@@ -10,6 +10,7 @@ import { n0, cCol, periodWindow, periodLabel, isoDateOnly, formatDuration } from
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import { PRIORITY_COLOR, RESPONSE_STATUS, causeHint, rankOpenTickets } from "../lib/tickets";
 import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
+import { deliveryColor } from "../lib/campaigns";
 import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import AttentionCard from "../components/AttentionCard";
@@ -35,7 +36,7 @@ export default function OverviewView() {
         if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
         return null;
       };
-      const [overview, devices, sla, slaTrend, tickets, regions] = await Promise.all([
+      const [overview, devices, sla, slaTrend, tickets, regions, campaigns] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
         apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(softFail),
@@ -53,6 +54,11 @@ export default function OverviewView() {
               { signal },
             ).catch(softFail)
           : Promise.resolve(null),
+        // Campaigns teaser — same endpoint the Campaigns page uses. Soft-fails
+        // to null so the section just hides on a 403/500 or no workspace.
+        wsId
+          ? apiFetch(`/api/workspaces/${encodeURIComponent(wsId)}/campaigns`, { signal }).catch(softFail)
+          : Promise.resolve(null),
       ]);
       let issues = null;
       if (isAdmin) {
@@ -65,7 +71,7 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues, sla, slaTrend, tickets, regions };
+      return { overview, devices, issues, sla, slaTrend, tickets, regions, campaigns };
     },
     [period, isAdmin, wsId, orgId],
   );
@@ -88,7 +94,7 @@ export default function OverviewView() {
   }
   if (!data) return <p className="sub">Loading…</p>;
 
-  const { overview, devices, issues, sla, tickets, regions } = data;
+  const { overview, devices, issues, sla, tickets, regions, campaigns } = data;
   const total = overview.total_devices,
     online = overview.online,
     offline = overview.offline;
@@ -113,6 +119,18 @@ export default function OverviewView() {
     regions && Array.isArray(regions.regions) && regions.regions.some((r) => r.region_id !== null)
       ? rankRegionsByAttention(regions.regions)
       : null;
+
+  // --- Overview Stage D: "Campaigns" teaser — the live campaigns the Campaigns
+  // page tracks, condensed to name / delivery % / plays. Empty-state blends the
+  // Stage B & C reasoning: the section shows only if this workspace uses
+  // campaigns at all (>=1 of any status — no campaigns => usage gap, hide, cf.
+  // Stage C); but if some exist and none are live, keep the section with a
+  // "nothing running" note, because for a workspace that runs campaigns
+  // "nothing scheduled right now" is a real status worth confirming (cf. Stage
+  // B's "All clear"). null (soft-fail / no workspace) => hide.
+  const allCampaigns = Array.isArray(campaigns) ? campaigns : null;
+  const liveCampaigns = allCampaigns ? allCampaigns.filter((c) => c.status === "live") : [];
+  const showCampaigns = allCampaigns != null && allCampaigns.length > 0;
 
   // --- Ref 51: SLA compliance (merged into this page, not a separate view) ---
   const slaTarget = sla?.target?.uptime_target_pct ?? null;
@@ -433,6 +451,53 @@ export default function OverviewView() {
               </Link>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {showCampaigns ? (
+        <div className="sec">
+          <div className="ch">
+            <h2>Campaigns</h2>
+            {liveCampaigns.length ? <span className="hint">{n0(liveCampaigns.length)} live</span> : null}
+          </div>
+          {liveCampaigns.length ? (
+            <div className="card">
+              <div className="paq">
+                {liveCampaigns.map((c) => (
+                  <div className="paq-row" key={c.id}>
+                    <div style={{ minWidth: 0 }}>
+                      <span className="paq-title">{c.name}</span>
+                      {c.playlist_name ? <span className="paq-cause">{c.playlist_name}</span> : null}
+                    </div>
+                    <div className="paq-meta">
+                      <span style={{ color: deliveryColor(c.delivery_pct) }}>
+                        {c.delivery_pct == null ? "—" : `${c.delivery_pct}%`}
+                      </span>
+                      <span style={{ color: "var(--ink3)" }}>
+                        {c.actual_plays == null
+                          ? "n/a"
+                          : `${n0(c.actual_plays)} / ${c.expected_plays == null ? "—" : n0(c.expected_plays)}`}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt16">
+                <Link className="btn" to="/campaigns">
+                  View all in Campaigns
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <div className="card">
+              <p className="empty" style={{ padding: 0 }}>
+                No campaigns running right now.{" "}
+                <Link to="/campaigns" style={{ color: "var(--accent)" }}>
+                  Campaigns
+                </Link>
+              </p>
+            </div>
+          )}
         </div>
       ) : null}
 

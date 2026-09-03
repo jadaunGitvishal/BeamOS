@@ -5,26 +5,14 @@ import { useClock } from "../hooks/useClock";
 import { useToast } from "../hooks/useToast";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0 } from "../lib/format";
+import { CAMPAIGN_STATUS as STATUS, deliveryColor } from "../lib/campaigns";
 
 // Phase 5 Stage C — the Campaigns page. Lists a workspace's campaigns (Stage A)
 // with their computed status and delivery numbers (Stage B), and lets a
 // workspace_editor+ create / edit / delete them. A viewer sees the same data
 // with no write controls rendered at all.
-
-const STATUS = {
-  draft: { label: "Draft", color: "var(--ink3)" },
-  live: { label: "Live", color: "var(--ok)" },
-  completed: { label: "Completed", color: "var(--ink2)" },
-};
-
-// grey when there's no target to measure against; green on/over pace; red when
-// significantly behind. (delivery_days_elapsed counts the current partial day
-// as whole, so an on-pace campaign reads a little under 100 mid-day - hence the
-// green cutoff at 90, not 100.)
-function deliveryColor(pct) {
-  if (pct == null) return "var(--ink3)";
-  return pct >= 90 ? "var(--ok)" : "var(--bad)";
-}
+// Status labels + the delivery-pace colour live in lib/campaigns.js, shared
+// with the Overview "Campaigns" teaser.
 
 const EMPTY_FORM = { name: "", description: "", playlist_id: "", start_date: "", end_date: "", target_plays_per_day: "" };
 
