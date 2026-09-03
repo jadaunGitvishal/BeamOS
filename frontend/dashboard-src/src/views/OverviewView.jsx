@@ -9,6 +9,7 @@ import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, cCol, periodWindow, periodLabel, isoDateOnly, formatDuration } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import StatTile from "../components/StatTile";
+import ComplianceGauge from "../components/ComplianceGauge";
 import AttentionCard from "../components/AttentionCard";
 
 export default function OverviewView() {
@@ -81,9 +82,6 @@ export default function OverviewView() {
   const slaTarget = sla?.target?.uptime_target_pct ?? null;
   const slaThresholdH = sla?.target?.escalation_threshold_hours ?? null;
   const slaDevices = sla?.devices ?? [];
-  const slaSummary = sla?.summary ?? null;
-  // Workspace verdict: Breach if any device is below target, else Compliant.
-  const slaVerdict = slaSummary && slaSummary.devices_total > 0 ? (slaSummary.devices_breach > 0 ? "Breach" : "Compliant") : null;
   // Fleet MTTR = total completed-outage time / total completed outages (so a
   // device with more outages weighs proportionally, not one-device-one-vote).
   const mttrDevices = slaDevices.filter((d) => d.completed_outages > 0);
@@ -218,22 +216,7 @@ export default function OverviewView() {
             </p>
 
             <div className="grid g4">
-              <StatTile
-                label="Compliance status"
-                value={
-                  slaVerdict ? (
-                    <span style={{ color: slaVerdict === "Compliant" ? "var(--ok)" : "var(--bad)" }}>{slaVerdict}</span>
-                  ) : (
-                    "—"
-                  )
-                }
-                sub={
-                  slaSummary
-                    ? `${n0(slaSummary.devices_compliant)} of ${n0(slaSummary.devices_total)} devices meet the target`
-                    : "no data yet"
-                }
-                card
-              />
+              <ComplianceGauge label="Fleet uptime vs target" percentage={fleetUptime} target={slaTarget} />
               <StatTile
                 label="Mean time to recovery"
                 value={fleetMttr !== null ? formatDuration(fleetMttr) : "—"}

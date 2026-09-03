@@ -183,6 +183,21 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .stat .k{font-size:11.5px;color:var(--ink2);margin:0 0 3px}
 .stat .v{font-size:22px;font-weight:600;letter-spacing:-.02em;margin:0;line-height:1.15}
 .stat .s{font-size:11px;color:var(--ink3);margin:2px 0 0;font-family:var(--f-mono)}
+
+/* ComplianceGauge — ring + centred % beside a label/caption */
+.gauge{display:flex;flex-direction:row;align-items:center;gap:14px}
+.gauge-ring{position:relative;flex:none}
+.gauge-ring svg{display:block}
+.gauge-val{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;letter-spacing:-.02em;line-height:1}
+.gauge-val em{font-size:9px;font-weight:500;font-style:normal;margin-left:1px;align-self:flex-start;margin-top:3px}
+.gauge-body{min-width:0}
+.gauge-body .k{margin:0 0 4px}
+.gauge-body .s{margin:0;font-size:11px;color:var(--ink3);font-family:var(--f-mono)}
+/* narrow columns can't fit the ring + text side by side - stack them */
+@media (max-width:560px){
+  .gauge{flex-direction:column;align-items:flex-start;gap:9px}
+  .gauge-body{align-self:stretch}
+}
 .v small{font-size:12px;font-weight:400;color:var(--ink2);letter-spacing:0}
 .tag{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:2.5px 8px;border-radius:20px;white-space:nowrap;font-weight:500}
 .tag::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
