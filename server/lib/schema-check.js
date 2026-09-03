@@ -49,6 +49,10 @@ const REQUIRED_COLUMNS = [
   // it can be added regardless of existing rows.
   ['tickets', 'auto_source', "ALTER TABLE tickets ADD COLUMN auto_source VARCHAR(50) NULL"],
   ['tickets', 'source_outage_start', "ALTER TABLE tickets ADD COLUMN source_outage_start BIGINT NULL, ADD UNIQUE KEY uq_tickets_source_outage (device_id, source_outage_start)"],
+  // Step 5 Stage A: per-outage root-cause hint. The recorder
+  // (services/outage-history.js) writes it on every new row; NULL means the row
+  // predates this column. Nullable, no default.
+  ['outage_history', 'likely_cause', "ALTER TABLE outage_history ADD COLUMN likely_cause VARCHAR(50) NULL"],
 ];
 
 function defaultOnMissing(missing) {

@@ -977,6 +977,18 @@ CREATE INDEX idx_usage_daily_day ON device_usage_daily(day);
 -- UNIQUE (device_id, started_at) is the idempotency key: a re-run of the recorder
 -- over an already-processed window is a safe no-op. Ongoing outages are NOT stored
 -- here (no ended_at yet) - the endpoint reads those live from device_status_log.
+-- Step 5 Stage A: likely_cause is a best-effort root-cause hint, determined by
+-- services/outage-history.js at the moment it records the outage - the only time
+-- the device_telemetry rows from just before the outage are still guaranteed to
+-- exist (they prune at ~16-24h). Plain VARCHAR, documented set (not an ENUM, so
+-- a new category needs no migration - same as device_events.event_type):
+--   'correlated_outage' - 2+ devices in the workspace dropped together (shared
+--                         network/power/infra failure, not a device fault)
+--   'weak_wifi'          - last telemetry before the outage was <= weak-Wi-Fi threshold
+--   'low_storage'        - ...was <= low-storage threshold
+--   'unknown'            - no signal (power loss / app crash / hardware - not detectable)
+-- NULL only on rows recorded before this column existed. See lib/outage-cause.js
+-- for the priority order when several signals fire.
 CREATE TABLE IF NOT EXISTS outage_history (
     id                BIGINT AUTO_INCREMENT PRIMARY KEY,
     device_id         VARCHAR(64) NOT NULL,
@@ -984,6 +996,7 @@ CREATE TABLE IF NOT EXISTS outage_history (
     started_at        BIGINT NOT NULL,
     ended_at          BIGINT NOT NULL,
     duration_seconds  BIGINT NOT NULL,
+    likely_cause      VARCHAR(50),
     recorded_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     UNIQUE KEY uq_outage_history_device_started (device_id, started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

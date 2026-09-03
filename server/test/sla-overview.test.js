@@ -57,7 +57,12 @@ db.exec(`
   CREATE TABLE outage_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
     started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, duration_seconds INTEGER NOT NULL,
-    recorded_at INTEGER NOT NULL DEFAULT 0, UNIQUE (device_id, started_at)
+    likely_cause TEXT, recorded_at INTEGER NOT NULL DEFAULT 0, UNIQUE (device_id, started_at)
+  );
+  -- Step 5 Stage A: runOutageHistory now classifies likely_cause off telemetry.
+  CREATE TABLE device_telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+    wifi_rssi INTEGER, storage_free_mb INTEGER, reported_at INTEGER NOT NULL
   );
 `);
 

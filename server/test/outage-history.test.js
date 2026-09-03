@@ -52,7 +52,13 @@ db.exec(`
   CREATE TABLE outage_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
     started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, duration_seconds INTEGER NOT NULL,
-    recorded_at INTEGER NOT NULL DEFAULT 0, UNIQUE (device_id, started_at)
+    likely_cause TEXT, recorded_at INTEGER NOT NULL DEFAULT 0, UNIQUE (device_id, started_at)
+  );
+  -- Step 5 Stage A: the recorder now classifies each outage's likely cause off
+  -- the pre-outage telemetry, so this table must exist for that path.
+  CREATE TABLE device_telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+    wifi_rssi INTEGER, storage_free_mb INTEGER, reported_at INTEGER NOT NULL
   );
 `);
 
@@ -232,6 +238,66 @@ test('sla-overview MTTR from outage_history never crosses workspaces', async () 
   const bodyA = await (await fetch(`${base}/api/dashboard/reports/sla-overview?start=${iso(now - 60 * D)}`,
     { headers: { Authorization: `Bearer ${tokA}` } })).json();
   assert.ok(!bodyA.devices.some((x) => x.device_id === 'dev-b'));
+});
+
+// --- 6. Step 5 Stage A: likely_cause is classified end-to-end ------------
+test('runOutageHistory classifies each new outage: weak_wifi / low_storage / correlated_outage / unknown', async () => {
+  const tele = (device, rssi, storeMb, ago) =>
+    db.prepare('INSERT INTO device_telemetry (device_id, wifi_rssi, storage_free_mb, reported_at) VALUES (?,?,?,?)')
+      .run(device, rssi, storeMb, now - ago);
+
+  // (times chosen to sit clear of the fixture's -2h..-12h outage cluster,
+  // including dev2/dev3's ongoing outages, so each scenario is isolated.)
+
+  // weak Wi-Fi right before a 1h outage
+  dev('dev-wifi', 'ws-a', 'Weak WiFi', 30);
+  log('dev-wifi', 'offline', 14 * H); log('dev-wifi', 'online', 13 * H);
+  tele('dev-wifi', -82, 9000, 14 * H + 15);
+
+  // low storage right before a 30m outage (Wi-Fi fine)
+  dev('dev-store', 'ws-a', 'Low Storage', 31);
+  log('dev-store', 'offline', 16 * H); log('dev-store', 'online', Math.round(15.5 * H));
+  tele('dev-store', -58, 300, 16 * H + 12);
+
+  // two devices in ws-a dropping ~2 min apart -> correlated for BOTH
+  dev('dev-corr1', 'ws-a', 'Corr 1', 32);
+  dev('dev-corr2', 'ws-a', 'Corr 2', 33);
+  log('dev-corr1', 'offline', 18 * H); log('dev-corr1', 'online', Math.round(17.5 * H));
+  log('dev-corr2', 'offline', 18 * H - 120); log('dev-corr2', 'online', 17 * H);
+
+  // healthy telemetry, no correlated peers -> unknown
+  dev('dev-clean', 'ws-a', 'Clean', 34);
+  log('dev-clean', 'offline', 20 * H); log('dev-clean', 'online', Math.round(19.5 * H));
+  tele('dev-clean', -55, 9000, 20 * H + 10);
+
+  // multi-signal: weak Wi-Fi AND a correlated peer -> correlated wins
+  dev('dev-multi', 'ws-a', 'Multi', 35);
+  dev('dev-multi-peer', 'ws-a', 'Multi Peer', 36);
+  log('dev-multi', 'offline', 22 * H); log('dev-multi', 'online', Math.round(21.5 * H));
+  log('dev-multi-peer', 'offline', 22 * H - 60); log('dev-multi-peer', 'online', 21 * H);
+  tele('dev-multi', -85, 9000, 22 * H + 10);
+
+  const r = await runOutageHistory(db, { now: now * 1000 });
+  assert.ok(r.inserted >= 6);
+  assert.ok(r.causeTally && typeof r.causeTally === 'object');
+
+  const cause = (d) => db.prepare('SELECT likely_cause FROM outage_history WHERE device_id = ?').get(d).likely_cause;
+  assert.equal(cause('dev-wifi'), 'weak_wifi');
+  assert.equal(cause('dev-store'), 'low_storage');
+  assert.equal(cause('dev-corr1'), 'correlated_outage');
+  assert.equal(cause('dev-corr2'), 'correlated_outage');
+  assert.equal(cause('dev-clean'), 'unknown');
+  assert.equal(cause('dev-multi'), 'correlated_outage', 'correlated beats the weak-wifi reading');
+  assert.equal(cause('dev-multi-peer'), 'correlated_outage');
+
+  // the fixture's pre-Step-5 outages (no telemetry, no peers) -> unknown
+  assert.equal(cause('dev1'), 'unknown');
+
+  // a second run neither re-classifies nor duplicates
+  const before = db.prepare("SELECT device_id, likely_cause FROM outage_history WHERE device_id LIKE 'dev-%'").all();
+  const r2 = await runOutageHistory(db, { now: now * 1000 });
+  assert.equal(r2.inserted, 0);
+  assert.deepEqual(db.prepare("SELECT device_id, likely_cause FROM outage_history WHERE device_id LIKE 'dev-%'").all(), before);
 });
 
 function iso(sec) { return new Date(sec * 1000).toISOString().slice(0, 10); }
