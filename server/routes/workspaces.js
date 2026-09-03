@@ -10,7 +10,8 @@ const {
   ticketSlaTargets,
   summariseTicketSla,
 } = require("../lib/ticket-sla");
-const { campaignStatus } = require("../lib/campaign-status");
+const { campaignStatus, todayStr } = require("../lib/campaign-status");
+const { computeCampaignDelivery } = require("../lib/campaign-delivery");
 const { logActivity, getClientIp } = require("../services/activity");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
@@ -906,7 +907,7 @@ router.patch(
   }),
 );
 
-// ==================== Campaigns (Phase 5 Stage A) ====================
+// ==================== Campaigns (Phase 5 Stage A + B) ====================
 //
 // A campaign is a scheduling / tracking WRAPPER around an existing playlist
 // (playlist_id, nullable). It never owns or duplicates content. Read = any
@@ -915,6 +916,11 @@ router.patch(
 // (lib/campaign-status.js), not stored. DELETE removes only the wrapper row -
 // the playlist and its content are left untouched (they may be assigned to
 // devices or reused elsewhere). Every mutation writes activity_log.
+//
+// Stage B: campaignPayload() also attaches computed delivery fields
+// (actual_plays / expected_plays / delivery_pct / delivery_days_elapsed) off
+// play_logs vs. the playlist's published_snapshot - see lib/campaign-delivery.js.
+// Also compute-on-read, never stored.
 
 const CAMPAIGN_NAME_MAX = 255;
 const CAMPAIGN_DESC_MAX = 10000;
@@ -929,7 +935,7 @@ function isValidDateStr(s) {
 }
 
 const CAMPAIGN_SELECT = `
-  SELECT c.*, u.email AS created_by_email, p.name AS playlist_name
+  SELECT c.*, u.email AS created_by_email, p.name AS playlist_name, p.published_snapshot AS playlist_snapshot
   FROM campaigns c
   LEFT JOIN users u ON u.id = c.created_by
   LEFT JOIN playlists p ON p.id = c.playlist_id
@@ -952,6 +958,14 @@ function campaignRow(c) {
     created_at: c.created_at,
     updated_at: c.updated_at,
   };
+}
+
+// campaignRow + the Stage B computed delivery fields. Needs a row that came
+// through CAMPAIGN_SELECT (for playlist_snapshot). `today` is threaded so a
+// whole list response uses one consistent day.
+async function campaignPayload(c, today = todayStr()) {
+  const delivery = await computeCampaignDelivery(db, c, c.playlist_snapshot, today);
+  return { ...campaignRow(c), ...delivery };
 }
 
 // Validate a playlist_id belongs to this workspace. Returns { ok, value } or
@@ -1037,7 +1051,7 @@ router.post(
       ws.id,
     );
 
-    res.status(201).json(campaignRow(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(id)));
+    res.status(201).json(await campaignPayload(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(id)));
   }),
 );
 
@@ -1047,16 +1061,15 @@ router.get(
   asyncHandler(async (req, res) => {
     const ws = await loadWorkspace(req, res, false);
     if (!ws) return;
+    if (req.query.status !== undefined && !["draft", "live", "completed"].includes(req.query.status)) {
+      return res.status(400).json({ error: "status filter must be one of: draft, live, completed" });
+    }
     const rows = await db
       .prepare(`${CAMPAIGN_SELECT} WHERE c.workspace_id = ? ORDER BY c.start_date DESC, c.id DESC`)
       .all(ws.id);
-    let out = rows.map(campaignRow);
-    if (req.query.status !== undefined) {
-      if (!["draft", "live", "completed"].includes(req.query.status)) {
-        return res.status(400).json({ error: "status filter must be one of: draft, live, completed" });
-      }
-      out = out.filter((c) => c.status === req.query.status);
-    }
+    const today = todayStr();
+    let out = await Promise.all(rows.map((r) => campaignPayload(r, today)));
+    if (req.query.status !== undefined) out = out.filter((c) => c.status === req.query.status);
     res.json(out);
   }),
 );
@@ -1071,7 +1084,7 @@ router.get(
       .prepare(`${CAMPAIGN_SELECT} WHERE c.id = ? AND c.workspace_id = ?`)
       .get(req.params.campaignId, ws.id);
     if (!row) return res.status(404).json({ error: "Campaign not found" });
-    res.json(campaignRow(row));
+    res.json(await campaignPayload(row));
   }),
 );
 
@@ -1167,7 +1180,7 @@ router.patch(
     }
 
     if (!updates.length) {
-      return res.json(campaignRow(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(campaign.id)));
+      return res.json(await campaignPayload(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(campaign.id)));
     }
 
     updates.push("updated_at = UNIX_TIMESTAMP()");
@@ -1183,7 +1196,7 @@ router.patch(
       ws.id,
     );
 
-    res.json(campaignRow(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(campaign.id)));
+    res.json(await campaignPayload(await db.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ?`).get(campaign.id)));
   }),
 );
 

@@ -35,7 +35,12 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
   );
   CREATE TABLE playlists (
-    id TEXT PRIMARY KEY, user_id TEXT, workspace_id TEXT, name TEXT NOT NULL
+    id TEXT PRIMARY KEY, user_id TEXT, workspace_id TEXT, name TEXT NOT NULL,
+    published_snapshot TEXT
+  );
+  CREATE TABLE devices (id TEXT PRIMARY KEY, workspace_id TEXT);
+  CREATE TABLE play_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, content_id TEXT, started_at INTEGER NOT NULL
   );
   CREATE TABLE campaigns (
     id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, playlist_id TEXT,
@@ -77,9 +82,18 @@ db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('w
 db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-a','u-viewer','workspace_viewer')").run();
 db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-b','u-other','workspace_admin')").run();
 
-db.prepare("INSERT INTO playlists (id,workspace_id,name) VALUES ('pl-a','ws-a','Summer Reel')").run();
+const PL_A_SNAP = JSON.stringify([
+  { content_id: 'con-1', widget_id: null, sort_order: 0, filename: '1.mp4' },
+  { content_id: 'con-2', widget_id: null, sort_order: 1, filename: '2.mp4' },
+  { content_id: null, widget_id: 'wid-x', sort_order: 2 },
+]);
+db.prepare("INSERT INTO playlists (id,workspace_id,name,published_snapshot) VALUES ('pl-a','ws-a','Summer Reel',?)").run(PL_A_SNAP);
+db.prepare("INSERT INTO playlists (id,workspace_id,name) VALUES ('pl-a-draft','ws-a','Unpublished Reel')").run();
 db.prepare("INSERT INTO playlists (id,workspace_id,name) VALUES ('pl-b','ws-b','Other WS Playlist')").run();
 db.prepare("INSERT INTO playlists (id,workspace_id,name) VALUES ('pl-nows',NULL,'Legacy no-workspace')").run();
+
+db.prepare("INSERT INTO devices (id,workspace_id) VALUES ('dev-a','ws-a')").run();
+db.prepare("INSERT INTO devices (id,workspace_id) VALUES ('dev-b','ws-b')").run(); // another workspace, same shared content
 
 const tok = (id) => generateToken(db.prepare('SELECT id,email,role FROM users WHERE id = ?').get(id), null);
 const T = {
@@ -251,4 +265,88 @@ test('GET detail + 404 for other workspace', async () => {
   assert.equal(got.status, 200);
   assert.equal((await got.json()).name, 'detail me');
   assert.equal((await call('GET', `${camps('ws-b')}/${c.id}`, T.other)).status, 404);
+});
+
+// ===================== Phase 5 Stage B — delivery tracking =====================
+
+const epoch = (iso) => Math.floor(Date.parse(iso) / 1000);
+const play = (contentId, iso, device = 'dev-a') =>
+  db.prepare('INSERT INTO play_logs (device_id, content_id, started_at) VALUES (?, ?, ?)').run(device, contentId, epoch(iso));
+
+test('delivery fields: hand-checked against seeded play_logs, wrong content excluded', async () => {
+  // campaign over pl-a (con-1 / con-2), a 10-day window ending 5 days out,
+  // target 10/day. Back-date so "today" sits mid-flight (day 3).
+  const c = await (await call('POST', camps('ws-a'), T.editor, {
+    name: 'delivery', playlist_id: 'pl-a', start_date: plusDays(-2), end_date: plusDays(7), target_plays_per_day: 10,
+  })).json();
+
+  const s = plusDays(-2);
+  play('con-1', s + 'T09:00:00Z');   // day 1
+  play('con-2', s + 'T18:00:00Z');   // day 1
+  play('con-1', plusDays(-1) + 'T10:00:00Z'); // day 2
+  play('con-1', TODAY + 'T08:00:00Z');        // day 3 (today)
+  play('con-2', TODAY + 'T09:00:00Z');        // day 3
+  play('con-9', TODAY + 'T09:00:00Z');        // WRONG content -> excluded
+  play('con-1', plusDays(3) + 'T09:00:00Z');  // AFTER today -> excluded
+  play('con-1', plusDays(-5) + 'T09:00:00Z'); // BEFORE start -> excluded
+
+  const got = await (await call('GET', `${camps('ws-a')}/${c.id}`, T.viewer)).json();
+  assert.equal(got.actual_plays, 5, 'only the 5 in-window pl-a plays');
+  assert.equal(got.delivery_days_elapsed, 3, 'day 1..today inclusive');
+  assert.equal(got.expected_plays, 30, '10/day * 3 days');
+  assert.equal(got.delivery_pct, Math.round((5 / 30) * 1000) / 10);
+
+  // same numbers via the list endpoint
+  const inList = (await (await call('GET', camps('ws-a'), T.viewer)).json()).find((x) => x.id === c.id);
+  assert.equal(inList.actual_plays, 5);
+  assert.equal(inList.expected_plays, 30);
+
+  // a play of the SAME content, in-window, but on a device in ANOTHER workspace
+  // (shared/template content reused elsewhere) must NOT be credited here.
+  play('con-1', TODAY + 'T10:00:00Z', 'dev-b');
+  play('con-2', TODAY + 'T11:00:00Z', 'dev-b');
+  const after = await (await call('GET', `${camps('ws-a')}/${c.id}`, T.viewer)).json();
+  assert.equal(after.actual_plays, 5, "another workspace's plays of the same content are excluded");
+});
+
+test('delivery: null target -> actual_plays computed, expected/pct null', async () => {
+  const c = await (await call('POST', camps('ws-a'), T.editor, {
+    name: 'no target', playlist_id: 'pl-a', start_date: plusDays(-1), end_date: plusDays(5),
+  })).json();
+  play('con-1', TODAY + 'T07:00:00Z');
+  const got = await (await call('GET', `${camps('ws-a')}/${c.id}`, T.viewer)).json();
+  assert.equal(typeof got.actual_plays, 'number');
+  assert.equal(got.expected_plays, null);
+  assert.equal(got.delivery_pct, null);
+  assert.ok(got.delivery_days_elapsed >= 1);
+});
+
+test('delivery: null playlist -> every delivery field null, no error', async () => {
+  const c = await (await call('POST', camps('ws-a'), T.editor, {
+    name: 'no playlist', start_date: plusDays(-1), end_date: plusDays(5), target_plays_per_day: 10,
+  })).json();
+  assert.equal(c.playlist_id, null);
+  assert.equal(c.actual_plays, null);
+  assert.equal(c.expected_plays, null);
+  assert.equal(c.delivery_pct, null);
+  assert.equal(c.delivery_days_elapsed, null);
+});
+
+test('delivery: unpublished playlist -> actual_plays 0 (not null)', async () => {
+  const c = await (await call('POST', camps('ws-a'), T.editor, {
+    name: 'draft playlist', playlist_id: 'pl-a-draft', start_date: plusDays(-1), end_date: plusDays(5), target_plays_per_day: 8,
+  })).json();
+  assert.equal(c.actual_plays, 0);
+  assert.equal(c.expected_plays, 16, '8/day * 2 days');
+  assert.equal(c.delivery_pct, 0);
+});
+
+test('delivery: not-started campaign -> zeros, pct null', async () => {
+  const c = await (await call('POST', camps('ws-a'), T.editor, {
+    name: 'future', playlist_id: 'pl-a', start_date: plusDays(10), end_date: plusDays(20), target_plays_per_day: 10,
+  })).json();
+  assert.equal(c.actual_plays, 0);
+  assert.equal(c.delivery_days_elapsed, 0);
+  assert.equal(c.expected_plays, 0);
+  assert.equal(c.delivery_pct, null);
 });
