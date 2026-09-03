@@ -62,6 +62,12 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, device_id TEXT, action TEXT,
     details TEXT, ip_address TEXT, workspace_id TEXT, created_at INTEGER DEFAULT 0
   );
+  -- Step 5 Stage B: ticket payload joins outage_history for the root-cause hint.
+  CREATE TABLE outage_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+    started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL DEFAULT 0, duration_seconds INTEGER NOT NULL DEFAULT 0,
+    likely_cause TEXT
+  );
 `);
 
 const dbModulePath = require.resolve('../db/database');
@@ -369,4 +375,55 @@ test('sla-summary RBAC: viewer can read, non-member 403, unknown workspace 404',
   assert.equal((await call('GET', `${tix('ws-sla')}/sla-summary`, T.other)).status, 403);
   assert.equal((await call('GET', `${tix('ws-sla')}/sla-summary`, T.nobody)).status, 403);
   assert.equal((await call('GET', `/api/workspaces/ws-nope/tickets/sla-summary`, T.plat)).status, 404);
+});
+
+// ===================== Step 5 Stage B — outage root-cause on tickets ==========
+
+test('likely_cause is joined from outage_history onto an auto-created ticket', async () => {
+  const outageStart = 1_700_000_000;
+  db.prepare(
+    "INSERT INTO outage_history (device_id, workspace_id, started_at, ended_at, duration_seconds, likely_cause) VALUES ('dev-a1','ws-a',?,?,900,'weak_wifi')",
+  ).run(outageStart, outageStart + 900);
+  const id = 'tk-auto-1';
+  db.prepare(
+    "INSERT INTO tickets (id, workspace_id, device_id, title, status, priority, auto_source, source_outage_start) VALUES (?, 'ws-a', 'dev-a1', 'SLA breach: Lobby A offline 3h', 'open', 'high', 'sla_breach', ?)",
+  ).run(id, outageStart);
+
+  const single = await (await call('GET', `${tix('ws-a')}/${id}`, T.viewer)).json();
+  assert.equal(single.likely_cause, 'weak_wifi');
+  assert.equal(single.auto_source, 'sla_breach');
+
+  const inList = (await (await call('GET', tix('ws-a'), T.viewer)).json()).find((t) => t.id === id);
+  assert.equal(inList.likely_cause, 'weak_wifi');
+});
+
+test('likely_cause is null for a manually-created ticket (no source_outage_start)', async () => {
+  const t = await (await call('POST', tix('ws-a'), T.editor, { title: 'manual one', device_id: 'dev-a1' })).json();
+  assert.equal(t.likely_cause ?? null, null, 'POST response');
+  const single = await (await call('GET', `${tix('ws-a')}/${t.id}`, T.viewer)).json();
+  assert.equal(single.likely_cause ?? null, null);
+});
+
+test('an auto-ticket whose outage has likely_cause=unknown passes it through verbatim (frontend hides it, backend does not lie)', async () => {
+  const s = 1_700_100_000;
+  db.prepare(
+    "INSERT INTO outage_history (device_id, workspace_id, started_at, ended_at, duration_seconds, likely_cause) VALUES ('dev-a1','ws-a',?,?,600,'unknown')",
+  ).run(s, s + 600);
+  db.prepare(
+    "INSERT INTO tickets (id, workspace_id, device_id, title, status, priority, auto_source, source_outage_start) VALUES ('tk-auto-2','ws-a','dev-a1','x','open','high','sla_breach',?)",
+  ).run(s);
+  const single = await (await call('GET', `${tix('ws-a')}/tk-auto-2`, T.viewer)).json();
+  assert.equal(single.likely_cause, 'unknown');
+});
+
+test('an auto-ticket whose outage predates Step 5A (likely_cause NULL) -> null, no join error', async () => {
+  const s = 1_700_200_000;
+  db.prepare(
+    "INSERT INTO outage_history (device_id, workspace_id, started_at, ended_at, duration_seconds, likely_cause) VALUES ('dev-a1','ws-a',?,?,600,NULL)",
+  ).run(s, s + 600);
+  db.prepare(
+    "INSERT INTO tickets (id, workspace_id, device_id, title, status, priority, auto_source, source_outage_start) VALUES ('tk-auto-3','ws-a','dev-a1','y','open','high','sla_breach',?)",
+  ).run(s);
+  const single = await (await call('GET', `${tix('ws-a')}/tk-auto-3`, T.viewer)).json();
+  assert.equal(single.likely_cause ?? null, null);
 });

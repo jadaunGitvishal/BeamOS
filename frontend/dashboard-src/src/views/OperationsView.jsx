@@ -32,6 +32,15 @@ const RESPONSE = {
 };
 const ownerLabel = (c) => OWNER_LABELS[c] || c;
 
+// Step 5 Stage B: human-readable outage root-cause hint for auto-created
+// tickets. 'unknown' (and null) deliberately map to nothing - showing "Unknown"
+// as if it were a finding is worse than showing nothing.
+const CAUSE_LABELS = {
+  weak_wifi: "Weak Wi-Fi",
+  low_storage: "Low storage",
+  correlated_outage: "Multiple screens affected",
+};
+
 async function patchTicket(wsId, ticketId, body) {
   const resp = await fetch(
     `/api/workspaces/${encodeURIComponent(wsId)}/tickets/${encodeURIComponent(ticketId)}`,
@@ -267,6 +276,11 @@ export default function OperationsView() {
                           ) : null}
                           {t.status === "in_progress" ? (
                             <span style={{ color: "var(--ink3)", fontSize: 11, marginLeft: 6 }}>· in progress</span>
+                          ) : null}
+                          {t.auto_source === "sla_breach" && CAUSE_LABELS[t.likely_cause] ? (
+                            <div style={{ color: "var(--ink3)", fontSize: 11, marginTop: 2 }}>
+                              Likely cause: {CAUSE_LABELS[t.likely_cause]}
+                            </div>
                           ) : null}
                         </td>
                         <td style={t.owner_category === "unassigned" ? { color: "var(--ink3)" } : undefined}>

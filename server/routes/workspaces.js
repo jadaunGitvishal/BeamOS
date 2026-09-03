@@ -623,10 +623,13 @@ const TICKET_DESC_MAX = 10000;
 const TICKET_DONE_STATUSES = new Set(["resolved", "closed"]);
 
 const TICKET_SELECT = `
-  SELECT t.*, u.email AS created_by_email, d.name AS device_name
+  SELECT t.*, u.email AS created_by_email, d.name AS device_name,
+         oh.likely_cause AS likely_cause
   FROM tickets t
   LEFT JOIN users u ON u.id = t.created_by
   LEFT JOIN devices d ON d.id = t.device_id
+  LEFT JOIN outage_history oh
+    ON oh.device_id = t.device_id AND oh.started_at = t.source_outage_start
 `;
 
 function ticketRow(t, nowSec = Math.floor(Date.now() / 1000)) {
@@ -646,6 +649,10 @@ function ticketRow(t, nowSec = Math.floor(Date.now() / 1000)) {
     // for one the SLA monitor opened (created_by is null for those too).
     auto_source: t.auto_source ?? null,
     source_outage_start: t.source_outage_start ?? null,
+    // Step 5 Stage B: for an SLA-breach ticket, the root-cause hint recorded on
+    // the outage it was opened for (Step 5A). null for manual tickets (no
+    // outage) or when the outage row predates Step 5A; may be 'unknown'.
+    likely_cause: t.likely_cause ?? null,
     created_at: t.created_at,
     updated_at: t.updated_at,
     resolved_at: t.resolved_at ?? null,
