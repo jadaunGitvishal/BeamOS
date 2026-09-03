@@ -13,6 +13,7 @@ import ContentView from "./views/ContentView";
 import IssuesView from "./views/IssuesView";
 import RegionsView from "./views/RegionsView";
 import OperationsView from "./views/OperationsView";
+import CampaignsView from "./views/CampaignsView";
 
 export default function App() {
   return (
@@ -47,6 +48,7 @@ function SessionGate() {
         <Route path="content" element={<ContentView />} />
         <Route path="regions" element={<RegionsView />} />
         <Route path="operations" element={<OperationsView />} />
+        <Route path="campaigns" element={<CampaignsView />} />
         <Route path="issues" element={<IssuesView />} />
         <Route path="*" element={<OverviewView />} />
       </Route>

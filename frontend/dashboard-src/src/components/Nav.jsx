@@ -5,6 +5,7 @@ const BASE_NAV = [
   { path: "/overview", label: "Overview", countKey: null },
   { path: "/devices", label: "Screens", countKey: "devices" },
   { path: "/content", label: "Content delivery", countKey: null },
+  { path: "/campaigns", label: "Campaigns", countKey: null },
   { path: "/regions", label: "Regions", countKey: null },
   { path: "/operations", label: "Operations", countKey: null },
 ];
