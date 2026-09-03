@@ -3,6 +3,13 @@ const router = express.Router();
 const crypto = require("crypto");
 const { db } = require("../db/database");
 const { canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canManageOrgRegions } = require("../lib/permissions");
+const {
+  ticketResponseStatus,
+  ticketSlaDueAt,
+  ticketSlaTargetHours,
+  ticketSlaTargets,
+  summariseTicketSla,
+} = require("../lib/ticket-sla");
 const { logActivity, getClientIp } = require("../services/activity");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
@@ -620,7 +627,7 @@ const TICKET_SELECT = `
   LEFT JOIN devices d ON d.id = t.device_id
 `;
 
-function ticketRow(t) {
+function ticketRow(t, nowSec = Math.floor(Date.now() / 1000)) {
   return {
     id: t.id,
     workspace_id: t.workspace_id,
@@ -640,6 +647,13 @@ function ticketRow(t) {
     created_at: t.created_at,
     updated_at: t.updated_at,
     resolved_at: t.resolved_at ?? null,
+    // Phase 4 Stage C: response-time SLA, computed on read. response_status is
+    // null for resolved/closed tickets (not "due" anything). sla_due_at /
+    // sla_target_hours are facts about the ticket's priority + age, populated
+    // regardless of status.
+    response_status: ticketResponseStatus(t, nowSec),
+    sla_due_at: ticketSlaDueAt(t),
+    sla_target_hours: ticketSlaTargetHours(t.priority),
   };
 }
 
@@ -761,7 +775,36 @@ router.get(
     const rows = await db
       .prepare(`${TICKET_SELECT} WHERE ${filters.join(" AND ")} ORDER BY t.created_at DESC, t.id DESC`)
       .all(...params);
-    res.json(rows.map(ticketRow));
+    const nowSec = Math.floor(Date.now() / 1000);
+    res.json(rows.map((r) => ticketRow(r, nowSec)));
+  }),
+);
+
+// GET /:id/tickets/sla-summary - workspace-wide response-time rollup for the
+// "Service discipline" tile. Own endpoint, not a query param on the list:
+//   - it's a different shape (a rollup, not a list) and use case (the tile
+//     renders 3 numbers without needing the tickets);
+//   - it's over ALL open/in_progress tickets, never the list's filtered subset;
+//   - keeps the list response a bare array for existing callers.
+// Any workspace member (read).
+router.get(
+  "/:id/tickets/sla-summary",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, false);
+    if (!ws) return;
+    const openTickets = await db
+      .prepare(
+        "SELECT priority, status, created_at FROM tickets WHERE workspace_id = ? AND status IN ('open', 'in_progress')",
+      )
+      .all(ws.id);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const counts = summariseTicketSla(openTickets, nowSec);
+    res.json({
+      workspace_id: ws.id,
+      targets: ticketSlaTargets(),
+      counts,
+      total_open: counts.breached + counts.due_today + counts.within_sla,
+    });
   }),
 );
 

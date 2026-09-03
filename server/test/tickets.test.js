@@ -51,9 +51,12 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'open',
     priority TEXT NOT NULL DEFAULT 'medium',
     created_by TEXT,
+    auto_source TEXT,
+    source_outage_start INTEGER,
     created_at INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL DEFAULT 0,
-    resolved_at INTEGER
+    resolved_at INTEGER,
+    UNIQUE (device_id, source_outage_start)
   );
   CREATE TABLE activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, device_id TEXT, action TEXT,
@@ -91,6 +94,12 @@ db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('w
 
 db.prepare("INSERT INTO devices (id,workspace_id,name) VALUES ('dev-a1','ws-a','Lobby A')").run();
 db.prepare("INSERT INTO devices (id,workspace_id,name) VALUES ('dev-b1','ws-b','Lobby B')").run();
+
+// Phase 4 Stage C: a clean workspace for the response-time SLA tests so counts
+// are deterministic (ws-a accumulates tickets from the earlier tests).
+db.prepare("INSERT INTO workspaces (id,organization_id,name) VALUES ('ws-sla','org-a','WS SLA')").run();
+db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-sla','u-editor','workspace_editor')").run();
+db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-sla','u-viewer','workspace_viewer')").run();
 
 const tok = (id) => generateToken(db.prepare('SELECT id,email,role FROM users WHERE id = ?').get(id), null);
 const T = {
@@ -276,4 +285,88 @@ test('GET list: filters by status / priority / owner_category, newest first', as
   assert.deepEqual(platform.map((t) => t.title).sort(), ['one', 'three']);
 
   assert.equal((await call('GET', `${tix('ws-f')}?status=bogus`, T.orgOwner)).status, 400);
+});
+
+// ===================== Phase 4 Stage C — response-time SLA =====================
+
+const H = 3600;
+const now = () => Math.floor(Date.now() / 1000);
+// create a ticket in ws-sla and back-date it `ageH` hours; returns the id
+async function seedAged(priority, ageH, status = 'open') {
+  const t = await (await call('POST', tix('ws-sla'), T.editor, { title: `${priority} @${ageH}h`, priority })).json();
+  db.prepare('UPDATE tickets SET created_at = ? WHERE id = ?').run(now() - Math.round(ageH * H), t.id);
+  if (status !== 'open') db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(status, t.id);
+  return t.id;
+}
+
+test('list carries response_status / sla_due_at / sla_target_hours per ticket', async () => {
+  const id = await seedAged('high', 1); // 1h old, 4h target -> 3h left > 2h -> within_sla
+  const rows = await (await call('GET', tix('ws-sla'), T.viewer)).json();
+  const t = rows.find((x) => x.id === id);
+  assert.equal(t.response_status, 'within_sla');
+  assert.equal(t.sla_target_hours, 4);
+  assert.equal(t.sla_due_at, t.created_at + 4 * H);
+});
+
+test('boundary: exactly at target -> breached; exactly at 50%-of-target remaining -> due_today; just inside -> within_sla', async () => {
+  const atLine = await seedAged('high', 4);      // exactly 4h old -> breached
+  const atHalf = await seedAged('high', 2);      // exactly 2h left (50% of 4h) -> due_today
+  const justInside = await seedAged('high', 1.99); // just over 2h left -> within_sla
+  const lowHalf = await seedAged('low', 36);     // exactly 36h left (50% of 72h) -> due_today
+  const rows = await (await call('GET', tix('ws-sla'), T.viewer)).json();
+  const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+  assert.equal(byId[atLine].response_status, 'breached', 'age == target -> breached');
+  assert.equal(byId[atHalf].response_status, 'due_today', 'exactly 50% of budget left -> due_today');
+  assert.equal(byId[justInside].response_status, 'within_sla', 'just over 50% left -> within_sla');
+  assert.equal(byId[lowHalf].response_status, 'due_today', 'low ticket at its own 36h boundary -> due_today');
+});
+
+test('resolved / closed tickets: response_status null in the list, excluded from the summary', async () => {
+  const res = await seedAged('high', 99, 'resolved');
+  const clo = await seedAged('high', 99, 'closed');
+  const rows = await (await call('GET', tix('ws-sla'), T.viewer)).json();
+  const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+  assert.equal(byId[res].response_status, null);
+  assert.equal(byId[clo].response_status, null);
+  // sla_due_at is still a fact about the ticket
+  assert.equal(typeof byId[res].sla_due_at, 'number');
+
+  const s = await (await call('GET', `${tix('ws-sla')}/sla-summary`, T.viewer)).json();
+  // the resolved + closed tickets contribute to none of the buckets
+  assert.equal(s.counts.breached + s.counts.due_today + s.counts.within_sla, s.total_open);
+});
+
+test('sla-summary: hand-checked counts over a known spread', async () => {
+  // fresh workspace so the spread is the whole population
+  db.prepare("INSERT INTO workspaces (id,organization_id,name) VALUES ('ws-sum','org-a','WS Sum')").run();
+  db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-sum','u-editor','workspace_editor')").run();
+  const mk = async (priority, ageH, status = 'open') => {
+    const t = await (await call('POST', tix('ws-sum'), T.editor, { title: `${priority}@${ageH}`, priority })).json();
+    db.prepare('UPDATE tickets SET created_at = ? WHERE id = ?').run(now() - Math.round(ageH * H), t.id);
+    if (status !== 'open') db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(status, t.id);
+  };
+  await mk('high', 6);            // breached (6h > 4h)
+  await mk('medium', 30);         // breached (30h > 24h)
+  await mk('high', 3);            // due_today (1h left <= 2h)
+  await mk('medium', 18);         // due_today (6h left <= 12h)
+  await mk('low', 50);            // due_today (22h left <= 36h)
+  await mk('low', 10);            // within_sla (62h left > 36h)
+  await mk('high', 0.5);          // within_sla (3.5h left > 2h)
+  await mk('high', 100, 'resolved'); // excluded
+  await mk('medium', 100, 'closed'); // excluded
+
+  const r = await call('GET', `${tix('ws-sum')}/sla-summary`, T.editor);
+  assert.equal(r.status, 200);
+  const s = await r.json();
+  assert.equal(s.workspace_id, 'ws-sum');
+  assert.deepEqual(s.targets, { high: 4, medium: 24, low: 72 });
+  assert.deepEqual(s.counts, { breached: 2, due_today: 3, within_sla: 2 });
+  assert.equal(s.total_open, 7);
+});
+
+test('sla-summary RBAC: viewer can read, non-member 403, unknown workspace 404', async () => {
+  assert.equal((await call('GET', `${tix('ws-sla')}/sla-summary`, T.viewer)).status, 200);
+  assert.equal((await call('GET', `${tix('ws-sla')}/sla-summary`, T.other)).status, 403);
+  assert.equal((await call('GET', `${tix('ws-sla')}/sla-summary`, T.nobody)).status, 403);
+  assert.equal((await call('GET', `/api/workspaces/ws-nope/tickets/sla-summary`, T.plat)).status, 404);
 });

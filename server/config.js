@@ -296,6 +296,17 @@ module.exports = {
     parseFloat(process.env.SLA_UPTIME_TARGET_PCT) || 99.0,
   slaEscalationThresholdHours:
     parseFloat(process.env.SLA_ESCALATION_THRESHOLD_HOURS) || 4,
+  // Phase 4 Stage C: ticket response-time targets (HOURS), per priority. A
+  // persisted app_settings value (ticket_sla_hours_<priority>) overrides these
+  // once set - see lib/ticket-sla.js. An OPEN / IN_PROGRESS ticket older than
+  // its priority's target is "breached"; in the final 50% of the budget,
+  // "due_today"; otherwise "within_sla".
+  ticketSlaHoursHigh:
+    parseFloat(process.env.TICKET_SLA_HOURS_HIGH) || 4,
+  ticketSlaHoursMedium:
+    parseFloat(process.env.TICKET_SLA_HOURS_MEDIUM) || 24,
+  ticketSlaHoursLow:
+    parseFloat(process.env.TICKET_SLA_HOURS_LOW) || 72,
   // Ref 51 Stage 2: the long-term outage recorder (services/outage-history.js).
   // Must run comfortably more often than statusLogRetentionDays so no outage's
   // status-log rows age out between two sweeps — every 30 min vs a 3-day window

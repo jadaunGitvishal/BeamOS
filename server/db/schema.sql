@@ -935,9 +935,19 @@ CREATE TABLE IF NOT EXISTS app_settings (
 --   sla_uptime_target_pct          - uptime % at/above which a device is Compliant
 --   sla_escalation_threshold_hours - hours a device may be continuously offline
 --                                    before the ongoing outage is a live breach
+--
+-- Phase 4 Stage C: ticket response-time targets, per priority (HOURS). Same
+-- rationale (platform-wide, admin-toggleable, cache + set() already here). An
+-- OPEN / IN_PROGRESS ticket past its priority's target is "breached"; in the
+-- final 50% of the budget, "due_today" (see lib/ticket-sla.js). getNum() falls
+-- back to the config.js env default if a row is absent.
+--   ticket_sla_hours_high / _medium / _low
 INSERT IGNORE INTO app_settings (`key`, value) VALUES
     ('sla_uptime_target_pct', '99.0'),
-    ('sla_escalation_threshold_hours', '4');
+    ('sla_escalation_threshold_hours', '4'),
+    ('ticket_sla_hours_high', '4'),
+    ('ticket_sla_hours_medium', '24'),
+    ('ticket_sla_hours_low', '72');
 
 -- ===================== BILLING USAGE ROLLUP =====================
 -- #146 BILLING: durable daily usage rollup (contractual system-of-record). One tiny row
