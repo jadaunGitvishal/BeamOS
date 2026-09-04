@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../db/database');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, isPlatformRole } = require('../middleware/auth');
+const { resolveTenancy } = require('../lib/tenancy');
+const { canAdminOrg } = require('../lib/permissions');
 const config = require('../config');
 const { asyncHandler } = require('../lib/async-handler');
 
@@ -12,8 +14,31 @@ if (config.stripeSecretKey) {
   stripe = require('stripe')(config.stripeSecretKey);
 }
 
+// permissions.js has documented "org_owner also has billing.write" since Phase
+// 2.1, but these two routes were never actually gated with it - any
+// authenticated org member (workspace_admin/editor/viewer alike) could open a
+// checkout or billing-portal session. Fixes that: resolveTenancy resolves the
+// caller's current org from their session (same JWT-workspace-derived context
+// /api/auth/me uses - these routes have no org id in the request body/params
+// to key off of otherwise), then canAdminOrg (the existing owner-only
+// predicate used by routes/organizations.js) gates it. canAdminOrg itself
+// already lets a platform_admin through; the explicit isPlatformRole check
+// here only covers the edge case where resolveTenancy found no workspace at
+// all (canAdminOrg requires a truthy org and would otherwise 403 a platform
+// admin in a system with zero workspaces).
+async function requireBillingOwner(req, res, next) {
+  if (isPlatformRole(req.user.role)) return next();
+  const org = req.organizationId
+    ? await db.prepare('SELECT * FROM organizations WHERE id = ?').get(req.organizationId)
+    : null;
+  if (!org || !(await canAdminOrg(db, req.user, org))) {
+    return res.status(403).json({ error: 'Organization owner access required' });
+  }
+  next();
+}
+
 // Create checkout session - user clicks "Upgrade" on a plan
-router.post('/checkout', requireAuth, asyncHandler(async (req, res) => {
+router.post('/checkout', requireAuth, resolveTenancy, requireBillingOwner, asyncHandler(async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
 
   const { plan_id, interval } = req.body; // interval: 'monthly' or 'yearly'
@@ -68,7 +93,7 @@ router.post('/checkout', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 // Customer portal - manage existing subscription (change plan, cancel, update payment)
-router.post('/portal', requireAuth, asyncHandler(async (req, res) => {
+router.post('/portal', requireAuth, resolveTenancy, requireBillingOwner, asyncHandler(async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
 
   const customerId = req.user.stripe_customer_id;

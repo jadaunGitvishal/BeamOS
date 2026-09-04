@@ -14,6 +14,20 @@ export async function render(container) {
     <div id="billingContent"><div class="empty-state"><h3>${t('common.loading')}</h3></div></div>
   `;
 
+  // This view is currently unreachable through normal navigation (app.js
+  // bounces #/billing straight back to the dashboard - "Subscription is
+  // permanently disabled for BeamOS"), but the server-side fix for the
+  // billing-access gap (checkout/portal now require canAdminOrg, i.e.
+  // org_owner or platform_admin) means the buttons below would 403 for
+  // anyone else if this view were ever re-enabled. Gate them the same way
+  // content-library.js gates its edit button: resolve the real role from
+  // /auth/me before first render and hide (not disable) what will fail.
+  let canManageBilling = true; // fail open on error - server is the real gate
+  try {
+    const me = await api.getMe();
+    canManageBilling = !!(me?.is_platform_admin || me?.current_org_role === 'org_owner');
+  } catch { /* keep the fail-open default */ }
+
   try {
     const [subData, plans] = await Promise.all([
       fetch('/api/subscription/me', { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }}).then(r => r.json()),
@@ -71,6 +85,7 @@ export async function render(container) {
 
       <div class="settings-section">
         <h3>${t('billing.available_plans')}</h3>
+        ${!canManageBilling ? `<p style="color:var(--text-muted);font-size:12px;margin:-8px 0 12px">Only the organization owner can change plans or manage the subscription. Ask your org owner if you need this changed.</p>` : ''}
         <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(240px, 1fr));gap:16px">
           ${plans.map(p => `
             <div style="background:var(--bg-secondary);border:${p.id === subData.plan.id ? '2px solid var(--accent)' : '1px solid var(--border)'};border-radius:var(--radius-lg);padding:20px;position:relative">
@@ -87,13 +102,13 @@ export async function render(container) {
                 <div>${p.priority_support ? '&#10003;' : '&#10007;'} ${t('billing.feat.priority_support')}</div>
               </div>
               ${p.price_yearly > 0 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:8px">${t('billing.yearly_save', { price: p.price_yearly, pct: Math.round((1 - p.price_yearly / (p.price_monthly * 12)) * 100) })}</div>` : ''}
-              ${!subData.self_hosted && p.price_monthly > 0 && p.id !== subData.plan.id ? `
+              ${canManageBilling && !subData.self_hosted && p.price_monthly > 0 && p.id !== subData.plan.id ? `
                 <div style="margin-top:12px;display:flex;gap:6px">
                   <button class="btn btn-primary btn-sm" style="flex:1" onclick="window._checkout('${p.id}','monthly')">${t('billing.monthly')}</button>
                   ${p.price_yearly > 0 ? `<button class="btn btn-secondary btn-sm" style="flex:1" onclick="window._checkout('${p.id}','yearly')">${t('billing.yearly')}</button>` : ''}
                 </div>
               ` : ''}
-              ${!subData.self_hosted && p.id === subData.plan.id && subData.subscription?.stripe_subscription_id ? `
+              ${canManageBilling && !subData.self_hosted && p.id === subData.plan.id && subData.subscription?.stripe_subscription_id ? `
                 <button class="btn btn-secondary btn-sm" style="width:100%;margin-top:12px" onclick="window._manageSubscription()">${t('billing.manage_subscription')}</button>
               ` : ''}
             </div>
