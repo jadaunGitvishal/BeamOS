@@ -236,6 +236,16 @@ async function renderEditor(container, layoutId) {
   let selectedZone = null;
   let dragging = null;
 
+  // Bug #2: overlapping zones share z_index:0 by default, so paint order (DOM/
+  // array order) decides who's on top - a zone earlier in the array can have
+  // its body AND resize handle completely covered by a later one, silently
+  // stealing clicks meant for it. Rendering the SELECTED zone at this z-index
+  // (way above any realistic real z_index) guarantees its handle is always
+  // reachable while selected. Purely a rendering concern - z.z_index itself
+  // (the saved value) is never touched, only read.
+  const SELECTED_Z_INDEX = 9999;
+  const effectiveZIndex = (i, z) => selectedZone === i ? SELECTED_Z_INDEX : (z.z_index || 0);
+
   // Toggle the "selected" visual state on the EXISTING zone/list nodes, without
   // removing/recreating anything. renderZones() below does a full teardown-and-
   // rebuild of every .zone-el - fine when the zone set itself changes, but fatal
@@ -247,9 +257,11 @@ async function renderEditor(container, layoutId) {
   // down, so it goes through this instead.
   function refreshSelectionVisuals() {
     canvas.querySelectorAll('.zone-el').forEach(el => {
-      const isSelected = selectedZone === Number(el.dataset.index);
+      const i = Number(el.dataset.index);
+      const isSelected = selectedZone === i;
       el.style.background = isSelected ? 'rgba(59,130,246,0.3)' : 'rgba(59,130,246,0.1)';
       el.style.borderColor = isSelected ? 'var(--accent)' : 'rgba(59,130,246,0.4)';
+      el.style.zIndex = effectiveZIndex(i, zones[i]);
     });
     document.querySelectorAll('#zoneList [data-zone-idx]').forEach(item => {
       const isSelected = selectedZone === parseInt(item.dataset.zoneIdx);
@@ -269,7 +281,7 @@ async function renderEditor(container, layoutId) {
         background:${selectedZone === i ? 'rgba(59,130,246,0.3)' : 'rgba(59,130,246,0.1)'};
         border:2px solid ${selectedZone === i ? 'var(--accent)' : 'rgba(59,130,246,0.4)'};
         cursor:move;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text-secondary);
-        user-select:none;z-index:${z.z_index || 0}`;
+        user-select:none;z-index:${effectiveZIndex(i, z)}`;
       el.textContent = z.name;
 
       el.onmousedown = (e) => {
