@@ -231,12 +231,34 @@ async function renderEditor(container, layoutId) {
     </div>
   `;
 
+  const canvas = document.getElementById('canvas');
   let zones = layout.zones || [];
   let selectedZone = null;
   let dragging = null;
 
+  // Toggle the "selected" visual state on the EXISTING zone/list nodes, without
+  // removing/recreating anything. renderZones() below does a full teardown-and-
+  // rebuild of every .zone-el - fine when the zone set itself changes, but fatal
+  // to call mid-drag: it was orphaning the very node a just-started drag's
+  // onMove/onUp closures were about to update, so the drag kept moving an
+  // invisible, detached copy while the visible zone stayed frozen (the data -
+  // and Save - were fine; only the screen was stuck). Selecting a zone (via its
+  // body, its resize handle, or its sidebar entry) must never tear the canvas
+  // down, so it goes through this instead.
+  function refreshSelectionVisuals() {
+    canvas.querySelectorAll('.zone-el').forEach(el => {
+      const isSelected = selectedZone === Number(el.dataset.index);
+      el.style.background = isSelected ? 'rgba(59,130,246,0.3)' : 'rgba(59,130,246,0.1)';
+      el.style.borderColor = isSelected ? 'var(--accent)' : 'rgba(59,130,246,0.4)';
+    });
+    document.querySelectorAll('#zoneList [data-zone-idx]').forEach(item => {
+      const isSelected = selectedZone === parseInt(item.dataset.zoneIdx);
+      item.style.background = isSelected ? 'var(--bg-card-hover)' : 'var(--bg-secondary)';
+      item.style.borderColor = isSelected ? 'var(--accent)' : 'var(--border)';
+    });
+  }
+
   function renderZones() {
-    const canvas = document.getElementById('canvas');
     canvas.querySelectorAll('.zone-el').forEach(z => z.remove());
 
     zones.forEach((z, i) => {
@@ -254,7 +276,7 @@ async function renderEditor(container, layoutId) {
         if (e.target !== el) return;
         e.preventDefault();
         selectedZone = i;
-        renderZones();
+        refreshSelectionVisuals();
         updateProperties();
         const rect = canvas.getBoundingClientRect();
         const startX = e.clientX;
@@ -285,6 +307,7 @@ async function renderEditor(container, layoutId) {
         e.preventDefault();
         e.stopPropagation();
         selectedZone = i;
+        refreshSelectionVisuals();
         const rect = canvas.getBoundingClientRect();
         const onMove = (e2) => {
           const newW = ((e2.clientX - rect.left) / rect.width * 100) - z.x_percent;
@@ -316,7 +339,7 @@ async function renderEditor(container, layoutId) {
     `).join('');
 
     document.querySelectorAll('[data-zone-idx]').forEach(el => {
-      el.onclick = () => { selectedZone = parseInt(el.dataset.zoneIdx); renderZones(); updateProperties(); };
+      el.onclick = () => { selectedZone = parseInt(el.dataset.zoneIdx); refreshSelectionVisuals(); updateProperties(); };
     });
   }
 
