@@ -66,6 +66,17 @@ export const api = {
     if (!res.ok) throw new Error('Failed to load QR image');
     return URL.createObjectURL(await res.blob());
   },
+  // Ref 35 Stage B: the Device Owner provisioning variant - same code row, a
+  // different QR payload (Android's device-owner QR provisioning JSON schema
+  // instead of the plain /activate/<code> link).
+  getRegistrationCodeDeviceOwnerQrUrl: async (id) => {
+    const res = await fetch(`${API_BASE}/provisioning/registration-codes/${id}/qr-device-owner`, { headers: getAuthHeaders() });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error((body && body.error) || 'Failed to load Device Owner QR image');
+    }
+    return URL.createObjectURL(await res.blob());
+  },
 
   // Regions (Phase 3 Stage A). Org-level: org_owner/org_admin (or platform admin)
   // of the org, enforced server-side (canManageOrgRegions).

@@ -68,6 +68,10 @@ class ProvisioningActivity : AppCompatActivity() {
             wsService = binder.getService()
             bound = true
             setupServiceCallbacks()
+            // Ref 35 Stage B: only after the service is actually bound - same ordering
+            // guarantee the manual activation flow already relies on (a user can't tap
+            // Activate before this point either).
+            maybeAutoClaimFromDeviceOwnerProvisioning()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -256,6 +260,28 @@ class ProvisioningActivity : AppCompatActivity() {
             Log.w("ProvisioningActivity", "activation claim failed: ${e.message}")
             runOnUiThread { activationError("Could not reach the server. Check the URL and try again.") }
         }
+    }
+
+    // Ref 35 Stage B: DeviceAdminReceiver.onProfileProvisioningComplete() stashes a
+    // registration code + server URL (from the Device Owner QR's admin extras bundle)
+    // and launches this activity. If present, claim automatically instead of showing the
+    // mode-selection UI - reuses claimActivationCode() unchanged, the exact same network
+    // path and onRegistered/onPaired hand-off the manual activation-code flow already uses.
+    // Cleared immediately (before the network call) so a later reconnect of the service
+    // can't replay the same claim.
+    private fun maybeAutoClaimFromDeviceOwnerProvisioning() {
+        val code = config.pendingClaimCode
+        val url = config.pendingClaimServerUrl
+        if (code.isEmpty() || url.isEmpty()) return
+        config.clearPendingClaim()
+        config.serverUrl = url
+        serverUrlInput.setText(url)
+        activationCodeInput.setText(code)
+        statusText.text = "Device Owner provisioning complete - activating automatically..."
+        progressBar.visibility = View.VISIBLE
+        connectBtn.isEnabled = false
+        activateBtn.isEnabled = false
+        Thread { claimActivationCode(url, code) }.start()
     }
 
     private fun activationError(message: String) {

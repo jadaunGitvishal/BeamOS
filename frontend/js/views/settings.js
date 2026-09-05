@@ -729,10 +729,12 @@ export async function render(container) {
                     c.expired
                       ? `<button class="btn btn-secondary btn-sm prov-regen-btn" data-id="${esc(String(c.id))}">${t("provisioning.regenerate")}</button> `
                       : c.status === "unused"
-                        ? `<button class="btn btn-secondary btn-sm prov-qr-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr")}</button> `
+                        ? `<button class="btn btn-secondary btn-sm prov-qr-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr")}</button> ` +
+                          `<button class="btn btn-secondary btn-sm prov-qr-do-btn" data-id="${esc(String(c.id))}" data-code="${esc(c.code)}">${t("provisioning.show_qr_device_owner")}</button> `
                         : ""
                   }<button class="btn btn-danger btn-sm prov-del-btn" data-id="${esc(String(c.id))}" data-status="${esc(c.status)}" data-device="${esc(c.claimed_by_device_name || "")}">${t("provisioning.delete")}</button>
                   <div class="prov-qr-slot" data-id="${esc(String(c.id))}"></div>
+                  <div class="prov-qr-do-slot" data-id="${esc(String(c.id))}"></div>
                 </td>
               </tr>
             `,
@@ -761,6 +763,43 @@ export async function render(container) {
             img.alt = t("provisioning.qr_alt", { code: btn.dataset.code });
             img.style.cssText =
               "display:block;width:160px;height:160px;margin-top:8px;background:#fff;padding:6px;border-radius:6px";
+            slot.appendChild(img);
+            slot.dataset.loaded = "1";
+          } catch (err) {
+            showToast(err.message, "error");
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      // Ref 35 Stage B: Device Owner provisioning QR - a different payload
+      // (Android's device-owner QR provisioning JSON), scanned from a
+      // factory-reset device's setup wizard rather than a phone camera, so it
+      // gets its own note explaining that distinction inline.
+      provList.querySelectorAll(".prov-qr-do-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const slot = provList.querySelector(
+            `.prov-qr-do-slot[data-id="${CSS.escape(btn.dataset.id)}"]`,
+          );
+          if (slot.dataset.loaded) {
+            slot.style.display = slot.style.display === "none" ? "" : "none";
+            return;
+          }
+          btn.disabled = true;
+          try {
+            const url = await api.getRegistrationCodeDeviceOwnerQrUrl(btn.dataset.id);
+            objectUrls.push(url);
+            const note = document.createElement("p");
+            note.textContent = t("provisioning.device_owner_qr_note");
+            note.style.cssText =
+              "max-width:260px;margin:8px 0 4px;font-size:12px;color:var(--text-muted)";
+            const img = document.createElement("img");
+            img.src = url;
+            img.alt = t("provisioning.qr_device_owner_alt", { code: btn.dataset.code });
+            img.style.cssText =
+              "display:block;width:160px;height:160px;background:#fff;padding:6px;border-radius:6px";
+            slot.appendChild(note);
             slot.appendChild(img);
             slot.dataset.loaded = "1";
           } catch (err) {

@@ -28,6 +28,11 @@ const { asyncHandler } = require('../lib/async-handler');
 const { getClientIp } = require('../services/activity');
 const { stripDeviceSecrets } = require('../lib/device-sanitize');
 const { workspaceRoom, emitToWorkspace } = require('../lib/socket-rooms');
+const apkCache = require('../lib/apk-cache');
+
+// Ref 35 Stage B: the Device Admin component QR provisioning targets. Must match
+// AndroidManifest.xml's receiver registration exactly (Ref 35 Stage A).
+const DEVICE_ADMIN_COMPONENT_NAME = 'com.remotedisplay.player/.service.DeviceAdminReceiver';
 
 const NAME_MAX = 255;
 const CODE_MIN = 100000;
@@ -207,6 +212,69 @@ router.get('/registration-codes/:id/qr', asyncHandler(async (req, res) => {
   // scheme + host (Cloudflare / reverse-proxy forwarded), not the internal ones.
   const activateUrl = `${req.protocol}://${req.get('host')}/activate/${row.code}`;
   const png = await QRCode.toBuffer(activateUrl, {
+    type: 'png',
+    errorCorrectionLevel: 'M',
+    margin: 2,
+    width: 320,
+  });
+  res.set('Content-Type', 'image/png');
+  res.set('Cache-Control', 'private, max-age=300');
+  res.send(png);
+}));
+
+// GET /api/provisioning/registration-codes/:id/qr-device-owner
+// -> image/png QR encoding the Android "Device Owner provisioning" JSON payload
+// (the one scanned from a factory-reset device's setup wizard, NOT the simple
+// /activate/<code> link above). Reuses the exact same registration_codes row/
+// code-generation logic as the simple QR - this endpoint only changes what gets
+// encoded into the image. Same workspace-admin gate.
+//
+// Payload keys, per Android's own documented QR provisioning schema:
+//   - PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME: our DeviceAdminReceiver (Ref 35
+//     Stage A), so the system knows which app/receiver to make Device Owner.
+//   - PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION: the real /download/apk
+//     URL (req.protocol + req.get('host') - trust proxy is on, so this is the
+//     public-facing scheme+host, same fix as the /qr endpoint above) - lets a
+//     factory-reset device with no app installed yet fetch the APK itself.
+//   - PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM: the SHA-256 of the APK's
+//     SIGNING CERTIFICATE (lib/apk-signature-checksum.js via apkCache, NOT a
+//     whole-file hash - confirmed against Android's own documented provisioning
+//     behaviour: the setup wizard downloads the APK, extracts ITS certificate,
+//     and compares against this value. A separate, deprecated extra,
+//     PROVISIONING_DEVICE_ADMIN_PACKAGE_CHECKSUM, takes a whole-file hash instead,
+//     but that is a different key and not the one requested/used here).
+//   - PROVISIONING_ADMIN_EXTRAS_BUNDLE: a nested JSON object (confirmed against
+//     Android's own documented examples - not a string) of our own custom keys,
+//     carrying the registration code AND the server's base URL. The server URL is
+//     NOT one of Android's defined provisioning keys - a factory-fresh device has
+//     no prior server configured, so without it the app would have nothing to
+//     POST the claim to once installed.
+router.get('/registration-codes/:id/qr-device-owner', asyncHandler(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Registration code not found' });
+  const ws = await loadAdminWorkspace(req, res, row.workspace_id);
+  if (!ws) return;
+
+  const apk = apkCache.get();
+  if (!apk.exists) {
+    return res.status(503).json({ error: 'The Android APK is not available on this server - Device Owner provisioning needs it for the download step.' });
+  }
+  if (!apk.sigChecksum) {
+    return res.status(503).json({ error: 'The APK signature checksum has not finished computing yet - try again in a moment.' });
+  }
+
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  const payload = {
+    'android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME': DEVICE_ADMIN_COMPONENT_NAME,
+    'android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION': `${baseUrl}/download/apk`,
+    'android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM': apk.sigChecksum,
+    'android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE': {
+      'com.remotedisplay.player.EXTRA_REGISTRATION_CODE': row.code,
+      'com.remotedisplay.player.EXTRA_SERVER_URL': baseUrl,
+    },
+  };
+
+  const png = await QRCode.toBuffer(JSON.stringify(payload), {
     type: 'png',
     errorCorrectionLevel: 'M',
     margin: 2,

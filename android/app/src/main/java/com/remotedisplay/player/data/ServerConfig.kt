@@ -111,4 +111,25 @@ class ServerConfig(context: Context) {
             .remove("ota_backoff_reported")
             .apply()
     }
+
+    // Ref 35 Stage B: set by DeviceAdminReceiver.onProfileProvisioningComplete() when the
+    // app was just made Device Owner via QR provisioning and the QR's ADMIN_EXTRAS_BUNDLE
+    // carried our registration code + server URL. That callback is a BroadcastReceiver -
+    // no UI, and must return quickly - so it only persists these fields and starts
+    // ProvisioningActivity, which does the actual claim POST (reusing its existing
+    // claimActivationCode network path) and clears them once consumed.
+    var pendingClaimCode: String
+        get() = prefs.getString("pending_claim_code", "") ?: ""
+        set(value) = prefs.edit().putString("pending_claim_code", value).apply()
+
+    var pendingClaimServerUrl: String
+        get() = prefs.getString("pending_claim_server_url", "") ?: ""
+        set(value) = prefs.edit().putString("pending_claim_server_url", value).apply()
+
+    fun clearPendingClaim() {
+        prefs.edit()
+            .remove("pending_claim_code")
+            .remove("pending_claim_server_url")
+            .apply()
+    }
 }
