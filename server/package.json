@@ -49,6 +49,7 @@
   "overrides": {
     "exceljs": {
       "uuid": "$uuid"
-    }
+    },
+    "qs": "6.16.0"
   }
 }
