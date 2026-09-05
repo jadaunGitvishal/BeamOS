@@ -16,6 +16,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -242,6 +243,13 @@ class ZoneManager(
                     .inflate(com.remotedisplay.player.R.layout.zone_player, null) as PlayerView).apply {
                     useController = false
                     layoutParams = params
+                    // zone_player.xml hardcodes resize_mode="fit" - override per-zone so
+                    // video honors the same fitMode vocabulary the image branch below uses.
+                    resizeMode = when (zone.fitMode) {
+                        "contain" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        "fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                        else -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    }
                 }
                 val exoPlayer = ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build().apply {
                     setMediaItem(MediaItem.fromUri(src))
