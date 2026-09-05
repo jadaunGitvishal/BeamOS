@@ -3,6 +3,8 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import com.remotedisplay.player.service.DeviceAdminReceiver
+import com.remotedisplay.player.util.DebugLog
 
 class RemoteDisplayApp : Application() {
 
@@ -17,6 +19,8 @@ class RemoteDisplayApp : Application() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Ref 35 Stage A: read-only status check, not wired into any feature yet.
+        DebugLog.i("DeviceAdmin", "isDeviceOwnerApp=${DeviceAdminReceiver.isDeviceOwner(this)}")
     }
 
     private fun createNotificationChannel() {

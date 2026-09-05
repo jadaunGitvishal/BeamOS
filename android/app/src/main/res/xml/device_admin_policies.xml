@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ref 35 Stage A: required boilerplate declaring which device admin policies this app
+     may use. Declaring a policy here does not enable it - none of this is enforced until
+     the app is actually granted admin/owner status, which does not happen in this stage.
+
+     Note: USB restriction (UserManager.DISALLOW_USB_FILE_TRANSFER) and lock task/kiosk
+     mode (DevicePolicyManager.setLockTaskPackages) are Device Owner APIs gated by owner
+     status itself, not by a <uses-policies> flag here - there is no dedicated USB or
+     lock-task entry in this schema. disable-camera and wipe-data are declared as the
+     standard baseline for an MDM-style device admin app. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <disable-camera />
+        <wipe-data />
+    </uses-policies>
+</device-admin>

@@ -135,6 +135,22 @@
             </intent-filter>
         </receiver>
 
+        <!-- Ref 35 Stage A: device admin foundation only. Registering this receiver makes
+             the app eligible to be granted device admin/owner status - it is not granted
+             here and no policy is enforced. USB restriction and lock task (kiosk) mode are
+             later stages, gated on Device Owner status actually being obtained. -->
+        <receiver
+            android:name=".service.DeviceAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policies" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
         <!-- FileProvider for APK updates -->
         <provider
             android:name="androidx.core.content.FileProvider"
