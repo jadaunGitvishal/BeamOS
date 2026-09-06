@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ref 35 Stage C: DEBUG-BUILD-ONLY manifest fragment. AGP's manifest merger applies
+     this to debug builds only - it is never part of a release build's manifest. Declares
+     the adb-triggerable test receiver for DeviceAdminReceiver.clearDeviceOwner(), so the
+     real undo path can be exercised on a disposable test device without needing any UI.
+     Verified absent from the release manifest via `aapt dump xmltree` - see Ref 35 Stage
+     C's verification notes. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".service.DebugClearDeviceOwnerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.remotedisplay.player.DEBUG_CLEAR_DEVICE_OWNER" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

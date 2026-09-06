@@ -33,6 +33,39 @@ class DeviceAdminReceiver : android.app.admin.DeviceAdminReceiver() {
             val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             return dpm.isDeviceOwnerApp(context.packageName)
         }
+
+        // Ref 35 Stage C: a Device Owner app can always clear its own Device Owner status
+        // by calling this on itself - Android permits this unconditionally for the current
+        // device owner, regardless of android:testOnly. This is NOT the same as the adb
+        // `dpm remove-active-admin` shell command, which Android restricts to testOnly
+        // admins only (verified: it throws SecurityException "Attempt to remove non-test
+        // admin" against this app's real, non-testOnly manifest) - so a real deployed
+        // device can never have its Device Owner status stripped via adb alone.
+        //
+        // IMPORTANT nuance (checked against Android's own API docs, not assumed):
+        // clearDeviceOwnerApp() itself is documented as "should be used for testing
+        // purposes only" - Google's stated production recommendation for permanently
+        // removing Device Owner control is a full wipeData() (factory reset), specifically
+        // to avoid leaving sensitive managed-app data behind on a device that is no longer
+        // under management. This function is still the right primitive for a lighter-weight
+        // "step this device down out of the fleet, keep its content" admin action, distinct
+        // from a hard remote wipe - but it is not, by Android's own guidance, a full
+        // replacement for wipeData() in an emergency full-decommission scenario.
+        fun clearDeviceOwner(context: Context): Boolean {
+            val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            if (!dpm.isDeviceOwnerApp(context.packageName)) {
+                DebugLog.w(TAG, "clearDeviceOwner: not currently device owner, nothing to clear")
+                return false
+            }
+            return try {
+                dpm.clearDeviceOwnerApp(context.packageName)
+                DebugLog.i(TAG, "Device Owner status cleared")
+                true
+            } catch (e: Throwable) {
+                DebugLog.e(TAG, "clearDeviceOwner failed: ${e.message}")
+                false
+            }
+        }
     }
 
     override fun onEnabled(context: Context, intent: Intent) {

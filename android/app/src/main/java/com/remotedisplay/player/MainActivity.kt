@@ -121,6 +121,13 @@ class MainActivity : AppCompatActivity() {
         )
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // Ref 35 Stage C: re-enter lock task mode on every launch/reboot while an admin
+        // has kiosk lockdown turned on. This is NOT a fresh automatic activation - only
+        // the original enable_kiosk_lockdown device:command (see onCommand below) is;
+        // this just keeps an already-deliberate choice in effect across restarts, which is
+        // the entire point of kiosk mode.
+        com.remotedisplay.player.service.KioskLockdown.enterLockTaskIfNeeded(this)
+
         // Ref 39: optional field override for the cache free-space floor (MB). 0/absent -> default (500 MB).
         val minFreeMb = prefs.getInt("content_cache_min_free_mb", 0)
         contentCache = if (minFreeMb > 0) ContentCache(this, minFreeMb.toLong() * 1024 * 1024) else ContentCache(this)
@@ -671,6 +678,27 @@ class MainActivity : AppCompatActivity() {
                     val on = payload?.optBoolean("enabled", false) ?: false
                     if (::pipOverlay.isInitialized) pipOverlay.pipDebug = on
                     Log.i("MainActivity", "PiP debug ${if (on) "ENABLED" else "disabled"}")
+                }
+                // Ref 35 Stage C: the deliberate trigger for USB + kiosk (lock task)
+                // lockdown - never automatic just because the device happens to hold
+                // Device Owner. Applies the DevicePolicyManager-level policy, then enters
+                // lock task mode immediately (we're already the foreground Activity
+                // handling this command).
+                "enable_kiosk_lockdown" -> {
+                    val applied = com.remotedisplay.player.service.KioskLockdown.enable(this@MainActivity)
+                    if (applied) {
+                        com.remotedisplay.player.service.KioskLockdown.enterLockTaskIfNeeded(this@MainActivity)
+                    }
+                    Log.i("MainActivity", "enable_kiosk_lockdown -> applied=$applied")
+                }
+                // Ref 35 Stage C: the day-to-day "turn kiosk mode back off" path - distinct
+                // from, and much lighter than, the emergency clearDeviceOwnerApp() debug
+                // trigger. Exits lock task mode first (must happen from this pinned
+                // Activity), then reverses the DPM-level policy.
+                "disable_kiosk_lockdown" -> {
+                    com.remotedisplay.player.service.KioskLockdown.exitLockTaskIfActive(this@MainActivity)
+                    val reversed = com.remotedisplay.player.service.KioskLockdown.disable(this@MainActivity)
+                    Log.i("MainActivity", "disable_kiosk_lockdown -> reversed=$reversed")
                 }
             }
         }

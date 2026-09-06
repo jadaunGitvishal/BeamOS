@@ -132,4 +132,12 @@ class ServerConfig(context: Context) {
             .remove("pending_claim_server_url")
             .apply()
     }
+
+    // Ref 35 Stage C: true once an admin has deliberately turned on USB + kiosk (lock
+    // task) lockdown (service.KioskLockdown.enable()). Persisted so MainActivity re-enters
+    // lock task mode on every launch/reboot while kiosk mode is on - that re-entry is NOT
+    // a fresh automatic activation, only the original enable() call is.
+    var kioskLockdownEnabled: Boolean
+        get() = prefs.getBoolean("kiosk_lockdown_enabled", false)
+        set(value) = prefs.edit().putBoolean("kiosk_lockdown_enabled", value).apply()
 }
