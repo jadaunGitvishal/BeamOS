@@ -51,15 +51,27 @@ module.exports = function setupDashboardSocket(io) {
   dashboardNs.on('connection', async (socket) => {
     // #146: same per-connection fail-fast as the device namespace — a throwing
     // dashboard handler disconnects only that client, never crashes the server.
+    // Must run before ANY socket.on() below — it wraps socket.on itself, so a
+    // listener registered before this call would bypass the protection entirely.
     protectSocket(socket, () => socket.userId);
-    // Note on workspace-switch lifecycle: the switcher (Phase 3 MVP) calls
-    // window.location.reload() after switching, which forces a new socket
-    // connection with fresh JWT claims. So workspace memberships are
-    // re-evaluated at connect time and we don't need to re-evaluate per-emit.
-    const wsIds = await accessibleWorkspaceIds(socket.userId, socket.userRole);
-    for (const wsId of wsIds) socket.join(workspaceRoom(wsId));
-    console.log(`Dashboard client connected: ${socket.id} (user: ${socket.userId}, rooms: ${wsIds.length})`);
 
+    // Ref 35 Stage C follow-up: these listeners used to be registered AFTER the
+    // `await accessibleWorkspaceIds(...)` below. That await is a real DB query, and a
+    // client's 'connect' event fires as soon as the transport handshake completes —
+    // independent of how long this async handler body takes to run. A client that
+    // emits a dashboard:* event immediately on 'connect' could beat the server to
+    // registering these listeners: socket.io has no handler to invoke yet, so the
+    // event (and any ack) is silently dropped with no error, just a timed-out ack.
+    // Reproduced live: with the DB query artificially slowed (simulating a cold
+    // connection-pool member after inactivity, which is what made this bite in real
+    // testing), an immediate-on-connect emit reliably timed out against the old
+    // ordering and reliably succeeds against this one.
+    //
+    // None of these handlers need `wsIds` — they resolve their own permissions via
+    // canActOnDevice() per call — so registration has no real dependency on the
+    // workspace lookup below. Only the room-join genuinely needs it, so that (and
+    // only that) stays after the await. Registration and readiness are different
+    // concerns; conflating them was the bug.
     socket.on('dashboard:request-screenshot', async (data) => {
       const { device_id } = data;
       if (!await canActOnDevice(socket, device_id, 'read')) return;
@@ -125,6 +137,18 @@ module.exports = function setupDashboardSocket(io) {
     socket.on('disconnect', () => {
       console.log(`Dashboard client disconnected: ${socket.id}`);
     });
+
+    // Note on workspace-switch lifecycle: the switcher (Phase 3 MVP) calls
+    // window.location.reload() after switching, which forces a new socket
+    // connection with fresh JWT claims. So workspace memberships are
+    // re-evaluated at connect time and we don't need to re-evaluate per-emit.
+    //
+    // This is the only part of connection setup that genuinely needs
+    // accessibleWorkspaceIds()'s result, so it's the only part still gated on the
+    // await - the listener registrations above no longer wait on it.
+    const wsIds = await accessibleWorkspaceIds(socket.userId, socket.userRole);
+    for (const wsId of wsIds) socket.join(workspaceRoom(wsId));
+    console.log(`Dashboard client connected: ${socket.id} (user: ${socket.userId}, rooms: ${wsIds.length})`);
   });
 
   return dashboardNs;
