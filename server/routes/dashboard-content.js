@@ -139,4 +139,52 @@ router.get(
   }),
 );
 
+// GET /api/dashboard/content/:contentId/plays
+// Ref 50 — the proof-of-play timeline: the INDIVIDUAL play_logs rows behind one
+// content row's aggregate (GET / only ever returns the COUNT/SUM rollup). Scoped
+// to the caller's workspace the same way GET / is (getWorkspaceDeviceSubquery,
+// no platform_admin bypass), joined to the device name, newest-first. Capped at
+// PLAYS_LIMIT because a popular piece of real content accumulates thousands of
+// play events and the timeline UI only shows a recent window.
+const PLAYS_LIMIT = 100;
+
+router.get(
+  "/:contentId/plays",
+  asyncHandler(async (req, res) => {
+    const wsScope = getWorkspaceDeviceSubquery(req);
+    // device_id is unambiguous here (devices has `id`, not `device_id`), so the
+    // shared subquery filter drops in unchanged alongside the JOIN.
+    const rows = await db
+      .prepare(
+        `
+      SELECT pl.id, pl.device_id, d.name AS device_name, pl.content_name,
+             pl.started_at, pl.ended_at, pl.duration_sec, pl.completed,
+             pl.trigger_type
+      FROM play_logs pl
+      JOIN devices d ON d.id = pl.device_id
+      WHERE pl.content_id = ?${wsScope.sql}
+      ORDER BY pl.started_at DESC, pl.id DESC
+      LIMIT ${PLAYS_LIMIT}
+    `,
+      )
+      .all(req.params.contentId, ...wsScope.params);
+
+    res.json({
+      content_id: req.params.contentId,
+      content_name: rows.length ? rows[0].content_name : null,
+      limit: PLAYS_LIMIT,
+      plays: rows.map((r) => ({
+        id: r.id,
+        device_id: r.device_id,
+        device_name: r.device_name,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        duration_sec: r.duration_sec,
+        completed: !!r.completed,
+        trigger_type: r.trigger_type,
+      })),
+    });
+  }),
+);
+
 module.exports = router;

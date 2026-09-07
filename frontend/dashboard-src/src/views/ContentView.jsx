@@ -4,6 +4,7 @@ import { usePeriod } from "../hooks/usePeriod";
 import { apiFetch } from "../lib/api";
 import { n0, cPill, formatDuration, periodWindow, periodLabel } from "../lib/format";
 import StatTile from "../components/StatTile";
+import PlayTimeline from "../components/PlayTimeline";
 
 // Authenticated download, not a plain <a href> - export needs the Bearer
 // token, which only fetch() can attach. Same fetch -> blob -> synthetic-<a>-click
@@ -51,7 +52,18 @@ export default function ContentView() {
     [period],
   );
 
-  const { data: content, error } = useApi(fetcher, { pollMs: 300000, deps: [period] });
+  // 60s to match OverviewView (which surfaces the same play_logs totals) and the
+  // rest of the dashboard's live views — the previous 300000ms (5 min) left this
+  // page showing plainly stale numbers next to a fresh Overview. PlayTimeline
+  // polls at the same cadence, so the whole page stays coherent.
+  const { data: content, error } = useApi(fetcher, { pollMs: 60000, deps: [period] });
+
+  // Ref 50: the content row whose proof-of-play timeline is open. Cleared on a
+  // period change since the row list itself is re-derived for the new window.
+  const [selected, setSelected] = useState(null);
+  useEffect(() => {
+    setSelected(null);
+  }, [period]);
 
   if (error) {
     return (
@@ -128,8 +140,25 @@ export default function ContentView() {
                 </tr>
               </thead>
               <tbody>
-                {content.map((c, i) => (
-                  <tr key={c.content_id || i}>
+                {content.map((c, i) => {
+                  const clickable = !!c.content_id;
+                  const isSel = clickable && selected?.id === c.content_id;
+                  return (
+                  <tr
+                    key={c.content_id || i}
+                    className={clickable ? "click" : undefined}
+                    style={isSel ? { background: "#EEF2F8" } : undefined}
+                    onClick={
+                      clickable
+                        ? () =>
+                            setSelected((cur) =>
+                              cur?.id === c.content_id
+                                ? null
+                                : { id: c.content_id, name: c.content_name || c.content_id },
+                            )
+                        : undefined
+                    }
+                  >
                     <td className="trunc" style={{ fontWeight: 500 }}>
                       {c.content_name || c.content_id || "—"}
                     </td>
@@ -144,7 +173,8 @@ export default function ContentView() {
                     </td>
                     <td className="r mono">{formatDuration(c.total_seconds)}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           ) : (
@@ -152,6 +182,8 @@ export default function ContentView() {
           )}
         </div>
       </div>
+
+      {selected && <PlayTimeline content={selected} onClose={() => setSelected(null)} />}
     </>
   );
 }
