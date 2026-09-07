@@ -95,7 +95,7 @@ router.get(
   }),
 );
 
-// GET /:id/members/export?format=csv|xlsx|pdf - same membership data as
+// GET /:id/members/export?format=csv|xlsx|pdf|json - same membership data as
 // GET /:id/members, same access tier (any org member may read/export the
 // roster), rendered as a downloadable file via the shared report-export lib.
 router.get(
@@ -117,7 +117,7 @@ router.get(
       )
       .all(org.id);
 
-    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+    const format = ["csv", "xlsx", "pdf", "json"].includes(req.query.format)
       ? req.query.format
       : "csv";
 
@@ -133,6 +133,11 @@ router.get(
 
     const date = new Date().toISOString().slice(0, 10);
     const filenameBase = `org-members-${org.id}-${date}`;
+
+    if (format === "json") {
+      res.json({ columns: headers, rows: dataRows });
+      return;
+    }
 
     if (format === "xlsx") {
       const buffer = await renderXlsx("Org Members", headers, dataRows);

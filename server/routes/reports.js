@@ -98,7 +98,7 @@ router.get(
 
     const rows = await db.prepare(sql).all(...params);
 
-    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+    const format = ["csv", "xlsx", "pdf", "json"].includes(req.query.format)
       ? req.query.format
       : "csv";
 
@@ -108,6 +108,11 @@ router.get(
       const ended = r.ended_at ? new Date(r.ended_at * 1000).toISOString() : "";
       return [r.device_name, r.content_name, started, ended, r.duration_sec || "", r.completed ? "Yes" : "No"];
     });
+
+    if (format === "json") {
+      res.json({ columns: headers, rows: dataRows });
+      return;
+    }
 
     if (format === "xlsx") {
       const buffer = await renderXlsx("Proof of Play", headers, dataRows);

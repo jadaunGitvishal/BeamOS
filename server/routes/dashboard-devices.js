@@ -139,7 +139,7 @@ router.get(
   `;
     const devices = await db.prepare(sql).all(...scope.params);
 
-    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+    const format = ["csv", "xlsx", "pdf", "json"].includes(req.query.format)
       ? req.query.format
       : "csv";
 
@@ -175,6 +175,11 @@ router.get(
     ]);
 
     const date = new Date().toISOString().slice(0, 10);
+
+    if (format === "json") {
+      res.json({ columns: headers, rows: dataRows });
+      return;
+    }
 
     if (format === "xlsx") {
       const buffer = await renderXlsx("Devices", headers, dataRows);

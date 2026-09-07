@@ -114,7 +114,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(await db.prepare(sql).all(...params));
 }));
 
-// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// GET /export?format=csv|xlsx|pdf|json - mirrors GET /'s exact scoping
 // (s.workspace_id = ?) and the same optional device_id/group_id/start/end
 // filters, using the identical JOIN query as the source (just format
 // branching added on top).
@@ -154,7 +154,7 @@ router.get('/export', asyncHandler(async (req, res) => {
     schedules = await db.prepare(sql).all(...params);
   }
 
-  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+  const format = ['csv', 'xlsx', 'pdf', 'json'].includes(req.query.format) ? req.query.format : 'csv';
 
   const headers = ['Content Name', 'Widget Name', 'Playlist Name', 'Group Name', 'Start Time', 'End Time', 'Device ID', 'Group ID', 'Created At (UTC)'];
   const dataRows = schedules.map((s) => [
@@ -171,6 +171,11 @@ router.get('/export', asyncHandler(async (req, res) => {
 
   const date = new Date().toISOString().slice(0, 10);
   const filenameBase = `schedules-${date}`;
+
+  if (format === 'json') {
+    res.json({ columns: headers, rows: dataRows });
+    return;
+  }
 
   if (format === 'xlsx') {
     const buffer = await renderXlsx('Schedules', headers, dataRows);

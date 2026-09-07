@@ -119,7 +119,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(widgets);
 }));
 
-// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// GET /export?format=csv|xlsx|pdf|json - mirrors GET /'s exact scoping
 // (workspace_id = ? OR workspace_id IS NULL - own workspace's widgets plus
 // platform-template rows shared with every workspace) and its "no workspace
 // context" behavior (empty/headers-only export rather than an error).
@@ -131,7 +131,7 @@ router.get('/export', asyncHandler(async (req, res) => {
     ).all(req.workspaceId, EXPORT_ROW_CAP);
   }
 
-  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+  const format = ['csv', 'xlsx', 'pdf', 'json'].includes(req.query.format) ? req.query.format : 'csv';
 
   const headers = ['Name', 'Widget Type', 'Created At (UTC)', 'Shared Template'];
   const dataRows = widgets.map((w) => [
@@ -143,6 +143,11 @@ router.get('/export', asyncHandler(async (req, res) => {
 
   const date = new Date().toISOString().slice(0, 10);
   const filenameBase = `widgets-${date}`;
+
+  if (format === 'json') {
+    res.json({ columns: headers, rows: dataRows });
+    return;
+  }
 
   if (format === 'xlsx') {
     const buffer = await renderXlsx('Widgets', headers, dataRows);

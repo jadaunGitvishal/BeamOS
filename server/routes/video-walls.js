@@ -65,7 +65,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(walls);
 }));
 
-// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// GET /export?format=csv|xlsx|pdf|json - mirrors GET /'s exact scoping
 // (workspace_id = ? - no shared-template exception for video walls) plus a
 // device-count aggregation equivalent to GET /'s per-wall w.devices array.
 router.get('/export', asyncHandler(async (req, res) => {
@@ -82,7 +82,7 @@ router.get('/export', asyncHandler(async (req, res) => {
     `).all(req.workspaceId, EXPORT_ROW_CAP);
   }
 
-  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+  const format = ['csv', 'xlsx', 'pdf', 'json'].includes(req.query.format) ? req.query.format : 'csv';
 
   const headers = ['Name', 'Device Count', 'Grid Dimensions', 'Created At (UTC)'];
   const dataRows = walls.map((w) => [
@@ -94,6 +94,11 @@ router.get('/export', asyncHandler(async (req, res) => {
 
   const date = new Date().toISOString().slice(0, 10);
   const filenameBase = `video-walls-${date}`;
+
+  if (format === 'json') {
+    res.json({ columns: headers, rows: dataRows });
+    return;
+  }
 
   if (format === 'xlsx') {
     const buffer = await renderXlsx('Video Walls', headers, dataRows);

@@ -93,7 +93,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(content);
 }));
 
-// GET /export?format=csv|xlsx|pdf - same scoping as GET / (workspace_id = ?
+// GET /export?format=csv|xlsx|pdf|json - same scoping as GET / (workspace_id = ?
 // OR workspace_id IS NULL - own workspace's content plus platform-template
 // rows shared with every workspace; intentional, not a bug, see GET / above)
 // plus the same optional folder/folder_id filters. Mirrors GET /'s "no
@@ -120,7 +120,7 @@ router.get('/export', asyncHandler(async (req, res) => {
     content = await db.prepare(sql).all(...params);
   }
 
-  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+  const format = ['csv', 'xlsx', 'pdf', 'json'].includes(req.query.format) ? req.query.format : 'csv';
 
   const headers = ['Filename', 'Folder', 'MIME Type', 'File Size', 'Duration (sec)', 'Width', 'Height', 'Remote URL', 'Created At (UTC)', 'Shared Template'];
   const dataRows = content.map((c) => [
@@ -138,6 +138,11 @@ router.get('/export', asyncHandler(async (req, res) => {
 
   const date = new Date().toISOString().slice(0, 10);
   const filenameBase = `content-library-${date}`;
+
+  if (format === 'json') {
+    res.json({ columns: headers, rows: dataRows });
+    return;
+  }
 
   if (format === 'xlsx') {
     const buffer = await renderXlsx('Content Library', headers, dataRows);

@@ -45,7 +45,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(layouts);
 }));
 
-// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping, including
+// GET /export?format=csv|xlsx|pdf|json - mirrors GET /'s exact scoping, including
 // its 3-way branch: ?templates=true (or no workspace context) -> templates
 // only; otherwise workspace_id = ? OR is_template = 1. Zone data is
 // summarized as a count (Zone Count column) rather than exported row-by-row -
@@ -77,7 +77,7 @@ router.get('/export', asyncHandler(async (req, res) => {
     `).all(req.workspaceId, EXPORT_ROW_CAP);
   }
 
-  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+  const format = ['csv', 'xlsx', 'pdf', 'json'].includes(req.query.format) ? req.query.format : 'csv';
 
   const headers = ['Name', 'Template Category', 'Zone Count', 'Is Template', 'Created At (UTC)'];
   const dataRows = layouts.map((l) => [
@@ -90,6 +90,11 @@ router.get('/export', asyncHandler(async (req, res) => {
 
   const date = new Date().toISOString().slice(0, 10);
   const filenameBase = `layouts-${date}`;
+
+  if (format === 'json') {
+    res.json({ columns: headers, rows: dataRows });
+    return;
+  }
 
   if (format === 'xlsx') {
     const buffer = await renderXlsx('Layouts', headers, dataRows);

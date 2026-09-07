@@ -193,7 +193,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(playlists);
 }));
 
-// GET /export?format=csv|xlsx|pdf - mirrors GET /'s exact scoping
+// GET /export?format=csv|xlsx|pdf|json - mirrors GET /'s exact scoping
 // (p.workspace_id = ? - no shared/platform-template exception for playlists)
 // and source aggregation query, just adds format branching on top.
 router.get('/export', asyncHandler(async (req, res) => {
@@ -212,7 +212,7 @@ router.get('/export', asyncHandler(async (req, res) => {
     `).all(req.workspaceId, EXPORT_ROW_CAP);
   }
 
-  const format = ['csv', 'xlsx', 'pdf'].includes(req.query.format) ? req.query.format : 'csv';
+  const format = ['csv', 'xlsx', 'pdf', 'json'].includes(req.query.format) ? req.query.format : 'csv';
 
   const headers = ['Name', 'Description', 'Item Count', 'Display Count', 'Zoned', 'Created At (UTC)'];
   // description is TEXT and nullable - auto-generated playlists (device-groups.js,
@@ -229,6 +229,11 @@ router.get('/export', asyncHandler(async (req, res) => {
 
   const date = new Date().toISOString().slice(0, 10);
   const filenameBase = `playlists-${date}`;
+
+  if (format === 'json') {
+    res.json({ columns: headers, rows: dataRows });
+    return;
+  }
 
   if (format === 'xlsx') {
     const buffer = await renderXlsx('Playlists', headers, dataRows);

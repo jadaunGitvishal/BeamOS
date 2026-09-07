@@ -257,7 +257,7 @@ router.get(
   }),
 );
 
-// GET /:id/members/export?format=csv|xlsx|pdf - same membership data (direct
+// GET /:id/members/export?format=csv|xlsx|pdf|json - same membership data (direct
 // + via_org) and same access tier as GET /:id/members, rendered as a
 // downloadable file via the shared report-export lib.
 router.get(
@@ -267,7 +267,7 @@ router.get(
     if (!ws) return;
     const members = await listMembers(ws.id, ws.organization_id);
 
-    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+    const format = ["csv", "xlsx", "pdf", "json"].includes(req.query.format)
       ? req.query.format
       : "csv";
 
@@ -283,6 +283,11 @@ router.get(
 
     const date = new Date().toISOString().slice(0, 10);
     const filenameBase = `workspace-members-${ws.id}-${date}`;
+
+    if (format === "json") {
+      res.json({ columns: headers, rows: dataRows });
+      return;
+    }
 
     if (format === "xlsx") {
       const buffer = await renderXlsx("Workspace Members", headers, dataRows);

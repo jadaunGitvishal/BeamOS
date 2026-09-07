@@ -26,7 +26,7 @@ router.get("/", async (req, res) => {
   res.json(activity);
 });
 
-// GET /export?format=csv|xlsx|pdf - same scoping as GET / (isAdmin ? all
+// GET /export?format=csv|xlsx|pdf|json - same scoping as GET / (isAdmin ? all
 // users : caller-only, optional device_id filter), rendered as a downloadable
 // file via the shared report-export lib. Capped at 10000 rows - unlike the
 // members exports this scopes over an unbounded, ever-growing log rather
@@ -45,7 +45,7 @@ router.get(
       offset: 0,
     });
 
-    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+    const format = ["csv", "xlsx", "pdf", "json"].includes(req.query.format)
       ? req.query.format
       : "csv";
 
@@ -63,6 +63,11 @@ router.get(
 
     const date = new Date().toISOString().slice(0, 10);
     const filenameBase = `activity-log-${date}`;
+
+    if (format === "json") {
+      res.json({ columns: headers, rows: dataRows });
+      return;
+    }
 
     if (format === "xlsx") {
       const buffer = await renderXlsx("Activity Log", headers, dataRows);

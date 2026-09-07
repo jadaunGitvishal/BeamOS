@@ -65,7 +65,7 @@ router.get(
   }),
 );
 
-// GET /api/dashboard/content/export?format=csv|xlsx|pdf&start=&end=
+// GET /api/dashboard/content/export?format=csv|xlsx|pdf|json&start=&end=
 // Same scoping + aggregation as GET / (queryContentAggregation), just format
 // branching. Mirrors the CSV/XLSX/PDF export on dashboard-devices.js.
 //
@@ -84,7 +84,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const { content } = await queryContentAggregation(req);
 
-    const format = ["csv", "xlsx", "pdf"].includes(req.query.format)
+    const format = ["csv", "xlsx", "pdf", "json"].includes(req.query.format)
       ? req.query.format
       : "csv";
 
@@ -104,6 +104,11 @@ router.get(
     ]);
 
     const date = new Date().toISOString().slice(0, 10);
+
+    if (format === "json") {
+      res.json({ columns: headers, rows: dataRows });
+      return;
+    }
 
     if (format === "xlsx") {
       const buffer = await renderXlsx("Content", headers, dataRows);
