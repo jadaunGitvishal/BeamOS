@@ -13,6 +13,7 @@ import TransmissionStrip from "../components/TransmissionStrip";
 import { DetailScreenshot } from "../components/DeviceScreenshot";
 import AuditTrail from "../components/AuditTrail";
 import StatusHeatmap from "../components/StatusHeatmap";
+import FieldVisits from "../components/FieldVisits";
 
 export default function DeviceDetailView() {
   const { id } = useParams();
@@ -34,8 +35,11 @@ export default function DeviceDetailView() {
         if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
         return null;
       };
-      const [devices, history, uptimeRows, availRows, trail, heatmap] = await Promise.all([
-        apiFetch("/api/dashboard/devices", { signal }),
+      // devices first — the field-visit list route is keyed by the device's
+      // workspace_id, which only the /api/dashboard/devices row carries.
+      const devices = await apiFetch("/api/dashboard/devices", { signal });
+      const wsId = devices.find((x) => x.id === id)?.workspace_id;
+      const [history, uptimeRows, availRows, trail, heatmap, visits] = await Promise.all([
         apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/status-history?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`, {
           signal,
         }),
@@ -45,8 +49,14 @@ export default function DeviceDetailView() {
         apiFetch(`/api/dashboard/reports/availability?start=${isoDateOnly(start)}&end=${isoDateOnly(end)}`, { signal }),
         apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/audit-trail?limit=60`, { signal }).catch(softFail),
         apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/status-heatmap?days=7`, { signal }).catch(softFail),
+        // Ref 43 Stage C: field-visit history. Any workspace member can read
+        // (Stage A GET routes are canAccessWorkspace-scoped); soft-fail so an
+        // unexpected error never blanks the rest of the page.
+        wsId
+          ? apiFetch(`/api/workspaces/${encodeURIComponent(wsId)}/field-visits?device_id=${encodeURIComponent(id)}`, { signal }).catch(softFail)
+          : Promise.resolve(null),
       ]);
-      return { devices, history, uptimeRows, availRows, trail, heatmap, start, end };
+      return { devices, history, uptimeRows, availRows, trail, heatmap, visits, wsId, start, end };
     },
     [period, id],
   );
@@ -71,7 +81,7 @@ export default function DeviceDetailView() {
   if (!device) return <h1>Device not found</h1>;
 
   const d = device;
-  const { history, uptimeRows, availRows, trail, heatmap, start, end } = data;
+  const { history, uptimeRows, availRows, trail, heatmap, visits, wsId, start, end } = data;
   const uptimeRow = uptimeRows[0];
   const availRow = availRows.find((a) => a.device_id === id);
   const segs = buildStatusStrip(history, start.getTime(), end.getTime());
@@ -198,6 +208,14 @@ export default function DeviceDetailView() {
           </div>
           <AuditTrail trail={trail} />
         </div>
+      </div>
+
+      <div className="card mt16">
+        <div className="ch">
+          <h2>Field visits</h2>
+          <span className="hint">{visits ? `${visits.length} recorded` : "unavailable"}</span>
+        </div>
+        <FieldVisits visits={visits} workspaceId={wsId || d.workspace_id} />
       </div>
     </>
   );
