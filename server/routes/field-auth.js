@@ -29,20 +29,15 @@ const router = express.Router();
 const { db } = require('../db/database');
 const { generateToken } = require('../middleware/auth');
 const { asyncHandler } = require('../lib/async-handler');
+// Single source of truth for phone canonicalization — the SAME function the
+// phone-write path (routes/auth.js PUT /me) uses before storing, so a number
+// typed any way (bare 10-digit, "+91…", "0…", spaces) resolves to the one
+// stored E.164 value. See lib/field-phone.js.
+const { normalizePhone } = require('../lib/field-phone');
 
 // PLACEHOLDER: the one code every field login accepts. Delete when the real
 // SMS-backed flow lands.
 const DUMMY_OTP_CODE = '123456';
-
-// Normalize a submitted phone to the shape stored in users.phone: strip spaces,
-// dashes, dots and parentheses; keep a single leading '+'. Returns null if the
-// result isn't a plausible E.164-ish number (7-15 digits, optional leading '+').
-function normalizePhone(raw) {
-  if (typeof raw !== 'string') return null;
-  let s = raw.trim().replace(/[\s().-]/g, '');
-  if (!/^\+?[1-9]\d{6,14}$/.test(s)) return null;
-  return s;
-}
 
 async function findUserByPhone(phone) {
   return db

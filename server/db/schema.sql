@@ -74,11 +74,12 @@ CREATE TABLE IF NOT EXISTS users (
     auth_provider   VARCHAR(50) NOT NULL DEFAULT 'local',
     provider_id     VARCHAR(255),
     avatar_url      VARCHAR(500),
-    -- Ref 43 (Field Visit Inspections): E.164-ish phone number, used only by the
-    -- placeholder field-technician OTP login (routes/field-auth.js) to look up
-    -- the user. Nullable; UNIQUE allows any number of NULLs in MySQL (and SQLite),
-    -- so this is "unique only where set". No format enforced at the DB layer -
-    -- the route normalizes/validates.
+    -- Ref 43 (Field Visit Inspections): E.164 phone number for the placeholder
+    -- field-technician OTP login. ALWAYS stored canonicalized ("+<cc><national>",
+    -- lib/field-phone.js) - the write path (auth.js PUT /me) and the login lookup
+    -- (routes/field-auth.js) run the same normalizer, so a number typed any way
+    -- (bare 10-digit, "0…", "+91 …") resolves to this one stored value.
+    -- Nullable; UNIQUE allows any number of NULLs, so "unique only where set".
     phone           VARCHAR(32) UNIQUE,
     role            VARCHAR(50) NOT NULL DEFAULT 'user',
     plan_id         VARCHAR(64) DEFAULT 'free',

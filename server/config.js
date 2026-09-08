@@ -337,6 +337,14 @@ module.exports = {
   // meaningful to a recipient who knows their instance host).
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, ""),
 
+  // Ref 43 (Field Visit Inspections): default country calling code that the
+  // field-technician OTP login (lib/field-phone.js) prepends to a phone number
+  // typed WITHOUT a "+" / country code. Digits only, no "+". Defaults to "91"
+  // (India) - this is an India-facing tool. NOTE: the client mirror
+  // (frontend/field-tech-src/src/lib/phone.js) hard-codes the same default
+  // because it can't read server env; retarget both together.
+  fieldAuthDefaultCC: (process.env.FIELD_AUTH_DEFAULT_CC || "91").replace(/\D/g, ""),
+
   // Phase 2 Stage A — device audit trail (lib/device-audit.js).
   // Thresholds for the ON-READ Wi-Fi / storage "crossed below" events derived
   // from consecutive device_telemetry rows. weakWifiRssiDbm matches the weak-

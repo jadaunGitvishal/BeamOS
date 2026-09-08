@@ -32,7 +32,7 @@ export default function LoginScreen({ onAuthed }) {
     if (busy) return;
     const normalized = normalizePhone(phone);
     if (!normalized) {
-      setError("Enter a valid phone number (7–15 digits, optional leading +).");
+      setError("Enter a valid phone number — your 10-digit number, or with country code (+91…).");
       return;
     }
     setError("");

@@ -27,6 +27,10 @@ const {
 } = require("../lib/user-deletion");
 const config = require("../config");
 const { asyncHandler } = require("../lib/async-handler");
+// Ref 43: canonicalize a technician's phone to the SAME E.164 form the
+// field-tech OTP login looks up (lib/field-phone.js is the single source).
+const { normalizePhone } = require("../lib/field-phone");
+const { isDuplicateKeyError } = require("../lib/outage-format");
 
 // Phase 2.1: find or create the user's default org+workspace. Returns the
 // workspace_id to embed in the JWT. Idempotent: if the user already has
@@ -838,7 +842,7 @@ router.post("/switch-workspace", requireAuth, asyncHandler(async (req, res) => {
 
 // Update current user
 router.put("/me", requireAuth, asyncHandler(async (req, res) => {
-  const { name, password, current_password, email_alerts } = req.body;
+  const { name, password, current_password, email_alerts, phone } = req.body;
   if (name) {
     await db.prepare(
       "UPDATE users SET name = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
@@ -848,6 +852,29 @@ router.put("/me", requireAuth, asyncHandler(async (req, res) => {
     await db.prepare(
       "UPDATE users SET email_alerts = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(email_alerts ? 1 : 0, req.user.id);
+  }
+  // Ref 43: phone for the field-technician OTP login. Stored canonicalized
+  // (lib/field-phone.js) so it always matches whatever format the login screen
+  // sends. "" / null clears it. users.phone is UNIQUE -> 409 on collision.
+  if (phone !== undefined) {
+    if (phone === null || String(phone).trim() === "") {
+      await db.prepare(
+        "UPDATE users SET phone = NULL, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
+      ).run(req.user.id);
+    } else {
+      const canonical = normalizePhone(String(phone));
+      if (!canonical) return res.status(400).json({ error: "Enter a valid phone number" });
+      try {
+        await db.prepare(
+          "UPDATE users SET phone = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
+        ).run(canonical, req.user.id);
+      } catch (e) {
+        if (isDuplicateKeyError(e)) {
+          return res.status(409).json({ error: "That phone number is already used by another account" });
+        }
+        throw e;
+      }
+    }
   }
   if (password) {
     if (password.length < 8)
@@ -880,7 +907,7 @@ router.put("/me", requireAuth, asyncHandler(async (req, res) => {
   }
   const user = await db
     .prepare(
-      "SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?",
+      "SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password, phone FROM users WHERE id = ?",
     )
     .get(req.user.id);
   res.json(user);
