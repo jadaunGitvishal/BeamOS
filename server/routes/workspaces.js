@@ -1,8 +1,15 @@
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
+const path = require("path");
+const fs = require("fs");
+const config = require("../config");
 const { db } = require("../db/database");
-const { canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canManageOrgRegions } = require("../lib/permissions");
+const { canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canManageOrgRegions, canLogFieldVisit } = require("../lib/permissions");
+const fieldVisitUpload = require("../middleware/fieldVisitUpload");
+const { sanitizeString } = require("../middleware/sanitize");
+const { sanitizeCoords } = require("../lib/geo");
+const { isDuplicateKeyError } = require("../lib/outage-format");
 const {
   ticketResponseStatus,
   ticketSlaDueAt,
@@ -1240,6 +1247,482 @@ router.delete(
     );
 
     res.json({ success: true });
+  }),
+);
+
+// ==================== Field Visit Inspections (Ref 43 Stage A) ====================
+//
+// A technician's on-site visit to a device: POST to start (auto-snapshots the
+// device's latest telemetry), PATCH to fill in the collected details + mark
+// complete, POST .../photos to attach geotagged photos.
+//
+// Access (read AND write): lib/permissions.canLogFieldVisit - EITHER
+// field_technician / org_admin / org_owner on the workspace's PARENT ORG (org-
+// wide, works across every workspace with no per-workspace membership), OR a
+// regular workspace_editor+ of THIS workspace. This router has no resolveTenancy;
+// the check evaluates against the URL-param workspace. Every mutation writes
+// activity_log.
+//
+// visit_type / device_status are validated for length only (open-ended VARCHAR,
+// same as tickets.owner_category / device_events.event_type).
+
+const FV_VISIT_TYPE_MAX = 50;
+const FV_STR_MAX = 255; // serial_number / mac_address / device_model / sim_network_info
+const FV_DEVICE_STATUS_MAX = 50;
+const FV_REMARKS_MAX = 10000;
+const FV_PHOTO_CATEGORY_MAX = 100;
+const FV_CLIENT_UUID_MAX = 64;
+const FV_STATUSES = ["in_progress", "completed"];
+// A GPS "accuracy" beyond this (metres) isn't a fix, it's a placeholder/garbage.
+const FV_GPS_ACCURACY_MAX_M = 100000;
+const FV_LIST_CAP = 500;
+
+const FV_SELECT = `
+  SELECT fv.*, u.email AS technician_email, d.name AS device_name
+  FROM field_visits fv
+  LEFT JOIN users u ON u.id = fv.technician_user_id
+  LEFT JOIN devices d ON d.id = fv.device_id
+`;
+
+// Snapshot the device's most recent telemetry row into a plain object for the
+// field_visits.technical_metrics JSON column. null when the device has never
+// reported telemetry.
+async function snapshotDeviceTelemetry(deviceId) {
+  const t = await db
+    .prepare(
+      `SELECT battery_level, battery_charging, storage_free_mb, storage_total_mb,
+              ram_free_mb, ram_total_mb, cpu_usage, wifi_ssid, wifi_rssi,
+              uptime_seconds, reported_at
+       FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT 1`,
+    )
+    .get(deviceId);
+  if (!t) return null;
+  return {
+    battery_level: t.battery_level ?? null,
+    battery_charging: t.battery_charging == null ? null : !!t.battery_charging,
+    storage_free_mb: t.storage_free_mb ?? null,
+    storage_total_mb: t.storage_total_mb ?? null,
+    ram_free_mb: t.ram_free_mb ?? null,
+    ram_total_mb: t.ram_total_mb ?? null,
+    cpu_usage: t.cpu_usage ?? null,
+    wifi_ssid: t.wifi_ssid ?? null,
+    wifi_rssi: t.wifi_rssi ?? null,
+    uptime_seconds: t.uptime_seconds ?? null,
+    telemetry_reported_at: t.reported_at ?? null,
+    snapshot_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+function fieldVisitPhotoRow(p) {
+  return {
+    id: p.id,
+    visit_id: p.visit_id,
+    photo_category: p.photo_category ?? null,
+    latitude: p.latitude,
+    longitude: p.longitude,
+    gps_accuracy_meters: p.gps_accuracy_meters,
+    captured_at: p.captured_at,
+  };
+}
+
+function fieldVisitRow(v, photos) {
+  let metrics = null;
+  if (v.technical_metrics) {
+    try {
+      metrics = JSON.parse(v.technical_metrics);
+    } catch {
+      metrics = null;
+    }
+  }
+  const row = {
+    id: v.id,
+    device_id: v.device_id,
+    device_name: v.device_name ?? null,
+    workspace_id: v.workspace_id,
+    technician_user_id: v.technician_user_id ?? null,
+    technician_email: v.technician_email ?? null,
+    client_visit_uuid: v.client_visit_uuid ?? null,
+    visit_type: v.visit_type,
+    serial_number: v.serial_number ?? null,
+    mac_address: v.mac_address ?? null,
+    device_model: v.device_model ?? null,
+    sim_network_info: v.sim_network_info ?? null,
+    device_status: v.device_status ?? null,
+    remarks: v.remarks ?? null,
+    technical_metrics: metrics,
+    status: v.status,
+    created_at: v.created_at,
+    completed_at: v.completed_at ?? null,
+  };
+  if (photos) row.photos = photos.map(fieldVisitPhotoRow);
+  return row;
+}
+
+// 404 unknown workspace, 403 unless caller can log field visits here (write
+// gate). Stamps req.workspaceId for audit attribution. Used by the mutating
+// field-visit routes (POST / PATCH / photo upload).
+async function loadWorkspaceForFieldVisit(req, res) {
+  const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(req.params.id);
+  if (!ws) {
+    res.status(404).json({ error: "Workspace not found" });
+    return null;
+  }
+  if (!(await canLogFieldVisit(db, req.user, ws))) {
+    res.status(403).json({ error: "Field-visit access required for this workspace" });
+    return null;
+  }
+  req.workspaceId = ws.id;
+  return ws;
+}
+
+// Read gate for the GET field-visit routes: anyone who can LOG a visit here, OR
+// any ordinary workspace member (workspace_viewer+) - inspection history is
+// read-only reference material, same tier as the tickets / activity views.
+async function loadWorkspaceForFieldVisitRead(req, res) {
+  const ws = await db.prepare("SELECT * FROM workspaces WHERE id = ?").get(req.params.id);
+  if (!ws) {
+    res.status(404).json({ error: "Workspace not found" });
+    return null;
+  }
+  if (!(await canLogFieldVisit(db, req.user, ws)) && !(await canAccessWorkspace(db, req.user, ws))) {
+    res.status(403).json({ error: "Field-visit access required for this workspace" });
+    return null;
+  }
+  req.workspaceId = ws.id;
+  return ws;
+}
+
+// Coerce a multipart/JSON value to a finite number in [min, max], else null.
+// Treats '', null, undefined, booleans and non-numeric strings as null (a
+// missing GPS field must fail validation, not silently become 0).
+function fvFiniteInRange(v, min, max) {
+  if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return null;
+  if (n < min || n > max) return null;
+  return n;
+}
+
+function fvTrimOrNull(v, max) {
+  if (v === undefined || v === null || v === "") return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+// POST /:id/field-visits - start a visit. Body: { device_id, visit_type,
+// client_visit_uuid? }. Auto-snapshots the device's current telemetry.
+router.post(
+  "/:id/field-visits",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForFieldVisit(req, res);
+    if (!ws) return;
+
+    const deviceId = fvTrimOrNull(req.body?.device_id, 64);
+    if (!deviceId) return res.status(400).json({ error: "device_id is required" });
+
+    const visitType = fvTrimOrNull(req.body?.visit_type, FV_VISIT_TYPE_MAX);
+    if (!visitType) return res.status(400).json({ error: "visit_type is required" });
+    if (String(req.body.visit_type).trim().length > FV_VISIT_TYPE_MAX) {
+      return res.status(400).json({ error: `visit_type must be ${FV_VISIT_TYPE_MAX} characters or fewer` });
+    }
+
+    const device = await db.prepare("SELECT id, workspace_id FROM devices WHERE id = ?").get(deviceId);
+    if (!device) return res.status(404).json({ error: "Device not found" });
+    if (device.workspace_id !== ws.id) {
+      return res.status(400).json({ error: "Device is not in this workspace" });
+    }
+
+    // Idempotency: a client-generated UUID, unique-constrained (same pattern as
+    // play_logs.session_id). A retried "start visit" returns the existing row
+    // instead of creating a duplicate.
+    let clientUuid = req.body?.client_visit_uuid;
+    if (clientUuid !== undefined && clientUuid !== null && clientUuid !== "") {
+      clientUuid = String(clientUuid).trim();
+      if (clientUuid.length > FV_CLIENT_UUID_MAX) {
+        return res.status(400).json({ error: `client_visit_uuid must be ${FV_CLIENT_UUID_MAX} characters or fewer` });
+      }
+      const existing = await db.prepare(`${FV_SELECT} WHERE fv.client_visit_uuid = ?`).get(clientUuid);
+      if (existing) {
+        if (existing.workspace_id !== ws.id) {
+          return res.status(409).json({ error: "client_visit_uuid already used for another workspace" });
+        }
+        return res.status(200).json(fieldVisitRow(existing));
+      }
+    } else {
+      clientUuid = null;
+    }
+
+    const metrics = await snapshotDeviceTelemetry(deviceId);
+    const id = crypto.randomUUID();
+    try {
+      await db
+        .prepare(
+          `INSERT INTO field_visits
+             (id, device_id, workspace_id, technician_user_id, client_visit_uuid,
+              visit_type, technical_metrics, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress')`,
+        )
+        .run(id, deviceId, ws.id, req.user.id, clientUuid, visitType, metrics ? JSON.stringify(metrics) : null);
+    } catch (e) {
+      // Lost an idempotency race with a concurrent identical POST - return the
+      // row the winner inserted.
+      if (isDuplicateKeyError(e) && clientUuid) {
+        const winner = await db.prepare(`${FV_SELECT} WHERE fv.client_visit_uuid = ?`).get(clientUuid);
+        if (winner) return res.status(200).json(fieldVisitRow(winner));
+      }
+      throw e;
+    }
+
+    logActivity(
+      req.user.id,
+      "field_visit_started",
+      `workspace: ${ws.name} (${ws.id}), device: ${deviceId}, type: ${visitType}`,
+      deviceId,
+      getClientIp(req),
+      ws.id,
+    );
+
+    const row = await db.prepare(`${FV_SELECT} WHERE fv.id = ?`).get(id);
+    res.status(201).json(fieldVisitRow(row));
+  }),
+);
+
+// GET /:id/field-visits?device_id=&status=&limit=&offset= - list visits.
+router.get(
+  "/:id/field-visits",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForFieldVisitRead(req, res);
+    if (!ws) return;
+
+    const filters = ["fv.workspace_id = ?"];
+    const params = [ws.id];
+    if (req.query.device_id) {
+      filters.push("fv.device_id = ?");
+      params.push(String(req.query.device_id));
+    }
+    if (req.query.status) {
+      if (!FV_STATUSES.includes(String(req.query.status))) {
+        return res.status(400).json({ error: `status must be one of: ${FV_STATUSES.join(", ")}` });
+      }
+      filters.push("fv.status = ?");
+      params.push(String(req.query.status));
+    }
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, FV_LIST_CAP);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const rows = await db
+      .prepare(
+        `${FV_SELECT} WHERE ${filters.join(" AND ")} ORDER BY fv.created_at DESC, fv.id DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset);
+    res.json(rows.map((r) => fieldVisitRow(r)));
+  }),
+);
+
+// GET /:id/field-visits/:visitId - single visit + its photos.
+router.get(
+  "/:id/field-visits/:visitId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForFieldVisitRead(req, res);
+    if (!ws) return;
+    const visit = await db.prepare(`${FV_SELECT} WHERE fv.id = ? AND fv.workspace_id = ?`).get(req.params.visitId, ws.id);
+    if (!visit) return res.status(404).json({ error: "Field visit not found" });
+    const photos = await db
+      .prepare("SELECT * FROM field_visit_photos WHERE visit_id = ? ORDER BY captured_at ASC, id ASC")
+      .all(visit.id);
+    res.json(fieldVisitRow(visit, photos));
+  }),
+);
+
+// PATCH /:id/field-visits/:visitId - update collected details / mark complete.
+router.patch(
+  "/:id/field-visits/:visitId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForFieldVisit(req, res);
+    if (!ws) return;
+    const visit = await db.prepare("SELECT * FROM field_visits WHERE id = ? AND workspace_id = ?").get(req.params.visitId, ws.id);
+    if (!visit) return res.status(404).json({ error: "Field visit not found" });
+
+    const updates = [];
+    const values = [];
+    const changed = [];
+
+    const stringFields = [
+      ["serial_number", FV_STR_MAX],
+      ["mac_address", FV_STR_MAX],
+      ["device_model", FV_STR_MAX],
+      ["sim_network_info", FV_STR_MAX],
+      ["device_status", FV_DEVICE_STATUS_MAX],
+      ["remarks", FV_REMARKS_MAX],
+    ];
+    for (const [field, max] of stringFields) {
+      if (!(field in req.body)) continue;
+      const raw = req.body[field];
+      if (raw !== null && raw !== undefined && String(raw).length > max) {
+        return res.status(400).json({ error: `${field} must be ${max} characters or fewer` });
+      }
+      const val = raw === null || raw === undefined || raw === "" ? null : String(raw);
+      updates.push(`${field} = ?`);
+      values.push(val);
+      changed.push(field);
+    }
+
+    if ("visit_type" in req.body) {
+      const vt = fvTrimOrNull(req.body.visit_type, FV_VISIT_TYPE_MAX);
+      if (!vt) return res.status(400).json({ error: "visit_type cannot be blank" });
+      if (String(req.body.visit_type).trim().length > FV_VISIT_TYPE_MAX) {
+        return res.status(400).json({ error: `visit_type must be ${FV_VISIT_TYPE_MAX} characters or fewer` });
+      }
+      updates.push("visit_type = ?");
+      values.push(vt);
+      changed.push("visit_type");
+    }
+
+    if ("status" in req.body) {
+      const status = String(req.body.status);
+      if (!FV_STATUSES.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${FV_STATUSES.join(", ")}` });
+      }
+      if (status !== visit.status) {
+        updates.push("status = ?");
+        values.push(status);
+        changed.push(`status: ${visit.status} -> ${status}`);
+        // completed_at tracks the first move into 'completed'; cleared on a move back.
+        if (status === "completed") {
+          updates.push("completed_at = UNIX_TIMESTAMP()");
+        } else {
+          updates.push("completed_at = NULL");
+        }
+      }
+    }
+
+    if (updates.length === 0) {
+      const row = await db.prepare(`${FV_SELECT} WHERE fv.id = ?`).get(visit.id);
+      return res.json(fieldVisitRow(row));
+    }
+
+    values.push(visit.id);
+    await db.prepare(`UPDATE field_visits SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+
+    logActivity(
+      req.user.id,
+      "field_visit_updated",
+      `workspace: ${ws.name} (${ws.id}), visit: ${visit.id}, ${changed.join(", ")}`,
+      visit.device_id,
+      getClientIp(req),
+      ws.id,
+    );
+
+    const row = await db.prepare(`${FV_SELECT} WHERE fv.id = ?`).get(visit.id);
+    res.json(fieldVisitRow(row));
+  }),
+);
+
+// Permission + visit gate that runs BEFORE multer, so an unauthorized or bad
+// request never lands a file on disk.
+const fieldVisitPhotoGate = asyncHandler(async (req, res, next) => {
+  const ws = await loadWorkspaceForFieldVisit(req, res);
+  if (!ws) return;
+  const visit = await db.prepare("SELECT * FROM field_visits WHERE id = ? AND workspace_id = ?").get(req.params.visitId, ws.id);
+  if (!visit) return res.status(404).json({ error: "Field visit not found" });
+  req.fvWorkspace = ws;
+  req.fvVisit = visit;
+  next();
+});
+
+// Multer with its errors (wrong type, too large) surfaced as 400, not 500.
+function fieldVisitPhotoUpload(req, res, next) {
+  fieldVisitUpload.single("photo")(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    next();
+  });
+}
+
+function unlinkQuiet(filename) {
+  if (!filename) return;
+  fs.unlink(path.join(config.fieldVisitPhotosDir, path.basename(filename)), () => {});
+}
+
+// POST /:id/field-visits/:visitId/photos - upload ONE photo (multipart, field
+// name "photo") with latitude / longitude / gps_accuracy_meters form fields.
+// The GPS trio is REQUIRED and range-checked: a missing or out-of-range value
+// REJECTS the upload (and deletes the just-saved file), it is never merely
+// warned about - backend-enforced, matching every permission check here.
+router.post(
+  "/:id/field-visits/:visitId/photos",
+  fieldVisitPhotoGate,
+  fieldVisitPhotoUpload,
+  asyncHandler(async (req, res) => {
+    const { fvWorkspace: ws, fvVisit: visit } = req;
+
+    if (!req.file) {
+      return res.status(400).json({ error: "A photo file is required (multipart field 'photo')" });
+    }
+
+    const coords = sanitizeCoords(req.body?.latitude, req.body?.longitude);
+    if (!coords) {
+      unlinkQuiet(req.file.filename);
+      return res.status(400).json({
+        error: "latitude and longitude are required and must be valid coordinates (lat -90..90, lon -180..180, not 0,0)",
+      });
+    }
+    const accuracy = fvFiniteInRange(req.body?.gps_accuracy_meters, 0, FV_GPS_ACCURACY_MAX_M);
+    if (accuracy === null || accuracy <= 0) {
+      unlinkQuiet(req.file.filename);
+      return res.status(400).json({
+        error: `gps_accuracy_meters is required and must be a number > 0 and <= ${FV_GPS_ACCURACY_MAX_M}`,
+      });
+    }
+
+    let category = fvTrimOrNull(req.body?.photo_category, FV_PHOTO_CATEGORY_MAX);
+    if (category) category = sanitizeString(category);
+
+    const id = crypto.randomUUID();
+    await db
+      .prepare(
+        `INSERT INTO field_visit_photos
+           (id, visit_id, filepath, latitude, longitude, gps_accuracy_meters, photo_category)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, visit.id, req.file.filename, coords.latitude, coords.longitude, accuracy, category);
+
+    logActivity(
+      req.user.id,
+      "field_visit_photo_added",
+      `workspace: ${ws.name} (${ws.id}), visit: ${visit.id}, photo: ${id}` +
+        (category ? `, category: ${category}` : ""),
+      visit.device_id,
+      getClientIp(req),
+      ws.id,
+    );
+
+    const row = await db.prepare("SELECT * FROM field_visit_photos WHERE id = ?").get(id);
+    res.status(201).json(fieldVisitPhotoRow(row));
+  }),
+);
+
+// GET /:id/field-visits/:visitId/photos/:photoId - stream the photo file.
+router.get(
+  "/:id/field-visits/:visitId/photos/:photoId",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspaceForFieldVisitRead(req, res);
+    if (!ws) return;
+    const photo = await db
+      .prepare(
+        `SELECT p.* FROM field_visit_photos p
+         JOIN field_visits fv ON fv.id = p.visit_id
+         WHERE p.id = ? AND p.visit_id = ? AND fv.workspace_id = ?`,
+      )
+      .get(req.params.photoId, req.params.visitId, ws.id);
+    if (!photo) return res.status(404).json({ error: "Photo not found" });
+
+    const safePath = path.resolve(config.fieldVisitPhotosDir, path.basename(photo.filepath));
+    if (!safePath.startsWith(path.resolve(config.fieldVisitPhotosDir))) {
+      return res.status(403).json({ error: "Invalid path" });
+    }
+    if (!fs.existsSync(safePath)) return res.status(404).json({ error: "Photo file missing" });
+    res.sendFile(safePath);
   }),
 );
 

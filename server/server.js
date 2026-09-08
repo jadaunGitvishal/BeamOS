@@ -60,7 +60,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // Ensure upload directories exist
-[config.contentDir, config.screenshotsDir].forEach((dir) => {
+[config.contentDir, config.screenshotsDir, config.fieldVisitPhotosDir].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
@@ -459,6 +459,15 @@ app.use("/api/auth/totp/verify", rateLimit(60000, 10));
 // path prefix first, so this fires before /api/auth catches the request.
 app.use("/api/auth/users", rateLimit(60000, 20));
 app.use("/api/auth", require("./routes/auth"));
+
+// Ref 43 (Field Visit Inspections): PLACEHOLDER field-technician OTP login.
+// Public (pre-session, like /api/auth) and mounted before the JWT-only routers.
+// The OTP is a hardcoded dev stub (see routes/field-auth.js) - the per-IP rate
+// limit here is the only brute-force control, so keep it tight. verify-otp is
+// the 6-digit-guess surface; send-otp just logs.
+app.use("/api/field-auth/verify-otp", rateLimit(60000, 10));
+app.use("/api/field-auth/send-otp", rateLimit(60000, 5));
+app.use("/api/field-auth", require("./routes/field-auth"));
 // Rate limit pairing to prevent brute force (5 attempts per minute per IP).
 // #88: bind this to the whole /api/provision surface, not just /pair - the bare
 // POST /api/provision (routes/provisioning.js) is a second pairing endpoint that

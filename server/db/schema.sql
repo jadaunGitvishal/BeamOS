@@ -74,6 +74,12 @@ CREATE TABLE IF NOT EXISTS users (
     auth_provider   VARCHAR(50) NOT NULL DEFAULT 'local',
     provider_id     VARCHAR(255),
     avatar_url      VARCHAR(500),
+    -- Ref 43 (Field Visit Inspections): E.164-ish phone number, used only by the
+    -- placeholder field-technician OTP login (routes/field-auth.js) to look up
+    -- the user. Nullable; UNIQUE allows any number of NULLs in MySQL (and SQLite),
+    -- so this is "unique only where set". No format enforced at the DB layer -
+    -- the route normalizes/validates.
+    phone           VARCHAR(32) UNIQUE,
     role            VARCHAR(50) NOT NULL DEFAULT 'user',
     plan_id         VARCHAR(64) DEFAULT 'free',
     stripe_customer_id VARCHAR(255),
@@ -1158,6 +1164,75 @@ CREATE TABLE IF NOT EXISTS campaigns (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_campaigns_workspace ON campaigns(workspace_id, start_date);
 CREATE INDEX idx_campaigns_playlist ON campaigns(playlist_id);
+
+-- ===================== FIELD VISIT INSPECTIONS (Ref 43 Stage A) =====================
+-- A technician's on-site visit to a device. Created when the visit starts
+-- (status 'in_progress'), then patched with the collected details and marked
+-- 'completed'. technician_user_id ON DELETE SET NULL: a removed user leaves the
+-- visit history intact. device_id / workspace_id ON DELETE CASCADE: a visit has
+-- no meaning without the device it inspected. workspace_id is denormalized from
+-- the device at create time so field-visit queries are workspace-scoped without
+-- a join (and so the row survives if the device is later re-homed - it records
+-- where the visit happened).
+--
+-- visit_type / device_status are plain VARCHAR, NOT ENUM - same philosophy as
+-- device_events.event_type and tickets.owner_category: the route validates
+-- length only, so a new category needs no migration.
+--
+-- technical_metrics: a JSON snapshot of the device's most recent telemetry row
+-- (battery / storage / wifi / uptime) taken automatically at visit-create time,
+-- so the inspector's report captures the device's self-reported health at that
+-- moment even after telemetry rows prune (~16-24h). NULL when the device has
+-- never reported telemetry.
+--
+-- client_visit_uuid: OPTIONAL client-generated idempotency key. A field app that
+-- retries a flaky "start visit" POST sends the same UUID both times; the UNIQUE
+-- constraint (MySQL never collides NULLs, so callers that omit it are unaffected)
+-- + the route's pre-check make the retry return the existing visit instead of
+-- creating a duplicate. Exactly the pattern play_logs.session_id uses.
+CREATE TABLE IF NOT EXISTS field_visits (
+    id                 VARCHAR(64) PRIMARY KEY,
+    device_id          VARCHAR(64) NOT NULL,
+    workspace_id       VARCHAR(64) NOT NULL,
+    technician_user_id VARCHAR(64),
+    client_visit_uuid  VARCHAR(64) UNIQUE,
+    visit_type         VARCHAR(50) NOT NULL,
+    serial_number      VARCHAR(255),
+    mac_address        VARCHAR(255),
+    device_model       VARCHAR(255),
+    sim_network_info   VARCHAR(255),
+    device_status      VARCHAR(50),
+    remarks            TEXT,
+    technical_metrics  TEXT,
+    status             VARCHAR(50) NOT NULL DEFAULT 'in_progress',
+    created_at         BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    completed_at       BIGINT,
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (technician_user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_field_visits_workspace ON field_visits(workspace_id, created_at DESC);
+CREATE INDEX idx_field_visits_device ON field_visits(device_id, created_at DESC);
+
+-- One photo attached to a field visit. filepath is the basename of a file in
+-- config.fieldVisitPhotosDir (same convention as screenshots.filepath).
+-- latitude / longitude / gps_accuracy_meters are REQUIRED and range-validated by
+-- the upload route (POST .../photos rejects the upload, not just warns, when
+-- they are absent or out of range) - the columns are nullable only so a future
+-- import path isn't boxed in, never because the API accepts a photo without a
+-- fix. photo_category is freeform (nullable) - e.g. 'device_front', 'serial_label'.
+CREATE TABLE IF NOT EXISTS field_visit_photos (
+    id                   VARCHAR(64) PRIMARY KEY,
+    visit_id             VARCHAR(64) NOT NULL,
+    filepath             VARCHAR(500) NOT NULL,
+    latitude             DOUBLE,
+    longitude            DOUBLE,
+    gps_accuracy_meters  DOUBLE,
+    photo_category       VARCHAR(100),
+    captured_at          BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (visit_id) REFERENCES field_visits(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_field_visit_photos_visit ON field_visit_photos(visit_id, captured_at DESC);
 
 -- ===================== SCHEMA MIGRATIONS =====================
 

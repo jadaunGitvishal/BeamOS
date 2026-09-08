@@ -30,7 +30,12 @@ function formatTimestamp(epochSeconds) {
 //   - org_admin: read-only (GET only - canAccessOrg, not canAdminOrg).
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ORG_ROLES = ["org_owner", "org_admin"];
+// Ref 43: field_technician is a NON-privileged org membership - it grants
+// org-wide field-visit logging (lib/permissions.canLogFieldVisit) and nothing
+// else (canAccessOrg / canAdminOrg / canManageOrgRegions all still exclude it).
+// Grantable by an org_owner or platform_admin here, same as org_admin;
+// callerMayGrantRole only special-cases org_owner.
+const ORG_ROLES = ["org_owner", "org_admin", "field_technician"];
 
 // Load org by req.params.id and verify caller has the required level of
 // access. Returns the org row on success. On failure, sends the appropriate
@@ -181,7 +186,7 @@ router.post(
       return res.status(400).json({ error: "Valid email required" });
     }
     if (!ORG_ROLES.includes(role)) {
-      return res.status(400).json({ error: "Role must be org_owner or org_admin" });
+      return res.status(400).json({ error: `Role must be one of: ${ORG_ROLES.join(", ")}` });
     }
     if (!callerMayGrantRole(req, role)) {
       return res.status(403).json({ error: "Only a platform admin can grant the organization owner role" });
@@ -231,7 +236,7 @@ router.put(
 
     const newRole = String(req.body?.role || "").trim();
     if (!ORG_ROLES.includes(newRole)) {
-      return res.status(400).json({ error: "Role must be org_owner or org_admin" });
+      return res.status(400).json({ error: `Role must be one of: ${ORG_ROLES.join(", ")}` });
     }
 
     const member = await db

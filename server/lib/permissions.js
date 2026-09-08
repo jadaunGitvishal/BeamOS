@@ -192,9 +192,33 @@ async function canManageOrgRegions(db, user, org) {
   return !!om && (om.role === 'org_owner' || om.role === 'org_admin');
 }
 
+// Ref 43 (Field Visit Inspections): who may log / read a field visit against a
+// workspace. Two independent paths, EITHER grants access:
+//   1. ORG-WIDE: field_technician (or org_admin / org_owner) on the workspace's
+//      PARENT ORGANIZATION. A field_technician is deliberately org-scoped, not
+//      store-scoped: one technician covers every workspace in the org with a
+//      single organization_members row and NO per-workspace membership.
+//   2. PER-WORKSPACE: a regular workspace_admin / workspace_editor of THIS
+//      specific workspace (a store manager logging their own site's visit).
+// platform_admin (owner tier) is allowed everywhere, matching every other
+// predicate here. platform_operator is NOT - field-visit logging is an
+// org-membership action, not cross-org staff troubleshooting (mirrors
+// canAdminWorkspace excluding operators). Same (db, user, workspace) shape as
+// canWriteWorkspace, for the URL-param-target routes in routes/workspaces.js.
+async function canLogFieldVisit(db, user, workspace) {
+  if (!user || !workspace) return false;
+  if (isPlatformRole(user.role)) return true;
+  const om = await db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+    .get(workspace.organization_id, user.id);
+  if (om && (om.role === 'field_technician' || om.role === 'org_admin' || om.role === 'org_owner')) return true;
+  const wm = await db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+    .get(workspace.id, user.id);
+  return !!wm && (wm.role === 'workspace_admin' || wm.role === 'workspace_editor');
+}
+
 module.exports = {
   // boolean predicates
-  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canAdminOrg, canAccessOrg, canManageOrgRegions, isOrgAdmin, isOrgOwner,
+  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canLogFieldVisit, canAdminOrg, canAccessOrg, canManageOrgRegions, isOrgAdmin, isOrgOwner,
   // express middleware
   requireWorkspace,
   requireWorkspaceRead,

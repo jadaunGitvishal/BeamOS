@@ -19,6 +19,8 @@ const REQUIRED_TABLES = [
   'regions',            // Phase 3 Stage A: per-org regional structure
   'tickets',            // Phase 4 Stage A: operational ticketing
   'campaigns',          // Phase 5 Stage A: campaign wrappers around playlists
+  'field_visits',       // Ref 43 Stage A: field-visit inspections
+  'field_visit_photos', // Ref 43 Stage A: geotagged inspection photos
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
@@ -26,6 +28,10 @@ const REQUIRED_TABLES = [
 const REQUIRED_COLUMNS = [
   ['users', 'must_change_password', "ALTER TABLE users ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0"],
   ['users', 'role', null],
+  // Ref 43: field-technician OTP login looks the user up by this column, so an
+  // un-migrated DB would 401 every field login. Nullable; the UNIQUE key rides
+  // on the ALTER (MySQL never collides NULLs, so it applies regardless of rows).
+  ['users', 'phone', "ALTER TABLE users ADD COLUMN phone VARCHAR(32) NULL, ADD UNIQUE KEY uniq_users_phone (phone)"],
   ['users', 'plan_id', "ALTER TABLE users ADD COLUMN plan_id VARCHAR(64) DEFAULT 'free'"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
   // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)

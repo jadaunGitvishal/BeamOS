@@ -47,6 +47,15 @@ module.exports = {
   uploadsDir,
   contentDir: path.join(uploadsDir, "content"),
   screenshotsDir: path.join(uploadsDir, "screenshots"),
+  // Ref 43 (Field Visit Inspections): on-disk store for technician-uploaded
+  // field-visit photos. Same pattern as contentDir/screenshotsDir - relocatable
+  // via DATA_DIR / UPLOADS_DIR, created at boot in server.js.
+  fieldVisitPhotosDir: path.join(uploadsDir, "field-visit-photos"),
+  // Per-photo size ceiling for the field-visit photo upload. Unlike bulk content
+  // (maxFileSize, effectively unlimited) a single inspection photo has no reason
+  // to be large; a modern phone JPEG is ~2-8MB, so 25MB is generous headroom.
+  fieldVisitPhotoMaxBytes:
+    parseInt(process.env.FIELD_VISIT_PHOTO_MAX_BYTES) || 25 * 1024 * 1024,
   certsDir,
   frontendDir: path.join(__dirname, "..", "frontend"),
   // App-level heartbeat. Checker runs every heartbeatInterval and marks
