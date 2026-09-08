@@ -36,6 +36,7 @@ video
 # rides into the image's build context and shadows (or mixes with) the
 # freshly-built one the Dockerfile copies in.
 frontend/dashboard/
+frontend/field-tech/
 
 # docs / editor cruft
 *.md

@@ -9,6 +9,8 @@
     "build": "node build.js",
     "build:dashboard": "node scripts/link-dashboard-deps.js && vite build --config vite.dashboard.config.js",
     "dev:dashboard": "node scripts/link-dashboard-deps.js && vite --config vite.dashboard.config.js",
+    "build:field-tech": "node scripts/link-field-tech-deps.js && vite build --config vite.field-tech.config.js",
+    "dev:field-tech": "node scripts/link-field-tech-deps.js && vite --config vite.field-tech.config.js",
     "test": "node --test"
   },
   "dependencies": {

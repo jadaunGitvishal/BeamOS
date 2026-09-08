@@ -58,3 +58,7 @@ video/
 # build:dashboard` in server/). Build artifact, not source - regenerated at
 # deploy/CI time, same reasoning as node_modules/ above.
 frontend/dashboard/
+
+# Field Tech app build output (frontend/field-tech-src -> here via `npm run
+# build:field-tech` in server/). Same reasoning as frontend/dashboard/ above.
+frontend/field-tech/

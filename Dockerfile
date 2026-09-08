@@ -68,6 +68,19 @@ COPY server/scripts/link-dashboard-deps.js ./scripts/link-dashboard-deps.js
 COPY frontend/dashboard-src/ /app/dashboard-build/frontend/dashboard-src/
 RUN npm run build:dashboard
 
+# --- field-tech-builder: build the Ref 43 Field Technician SPA
+# (frontend/field-tech-src -> frontend/field-tech). Exact sibling of
+# dashboard-builder above, same rationale (gitignored build artifact, needs
+# devDependencies, only its OUTPUT is copied into the runtime image).
+FROM builder AS field-tech-builder
+WORKDIR /app/field-tech-build/server
+COPY server/package.json ./
+RUN npm install
+COPY server/vite.field-tech.config.js ./
+COPY server/scripts/link-field-tech-deps.js ./scripts/link-field-tech-deps.js
+COPY frontend/field-tech-src/ /app/field-tech-build/frontend/field-tech-src/
+RUN npm run build:field-tech
+
 # --- runtime ---
 FROM node:20-slim
 ENV NODE_ENV=production
@@ -86,6 +99,7 @@ COPY frontend/ /app/frontend/
 # dashboard-builder stage instead of whatever might (or might not) be sitting
 # locally.
 COPY --from=dashboard-builder /app/dashboard-build/frontend/dashboard /app/frontend/dashboard
+COPY --from=field-tech-builder /app/field-tech-build/frontend/field-tech /app/frontend/field-tech
 COPY VERSION /app/VERSION
 # the /openapi.yaml route serves ../docs/openapi.yaml (the spec Redoc on /docs fetches);
 # without this it 404s in the image even though it serves fine from a dev checkout.

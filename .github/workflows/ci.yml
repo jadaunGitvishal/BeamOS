@@ -79,6 +79,24 @@ jobs:
       - name: Assert dashboard bundle was produced
         run: test -f ../frontend/dashboard/dashboard.html
 
+  field-tech-build:
+    name: Field Tech build (Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+      # No lockfile - same npm optional-dep bug as the dashboard build above.
+      - name: Install deps (no lockfile - see Dockerfile dashboard-builder stage)
+        run: rm -f package-lock.json && npm install
+      - run: npm run build:field-tech
+      - name: Assert field-tech bundle was produced
+        run: test -f ../frontend/field-tech/field-tech.html
+
   android-test:
     name: Android unit tests (Kotlin schedule evaluator vectors)
     runs-on: ubuntu-latest

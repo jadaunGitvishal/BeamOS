@@ -306,6 +306,15 @@ app.get(["/dashboard", "/dashboard.html"], (req, res) => {
   res.sendFile(path.join(config.frontendDir, "dashboard", "dashboard.html"));
 });
 
+// Ref 43: the Field Technician app (phone + OTP login, then the on-site visit
+// workflow). Same pattern as /dashboard above: a standalone Vite+React bundle
+// (frontend/field-tech-src -> frontend/field-tech), no router (state-driven
+// steps), served as one page. Its JS/CSS assets fall through to the
+// express.static mount below like any other frontend file.
+app.get(["/field-tech", "/field-tech.html"], (req, res) => {
+  res.sendFile(path.join(config.frontendDir, "field-tech", "field-tech.html"));
+});
+
 // Serve frontend static files
 // JS/CSS/HTML: no-cache (always revalidate, uses ETag/304)
 // Images/fonts/icons: long cache for Cloudflare + browser
