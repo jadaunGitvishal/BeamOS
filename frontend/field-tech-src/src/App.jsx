@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import LoginScreen from "./screens/LoginScreen.jsx";
-import HomeScreen from "./screens/HomeScreen.jsx";
+import VisitFlow from "./screens/VisitFlow.jsx";
 import { getToken, getMe, clearSession } from "./lib/api.js";
 
 // authState: "loading" | "in" | "out"
@@ -31,6 +31,12 @@ export default function App() {
     };
   }, []);
 
+  function signOut() {
+    clearSession();
+    setMe(null);
+    setAuthState("out");
+  }
+
   if (authState === "loading") {
     return (
       <main className="screen screen--center">
@@ -40,16 +46,7 @@ export default function App() {
   }
 
   if (authState === "in") {
-    return (
-      <HomeScreen
-        me={me}
-        onLogout={() => {
-          clearSession();
-          setMe(null);
-          setAuthState("out");
-        }}
-      />
-    );
+    return <VisitFlow me={me} onLogout={signOut} onSessionExpired={signOut} />;
   }
 
   return (

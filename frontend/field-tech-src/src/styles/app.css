@@ -196,3 +196,124 @@ body {
   margin: 0;
   word-break: break-word;
 }
+
+/* ---- B2a: pickers + steps ---- */
+
+.step-title {
+  margin: 4px 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.step-sub {
+  margin: 0 0 14px;
+  font-size: 16px;
+  color: var(--muted);
+}
+
+.back {
+  display: inline-block;
+  margin: 0 0 12px;
+  padding: 6px 4px;
+  min-height: 40px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* full-width tappable row */
+.row {
+  width: 100%;
+  min-height: 60px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 14px;
+  background: #f6f8fb;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.row:active {
+  background: #eef2f7;
+}
+
+.row:disabled {
+  opacity: 0.55;
+}
+
+.row__title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.row__meta {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* status tag on the device rows */
+.tag {
+  align-self: flex-start;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.tag--ok {
+  color: #0f6b2e;
+  background: #d8f2df;
+}
+
+.tag--off {
+  color: #7a3030;
+  background: #f2dede;
+}
+
+/* visit-type selector */
+.choice-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 4px;
+}
+
+.choice {
+  width: 100%;
+  min-height: 52px;
+  padding: 12px 14px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+  background: #f6f8fb;
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.choice--on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: #eaf1ff;
+}

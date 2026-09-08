@@ -39,6 +39,16 @@ export function setSession(token, user) {
   }
 }
 
+// Replace just the token (e.g. after POST /api/auth/switch-workspace mints a
+// fresh JWT with the new current_workspace_id baked in), keeping the stored user.
+export function setToken(token) {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function clearSession() {
   try {
     localStorage.removeItem(TOKEN_KEY);
@@ -92,11 +102,18 @@ export async function postJson(path, body) {
   return data;
 }
 
-export async function getMe() {
+// Authenticated request against the BeamOS API using the stored ft_token. A 401
+// clears the session and throws ApiError(401) so the caller can bounce to login.
+async function authFetch(path, { method = "GET", body } = {}) {
   let resp;
   try {
-    resp = await fetch("/api/auth/me", {
-      headers: { Authorization: `Bearer ${getToken()}` },
+    resp = await fetch(path, {
+      method,
+      headers: {
+        Authorization: `Bearer ${getToken()}`,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
     throw new NetworkError();
@@ -107,7 +124,28 @@ export async function getMe() {
   }
   const data = await readBody(resp);
   if (!resp.ok) {
-    throw new ApiError(data?.error || `Could not load your profile (${resp.status})`, resp.status);
+    throw new ApiError(data?.error || `Request failed (${resp.status})`, resp.status);
   }
   return data;
+}
+
+export const apiGet = (path) => authFetch(path);
+export const apiPost = (path, body) => authFetch(path, { method: "POST", body });
+export const getMe = () => authFetch("/api/auth/me");
+
+// Browsers only expose crypto.randomUUID in a secure context (https or
+// localhost). Fall back to a v4-shaped random id built from getRandomValues so
+// the idempotency key still works on a plain-http LAN deployment.
+export function newUuid() {
+  try {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  } catch {
+    /* fall through */
+  }
+  const b = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
