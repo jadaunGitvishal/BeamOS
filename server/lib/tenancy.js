@@ -88,6 +88,26 @@ async function accessContext(userId, role, workspace) {
   if (isPlatformStaff(role)) {
     return { workspaceRole: null, actingAs: true };
   }
+  // Ref 43: a field_technician has ORG-WIDE reach into every workspace of their
+  // org (same scope as canLogFieldVisit), but that reach is READ-ONLY outside
+  // field-visit logging. Resolve them to a synthetic 'workspace_viewer' role,
+  // NOT actingAs:
+  //   - a real workspaceRole makes canRead()/GET routes/socket-room visibility
+  //     work, so a technician can browse workspaces + devices to pick where they
+  //     are (Ref 43 Stage B2's device picker);
+  //   - every write gate in the codebase is `!ctx.actingAs && ctx.workspaceRole
+  //     === 'workspace_viewer'` (routes/content, devices, playlists, schedules,
+  //     layouts, …) — with actingAs:false and role exactly 'workspace_viewer'
+  //     that fires, so every non-field-visit write is denied;
+  //   - canWrite()/canAdmin() gate on org_owner/org_admin or editor/admin, which
+  //     this is neither.
+  // Field-visit writes are gated independently by canLogFieldVisit
+  // (routes/workspaces.js), which does its own org-membership lookup.
+  // Checked AFTER isPlatformStaff so a platform operator who also holds a
+  // field_technician row still acts-as (write) rather than being downgraded.
+  if (orgMembership && orgMembership.role === 'field_technician') {
+    return { workspaceRole: 'workspace_viewer', actingAs: false };
+  }
   return null;
 }
 
@@ -181,11 +201,19 @@ const resolveTenancy = asyncHandler(async function resolveTenancy(req, res, next
 
 // Enumerate every workspace_id the given user has any path into:
 //   - direct workspace_members rows
-//   - any workspace in an org where they are org_owner / org_admin
-//   - platform_admin / superadmin: every workspace in the system
-// Used by socket.io rooms (Phase 2.3) to scope outbound broadcasts. /me's
-// accessible_workspaces query mirrors this access logic but selects full rows
-// rather than reusing this helper (different shape needs).
+//   - any workspace in an org where they are org_owner / org_admin / field_technician
+//   - platform_admin / superadmin / operator: every workspace in the system
+// Used by socket.io rooms (Phase 2.3) to scope outbound broadcasts, and by
+// GET /organizations/:id/regions/sla-overview. /me's accessible_workspaces query
+// mirrors this access logic but selects full rows rather than reusing this
+// helper (different shape needs).
+//
+// VISIBILITY ONLY — this list never grants a write/owner power. Ref 43:
+// field_technician is an org-wide role that can log field visits in any of its
+// org's workspaces (lib/permissions.canLogFieldVisit); including it here lets a
+// technician SEE/subscribe to those workspaces. Their non-field-visit write
+// access stays denied — accessContext() resolves them to a viewer-equivalent
+// role, and canWrite()/canAdmin() exclude them.
 async function accessibleWorkspaceIds(userId, role) {
   if (!userId) return [];
   // #13: platform staff (admin OR operator) see every workspace - visibility,
@@ -198,7 +226,7 @@ async function accessibleWorkspaceIds(userId, role) {
     UNION
     SELECT w.id FROM workspaces w
     JOIN organization_members om ON om.organization_id = w.organization_id
-    WHERE om.user_id = ? AND om.role IN ('org_owner', 'org_admin')
+    WHERE om.user_id = ? AND om.role IN ('org_owner', 'org_admin', 'field_technician')
   `).all(userId, userId)).map(r => r.id);
 }
 

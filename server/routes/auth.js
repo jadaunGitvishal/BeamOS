@@ -746,7 +746,7 @@ router.get("/me", requireAuth, resolveTenancy, asyncHandler(async (req, res) => 
         LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = ?
         LEFT JOIN organization_members om ON om.organization_id = w.organization_id AND om.user_id = ?
         WHERE wm.user_id IS NOT NULL
-           OR (om.user_id IS NOT NULL AND om.role IN ('org_owner', 'org_admin'))
+           OR (om.user_id IS NOT NULL AND om.role IN ('org_owner', 'org_admin', 'field_technician'))
         ORDER BY o.name, w.name
       `,
         )
@@ -816,11 +816,18 @@ router.post("/switch-workspace", requireAuth, asyncHandler(async (req, res) => {
   `,
     )
     .get(ws.organization_id, req.user.id);
+  // Ref 43: field_technician is org-wide (can log field visits in any workspace
+  // of the org), so it may switch into any of them - same additive, visibility-
+  // only pattern as accessibleWorkspaceIds()/accessible_workspaces above. The
+  // resulting session is still viewer-equivalent for non-field-visit actions
+  // (lib/tenancy.accessContext resolves it that way).
   const canAct =
     isPlatformStaffUser ||
     !!wsMember ||
     (orgMember &&
-      (orgMember.role === "org_owner" || orgMember.role === "org_admin"));
+      (orgMember.role === "org_owner" ||
+        orgMember.role === "org_admin" ||
+        orgMember.role === "field_technician"));
 
   if (!canAct)
     return res.status(403).json({ error: "Access denied to that workspace" });

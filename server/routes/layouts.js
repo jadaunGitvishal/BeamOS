@@ -171,6 +171,13 @@ router.get('/:id', asyncHandler(async (req, res) => {
 // Create layout in the caller's current workspace.
 router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating layouts.' });
+  // Ref 43: create was the one layouts write route missing the viewer guard that
+  // checkLayoutWrite() (PUT/DELETE/zones) already has - so a workspace_viewer
+  // (and, once org-wide field_technician resolves to a viewer-equivalent
+  // context, a technician) could create layouts. Match the sibling routes.
+  if (!req.actingAs && req.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
   const { name, width, height, zones } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
 

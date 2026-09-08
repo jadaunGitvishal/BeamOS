@@ -256,6 +256,13 @@ router.get('/:id/render', asyncHandler(async (req, res) => {
 // Create kiosk page in the caller's current workspace.
 router.post('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating kiosk pages.' });
+  // Ref 43: create was missing the viewer guard that checkKioskWrite()
+  // (PUT/DELETE) already has - a workspace_viewer (and an org-wide
+  // field_technician, which now resolves to a viewer-equivalent context) could
+  // create kiosk pages. Match the sibling routes.
+  if (!req.actingAs && req.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
   const { name, config: pageConfig } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
 
