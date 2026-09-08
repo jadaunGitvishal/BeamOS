@@ -317,3 +317,103 @@ body {
   border-color: var(--accent);
   background: #eaf1ff;
 }
+
+/* ---- B2b: completion form + photos ---- */
+
+.form-field {
+  margin: 0 0 16px;
+}
+
+.textarea {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.4;
+  font-family: inherit;
+}
+
+.muted-inline {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.mono-sm {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.photo-card {
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 12px;
+  background: #fff;
+}
+
+.photo-card__img {
+  display: block;
+  width: 100%;
+  max-height: 260px;
+  object-fit: cover;
+  background: #000;
+}
+
+.photo-card__body {
+  padding: 10px 12px 12px;
+}
+
+.photo-gps {
+  margin: 4px 0 0;
+  font-size: 14px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-gps--ok {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.photo-gps--wait {
+  color: var(--muted);
+}
+
+.photo-gps--warn {
+  color: var(--dev);
+  font-weight: 600;
+}
+
+.photo-gps--err {
+  color: var(--error);
+  font-weight: 700;
+}
+
+.photo-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.button--sm {
+  margin-top: 0;
+  min-height: 46px;
+  padding: 10px 12px;
+  font-size: 15px;
+  flex: 1;
+}
+
+.button--danger {
+  color: #fff;
+  background: var(--error);
+}
+
+.button--danger:active {
+  background: #9c2f22;
+}
+
+.progress {
+  margin: 12px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--muted);
+}

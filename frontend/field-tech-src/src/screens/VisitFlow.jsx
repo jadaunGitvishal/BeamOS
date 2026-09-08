@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { apiGet, apiPost, setToken, newUuid, NetworkError, ApiError } from "../lib/api.js";
+import CompletionForm from "./CompletionForm.jsx";
 
-// Stage B2a: pick a workspace -> switch into it -> pick a device -> start a
-// visit. The visit form itself is B2b; this ends on a "visit started"
-// confirmation. Steps ("workspaces" | "devices" | "visitType" | "started") are
-// component state, not routes (see main.jsx).
+// Ref 43 Stage B2a+B2b: pick a workspace -> switch into it -> pick a device ->
+// pick a visit type -> start the visit -> fill the completion form (technical
+// fields + geotagged photos) -> done. Steps ("workspaces" | "devices" |
+// "visitType" | "form" | "done") are component state, not routes (see main.jsx).
 const VISIT_TYPES = ["Routine check", "Repair", "Installation"];
 
 export default function VisitFlow({ me, onLogout, onSessionExpired }) {
@@ -19,6 +20,7 @@ export default function VisitFlow({ me, onLogout, onSessionExpired }) {
   const [visitType, setVisitType] = useState(VISIT_TYPES[0]);
   const [visitUuid, setVisitUuid] = useState(null);
   const [visit, setVisit] = useState(null);
+  const [completed, setCompleted] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -74,7 +76,7 @@ export default function VisitFlow({ me, onLogout, onSessionExpired }) {
         client_visit_uuid: visitUuid,
       });
       setVisit(res);
-      setStep("started");
+      setStep("form");
     } catch (err) {
       handleErr(err, "Could not start the visit.");
     } finally {
@@ -87,6 +89,7 @@ export default function VisitFlow({ me, onLogout, onSessionExpired }) {
     setDevices([]);
     setActiveDevice(null);
     setVisit(null);
+    setCompleted(null);
     setError("");
     setStep("workspaces");
   }
@@ -174,20 +177,31 @@ export default function VisitFlow({ me, onLogout, onSessionExpired }) {
           </>
         )}
 
-        {step === "started" && visit && (
+        {step === "form" && visit && (
+          <CompletionForm
+            workspaceId={activeWs.id}
+            visitId={visit.id}
+            deviceName={visit.device_name || activeDevice?.name || visit.device_id}
+            telemetryCaptured={!!visit.technical_metrics}
+            onSessionExpired={onSessionExpired}
+            onCompleted={(done, photoCount) => {
+              setCompleted({ ...done, photo_count: photoCount });
+              setStep("done");
+            }}
+          />
+        )}
+
+        {step === "done" && completed && (
           <>
-            <p className="step-title">Visit started</p>
-            <p className="lead">
-              ID <strong>{visit.id}</strong>
-            </p>
+            <p className="step-title">Visit completed</p>
+            <p className="lead">ID <strong>{completed.id}</strong></p>
             <dl className="kv">
-              <dt>Device</dt><dd>{visit.device_name || activeDevice?.name || visit.device_id}</dd>
-              <dt>Type</dt><dd>{visit.visit_type}</dd>
-              <dt>Status</dt><dd>{visit.status}</dd>
-              <dt>Telemetry</dt>
-              <dd>{visit.technical_metrics ? "snapshot captured" : "none on file"}</dd>
+              <dt>Device</dt><dd>{completed.device_name || activeDevice?.name || completed.device_id}</dd>
+              <dt>Type</dt><dd>{completed.visit_type}</dd>
+              <dt>Device status</dt><dd>{completed.device_status || "—"}</dd>
+              <dt>Photos</dt><dd>{completed.photo_count ?? 0}</dd>
+              <dt>Status</dt><dd>{completed.status}</dd>
             </dl>
-            <p className="muted">The inspection form comes next. For now the visit is open and recorded.</p>
             <button className="button" type="button" onClick={restart}>Start another visit</button>
             <button className="button button--secondary" type="button" onClick={onLogout}>Log out</button>
           </>

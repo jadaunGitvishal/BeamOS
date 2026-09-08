@@ -131,7 +131,32 @@ async function authFetch(path, { method = "GET", body } = {}) {
 
 export const apiGet = (path) => authFetch(path);
 export const apiPost = (path, body) => authFetch(path, { method: "POST", body });
+export const apiPatch = (path, body) => authFetch(path, { method: "PATCH", body });
 export const getMe = () => authFetch("/api/auth/me");
+
+// Authenticated multipart upload. The browser sets the multipart Content-Type
+// (with boundary) itself, so we must NOT set it here. Same 401 handling as authFetch.
+export async function apiUpload(path, formData) {
+  let resp;
+  try {
+    resp = await fetch(path, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: formData,
+    });
+  } catch {
+    throw new NetworkError();
+  }
+  if (resp.status === 401) {
+    clearSession();
+    throw new ApiError("Your session has expired. Please sign in again.", 401);
+  }
+  const data = await readBody(resp);
+  if (!resp.ok) {
+    throw new ApiError(data?.error || `Upload failed (${resp.status})`, resp.status);
+  }
+  return data;
+}
 
 // Browsers only expose crypto.randomUUID in a secure context (https or
 // localhost). Fall back to a v4-shaped random id built from getRandomValues so
