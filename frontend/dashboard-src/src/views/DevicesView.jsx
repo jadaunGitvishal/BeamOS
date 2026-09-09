@@ -9,6 +9,9 @@ import DeviceTable from "../components/DeviceTable";
 
 const fetchDevices = ({ signal }) => apiFetch("/api/dashboard/devices", { signal });
 
+// Ref 38 — status_category values the server computes; drives the filter control.
+const CATEGORIES = ["active", "inactive", "offline"];
+
 // Authenticated download, not a plain <a href> - export needs the Bearer
 // token, which only fetch() can attach (a bare link can't set headers).
 // Same fetch -> blob -> synthetic-<a>-click pattern as BeamOS's own
@@ -37,6 +40,7 @@ export default function DevicesView() {
   const view = searchParams.get("view") === "table" ? "table" : "tiles";
   const urlSearch = searchParams.get("q") || "";
   const riskOnly = searchParams.get("risk") === "1";
+  const catFilter = CATEGORIES.includes(searchParams.get("cat")) ? searchParams.get("cat") : "";
 
   const [inputValue, setInputValue] = useState(urlSearch);
   useEffect(() => setInputValue(urlSearch), [urlSearch]);
@@ -78,11 +82,22 @@ export default function DevicesView() {
 
   const search = urlSearch.toLowerCase();
   const list = devices.filter(
-    (d) => (!search || d.name.toLowerCase().includes(search)) && (!riskOnly || isAtRisk(d) || isWeakSignal(d)),
+    (d) =>
+      (!search || d.name.toLowerCase().includes(search)) &&
+      (!riskOnly || isAtRisk(d) || isWeakSignal(d)) &&
+      (!catFilter || d.status_category === catFilter),
   );
 
   const qparam = urlSearch ? `&q=${encodeURIComponent(urlSearch)}` : "";
   const rparam = riskOnly ? "&risk=1" : "";
+  const cparam = catFilter ? `&cat=${catFilter}` : "";
+
+  const setCat = (next) => {
+    const p = new URLSearchParams(searchParams);
+    if (next) p.set("cat", next);
+    else p.delete("cat");
+    setSearchParams(p, { replace: true });
+  };
 
   return (
     <>
@@ -98,13 +113,13 @@ export default function DevicesView() {
         <div className="seg" role="group" aria-label="View">
           <button
             className={view === "tiles" ? "on" : ""}
-            onClick={() => setSearchParams(new URLSearchParams(`view=tiles${qparam}${rparam}`))}
+            onClick={() => setSearchParams(new URLSearchParams(`view=tiles${qparam}${rparam}${cparam}`))}
           >
             Tiles
           </button>
           <button
             className={view === "table" ? "on" : ""}
-            onClick={() => setSearchParams(new URLSearchParams(`view=table${qparam}${rparam}`))}
+            onClick={() => setSearchParams(new URLSearchParams(`view=table${qparam}${rparam}${cparam}`))}
           >
             Table
           </button>
@@ -118,11 +133,21 @@ export default function DevicesView() {
         <button
           className={`btn ${riskOnly ? "dark" : ""}`}
           onClick={() =>
-            setSearchParams(new URLSearchParams(`view=${view}${qparam}${riskOnly ? "" : "&risk=1"}`))
+            setSearchParams(new URLSearchParams(`view=${view}${qparam}${riskOnly ? "" : "&risk=1"}${cparam}`))
           }
         >
           At risk or weak signal only
         </button>
+        <div className="seg" role="group" aria-label="Filter by status category">
+          <button className={catFilter === "" ? "on" : ""} onClick={() => setCat("")}>
+            All
+          </button>
+          {CATEGORIES.map((c) => (
+            <button key={c} className={catFilter === c ? "on" : ""} onClick={() => setCat(c)}>
+              {c.charAt(0).toUpperCase() + c.slice(1)}
+            </button>
+          ))}
+        </div>
         <div className="export-menu-wrap" ref={exportRef}>
           <button className="btn" onClick={() => setExportOpen((v) => !v)} aria-haspopup="true" aria-expanded={exportOpen}>
             Export

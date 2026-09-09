@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { timeAgo } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import StatusTag from "./StatusTag";
+import StatusCategoryTag from "./StatusCategoryTag";
 
 function DeviceTableRow({ device: d }) {
   const navigate = useNavigate();
@@ -19,6 +20,9 @@ function DeviceTableRow({ device: d }) {
           </span>
         ) : null}
       </td>
+      <td>
+        <StatusCategoryTag category={d.status_category} />
+      </td>
       <td className="num" title={seenTitle}>
         {timeAgo(d.last_heartbeat)}
       </td>
@@ -34,6 +38,7 @@ export default function DeviceTable({ devices }) {
           <tr>
             <th>Name</th>
             <th>Status</th>
+            <th>Category</th>
             <th>Last seen</th>
           </tr>
         </thead>

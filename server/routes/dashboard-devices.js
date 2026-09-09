@@ -9,6 +9,17 @@ const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
 const { buildDeviceAuditTrail, buildStatusHeatmap } = require("../lib/device-audit");
 
+// Ref 38 — device status category, computed (not stored) from the existing
+// `status` ('online'/'offline') and `blocked` columns:
+//   active   = online AND not blocked
+//   inactive = blocked (regardless of connectivity)
+//   offline  = not blocked but not connected
+// Kept as one string so the SELECT alias and the WHERE filter (MySQL can't
+// reference a SELECT alias in WHERE) stay in lockstep.
+const STATUS_CATEGORY_SQL =
+  "CASE WHEN d.blocked = 1 THEN 'inactive' WHEN d.status = 'online' THEN 'active' ELSE 'offline' END";
+const STATUS_CATEGORY_VALUES = ["active", "inactive", "offline"];
+
 // Shared gate for the per-device sub-resources (status-history, audit-trail,
 // status-heatmap): load the device, require it to be in a workspace the caller
 // can access. Returns the device row, or null after having sent the 404/403.
@@ -51,6 +62,7 @@ router.get(
 
     let sql = `
     SELECT d.*,
+      ${STATUS_CATEGORY_SQL} AS status_category,
       t.battery_level, t.battery_charging, t.storage_free_mb, t.storage_total_mb,
       t.ram_free_mb, t.ram_total_mb, t.wifi_ssid, t.wifi_rssi, t.uptime_seconds,
       t.cpu_usage, t.latitude, t.longitude, t.reported_at AS last_heartbeat,
@@ -82,6 +94,10 @@ router.get(
     if (req.query.weak_signal === "1") {
       sql += " AND t.wifi_rssi < -75";
     }
+    if (STATUS_CATEGORY_VALUES.includes(req.query.status_category)) {
+      sql += ` AND ${STATUS_CATEGORY_SQL} = ?`;
+      params.push(req.query.status_category);
+    }
 
     sql += " ORDER BY d.sort_order ASC, d.created_at ASC";
 
@@ -111,6 +127,9 @@ function formatUptime(seconds) {
 function dashIfBlank(value) {
   return value === null || value === undefined || value === "" ? "—" : value;
 }
+function formatStatusCategory(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : "";
+}
 function formatMergedPair(free, total) {
   if (free === null || free === undefined || total === null || total === undefined) return "—";
   return `${free} / ${total}`;
@@ -122,6 +141,7 @@ router.get(
     const scope = getWorkspaceDeviceFilter(req);
     const sql = `
     SELECT d.id, d.name, d.status,
+      ${STATUS_CATEGORY_SQL} AS status_category,
       t.battery_level, t.battery_charging, t.storage_free_mb, t.storage_total_mb,
       t.ram_free_mb, t.ram_total_mb, t.wifi_ssid, t.wifi_rssi, t.uptime_seconds,
       t.reported_at AS last_heartbeat
@@ -146,6 +166,7 @@ router.get(
     const headers = [
       "Name",
       "Status",
+      "Status Category",
       "Last Heartbeat (UTC)",
       "Battery (%)",
       "Charging",
@@ -161,6 +182,7 @@ router.get(
     const dataRows = devices.map((d) => [
       d.name,
       d.status,
+      formatStatusCategory(d.status_category),
       formatTimestamp(d.last_heartbeat),
       d.battery_level,
       d.battery_level === null || d.battery_level === undefined ? "" : d.battery_charging ? "Yes" : "No",
@@ -201,6 +223,7 @@ router.get(
       const pdfHeaders = [
         "Name",
         "Status",
+        "Category",
         "Last Seen",
         "Battery (%)",
         "Charging",
@@ -214,6 +237,7 @@ router.get(
       const pdfRows = devices.map((d) => [
         d.name,
         d.status,
+        formatStatusCategory(d.status_category),
         dashIfBlank(formatTimestamp(d.last_heartbeat)),
         dashIfBlank(d.battery_level),
         d.battery_level === null || d.battery_level === undefined ? "—" : d.battery_charging ? "Yes" : "No",

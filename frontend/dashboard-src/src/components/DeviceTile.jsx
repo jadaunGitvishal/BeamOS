@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import { TileScreenshot } from "./DeviceScreenshot";
+import StatusCategoryTag from "./StatusCategoryTag";
 
 export default function DeviceTile({ device: d }) {
   const cls = d.status === "offline" ? "off" : isAtRisk(d) || isWeakSignal(d) ? "warn" : "";
@@ -17,7 +18,10 @@ export default function DeviceTile({ device: d }) {
       </div>
       <div className="lb">
         <span className="dot" style={{ background: d.status === "online" ? "var(--on)" : "var(--off)" }}></span>
-        <span>{d.name}</span>
+        <span style={{ flex: 1, minWidth: 0 }}>{d.name}</span>
+        <span style={{ flex: "none" }}>
+          <StatusCategoryTag category={d.status_category} />
+        </span>
       </div>
     </Link>
   );
