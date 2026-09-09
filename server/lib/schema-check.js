@@ -59,6 +59,9 @@ const REQUIRED_COLUMNS = [
   // (services/outage-history.js) writes it on every new row; NULL means the row
   // predates this column. Nullable, no default.
   ['outage_history', 'likely_cause', "ALTER TABLE outage_history ADD COLUMN likely_cause VARCHAR(50) NULL"],
+  // Ref 43: reverse-geocoded place name on a field-visit photo. The photo detail
+  // route SELECTs it; the upload route UPDATEs it best-effort. Nullable, no default.
+  ['field_visit_photos', 'place_name', "ALTER TABLE field_visit_photos ADD COLUMN place_name VARCHAR(255) NULL"],
 ];
 
 function defaultOnMissing(missing) {

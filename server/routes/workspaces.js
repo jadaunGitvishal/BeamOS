@@ -10,6 +10,7 @@ const fieldVisitUpload = require("../middleware/fieldVisitUpload");
 const { sanitizeString } = require("../middleware/sanitize");
 const { sanitizeCoords } = require("../lib/geo");
 const { isDuplicateKeyError } = require("../lib/outage-format");
+const { reverseGeocode } = require("../lib/reverse-geocode");
 const {
   ticketResponseStatus,
   ticketSlaDueAt,
@@ -1321,8 +1322,23 @@ function fieldVisitPhotoRow(p) {
     latitude: p.latitude,
     longitude: p.longitude,
     gps_accuracy_meters: p.gps_accuracy_meters,
+    place_name: p.place_name ?? null,
     captured_at: p.captured_at,
   };
+}
+
+// Ref 43: fire-and-forget reverse geocode of a just-uploaded photo. Runs AFTER
+// the 201 response, fully self-contained (every error swallowed), so it can
+// never block or fail the upload. Leaves place_name NULL on any failure.
+async function geocodePhotoPlace(photoId, lat, lon) {
+  try {
+    const name = await reverseGeocode(lat, lon);
+    if (name) {
+      await db.prepare("UPDATE field_visit_photos SET place_name = ? WHERE id = ?").run(name, photoId);
+    }
+  } catch (e) {
+    console.warn(`[field-visit-photo] place-name lookup failed for ${photoId}: ${e.message}`);
+  }
 }
 
 function fieldVisitRow(v, photos) {
@@ -1699,6 +1715,9 @@ router.post(
 
     const row = await db.prepare("SELECT * FROM field_visit_photos WHERE id = ?").get(id);
     res.status(201).json(fieldVisitPhotoRow(row));
+
+    // Best-effort, non-blocking: the upload is already done + responded.
+    geocodePhotoPlace(id, coords.latitude, coords.longitude);
   }),
 );
 

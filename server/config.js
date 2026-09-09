@@ -345,6 +345,19 @@ module.exports = {
   // because it can't read server env; retarget both together.
   fieldAuthDefaultCC: (process.env.FIELD_AUTH_DEFAULT_CC || "91").replace(/\D/g, ""),
 
+  // Ref 43: reverse-geocode a field-visit photo's GPS fix into a human place
+  // name (lib/reverse-geocode.js), best-effort after upload. Uses OSM Nominatim
+  // (same ecosystem as the "View location" links). REVERSE_GEOCODE_ENABLED=false
+  // disables all outbound calls (airgapped installs). NOMINATIM_URL can point at
+  // a self-hosted instance. Nominatim's usage policy requires an identifying
+  // User-Agent and <=1 req/s - both enforced in the lib.
+  reverseGeocodeEnabled: process.env.REVERSE_GEOCODE_ENABLED !== "false",
+  nominatimUrl:
+    process.env.NOMINATIM_URL || "https://nominatim.openstreetmap.org/reverse",
+  nominatimUserAgent:
+    process.env.NOMINATIM_USER_AGENT || "BeamOS-FieldVisits/1.0",
+  nominatimTimeoutMs: parseInt(process.env.NOMINATIM_TIMEOUT_MS) || 4000,
+
   // Phase 2 Stage A — device audit trail (lib/device-audit.js).
   // Thresholds for the ON-READ Wi-Fi / storage "crossed below" events derived
   // from consecutive device_telemetry rows. weakWifiRssiDbm matches the weak-

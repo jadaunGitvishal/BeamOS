@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { apiFetch, apiObjectUrl } from "../lib/api";
-import { fmtCoords, osmUrl, formatDuration, n0 } from "../lib/format";
+import { osmUrl, formatDuration, n0 } from "../lib/format";
 
 // Ref 43 Stage C — field-visit history on the Device Detail page.
 //
@@ -110,6 +111,35 @@ function VisitDetail({ visit, detail, workspaceId }) {
       ].filter(([, val]) => val != null)
     : [];
 
+  const photos = detail?.photos || [];
+
+  // Fetch a blob: URL for every photo once, so the thumbnail grid AND the
+  // lightbox share one fetch each and Next/Prev is flicker-free.
+  const [urls, setUrls] = useState({}); // photoId -> blob url ("" = failed)
+  useEffect(() => {
+    if (!photos.length) return;
+    let cancelled = false;
+    const created = [];
+    (async () => {
+      for (const p of photos) {
+        try {
+          const u = await apiObjectUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/field-visits/${encodeURIComponent(visit.id)}/photos/${encodeURIComponent(p.id)}`);
+          if (cancelled) { URL.revokeObjectURL(u); return; }
+          created.push(u);
+          setUrls((prev) => ({ ...prev, [p.id]: u }));
+        } catch {
+          if (!cancelled) setUrls((prev) => ({ ...prev, [p.id]: "" }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      created.forEach((u) => URL.revokeObjectURL(u));
+    };
+  }, [detail, workspaceId, visit.id]); // detail is cached upstream -> runs once per expand
+
+  const [lightboxIdx, setLightboxIdx] = useState(null);
+
   return (
     <div className="fv-detail">
       <h3>Technical details</h3>
@@ -153,60 +183,127 @@ function VisitDetail({ visit, detail, workspaceId }) {
       <h3>Photos</h3>
       {!detail ? (
         <p className="empty" style={{ padding: 0 }}>Loading photos…</p>
-      ) : !(detail.photos || []).length ? (
+      ) : !photos.length ? (
         <p className="empty" style={{ padding: 0 }}>No photos were attached to this visit.</p>
       ) : (
-        <div className="fv-photos">
-          {detail.photos.map((p) => (
-            <PhotoCard key={p.id} photo={p} workspaceId={workspaceId} visitId={visit.id} />
-          ))}
-        </div>
+        <>
+          <div className="fv-thumbs">
+            {photos.map((p, i) => (
+              <button
+                key={p.id}
+                type="button"
+                className="fv-thumb"
+                aria-label={`Open photo ${i + 1} of ${photos.length}`}
+                onClick={() => setLightboxIdx(i)}
+              >
+                {urls[p.id] === undefined ? (
+                  <span className="fv-thumb-ph">loading…</span>
+                ) : urls[p.id] === "" ? (
+                  <span className="fv-thumb-ph">unavailable</span>
+                ) : (
+                  <img src={urls[p.id]} alt={`Field visit photo ${i + 1}`} loading="lazy" />
+                )}
+              </button>
+            ))}
+          </div>
+          {lightboxIdx != null && (
+            <PhotoLightbox
+              photos={photos}
+              urls={urls}
+              index={lightboxIdx}
+              onClose={() => setLightboxIdx(null)}
+              onIndex={setLightboxIdx}
+            />
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function PhotoCard({ photo, workspaceId, visitId }) {
-  const hasCoords = photo.latitude != null && photo.longitude != null;
-  return (
-    <div className="fv-photo">
-      <AuthImg src={`/api/workspaces/${encodeURIComponent(workspaceId)}/field-visits/${encodeURIComponent(visitId)}/photos/${encodeURIComponent(photo.id)}`} />
-      <div className="fv-pmeta">
-        {photo.photo_category ? <div>{photo.photo_category}</div> : null}
-        <div>{hasCoords ? fmtCoords(photo.latitude, photo.longitude) : "no coordinates"}</div>
-        {photo.gps_accuracy_meters != null ? <div>±{Math.round(photo.gps_accuracy_meters)} m</div> : null}
-        {photo.captured_at ? <div>captured {new Date(photo.captured_at * 1000).toLocaleString()}</div> : null}
-        {hasCoords ? (
-          <a href={osmUrl(photo.latitude, photo.longitude)} target="_blank" rel="noopener noreferrer">
-            View location
-          </a>
-        ) : null}
-      </div>
-    </div>
+function PhotoLightbox({ photos, urls, index, onClose, onIndex }) {
+  const total = photos.length;
+  const go = useCallback(
+    (delta) => onIndex((i) => (i + delta + total) % total),
+    [onIndex, total],
   );
-}
 
-function AuthImg({ src }) {
-  const [url, setUrl] = useState(null);
-  const [failed, setFailed] = useState(false);
   useEffect(() => {
-    let cancelled = false;
-    let obj = null;
-    (async () => {
-      try {
-        obj = await apiObjectUrl(src);
-        if (cancelled) URL.revokeObjectURL(obj);
-        else setUrl(obj);
-      } catch {
-        if (!cancelled) setFailed(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      if (obj) URL.revokeObjectURL(obj);
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+      else if (e.key === "ArrowLeft" && total > 1) go(-1);
+      else if (e.key === "ArrowRight" && total > 1) go(1);
     };
-  }, [src]);
-  if (failed) return <div className="fv-photo-ph">image unavailable</div>;
-  if (!url) return <div className="fv-photo-ph">loading…</div>;
-  return <img src={url} alt="Field visit photo" loading="lazy" />;
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose, go, total]);
+
+  const p = photos[index];
+  const hasCoords = p.latitude != null && p.longitude != null;
+  const u = urls[p.id];
+
+  return createPortal(
+    <div className="lbx-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Field visit photo">
+      <div className="lbx" onClick={(e) => e.stopPropagation()}>
+        <div className="lbx-head">
+          <span className="lbx-count">Photo {index + 1} of {total}</span>
+          <button type="button" className="lbx-x" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+
+        <div className="lbx-stage">
+          {total > 1 && (
+            <button type="button" className="lbx-arrow lbx-arrow--prev" onClick={() => go(-1)} aria-label="Previous photo">‹</button>
+          )}
+          {u === undefined ? (
+            <div className="lbx-ph">loading…</div>
+          ) : u === "" ? (
+            <div className="lbx-ph">image unavailable</div>
+          ) : (
+            <img className="lbx-img" src={u} alt={`Field visit photo ${index + 1}`} />
+          )}
+          {total > 1 && (
+            <button type="button" className="lbx-arrow lbx-arrow--next" onClick={() => go(1)} aria-label="Next photo">›</button>
+          )}
+        </div>
+
+        <dl className="lbx-meta">
+          {p.photo_category ? (
+            <div style={{ display: "contents" }}><dt>Category</dt><dd>{p.photo_category}</dd></div>
+          ) : null}
+          <div style={{ display: "contents" }}>
+            <dt>Latitude</dt>
+            <dd>{hasCoords ? Number(p.latitude).toFixed(6) : "—"}</dd>
+          </div>
+          <div style={{ display: "contents" }}>
+            <dt>Longitude</dt>
+            <dd>{hasCoords ? Number(p.longitude).toFixed(6) : "—"}</dd>
+          </div>
+          <div style={{ display: "contents" }}>
+            <dt>Accuracy</dt>
+            <dd>{p.gps_accuracy_meters != null ? `± ${Math.round(p.gps_accuracy_meters)} m` : "—"}</dd>
+          </div>
+          <div style={{ display: "contents" }}>
+            <dt>Captured</dt>
+            <dd>{p.captured_at ? new Date(p.captured_at * 1000).toLocaleString() : "—"}</dd>
+          </div>
+          <div style={{ display: "contents" }}>
+            <dt>Location</dt>
+            <dd>{p.place_name ? p.place_name : <span className="lbx-muted">Location name unavailable</span>}</dd>
+          </div>
+        </dl>
+
+        {hasCoords && (
+          <a className="lbx-osm" href={osmUrl(p.latitude, p.longitude)} target="_blank" rel="noopener noreferrer">
+            View on OpenStreetMap
+          </a>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
 }

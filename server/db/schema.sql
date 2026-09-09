@@ -1222,6 +1222,11 @@ CREATE INDEX idx_field_visits_device ON field_visits(device_id, created_at DESC)
 -- they are absent or out of range) - the columns are nullable only so a future
 -- import path isn't boxed in, never because the API accepts a photo without a
 -- fix. photo_category is freeform (nullable) - e.g. 'device_front', 'serial_label'.
+--
+-- place_name: human-readable location reverse-geocoded from lat/long via OSM
+-- Nominatim (lib/reverse-geocode.js) right after upload, best-effort. NULL when
+-- the lookup failed / timed out / is disabled - the photo still saves with its
+-- coordinates. Never blocks the upload (see routes/workspaces.js).
 CREATE TABLE IF NOT EXISTS field_visit_photos (
     id                   VARCHAR(64) PRIMARY KEY,
     visit_id             VARCHAR(64) NOT NULL,
@@ -1230,6 +1235,7 @@ CREATE TABLE IF NOT EXISTS field_visit_photos (
     longitude            DOUBLE,
     gps_accuracy_meters  DOUBLE,
     photo_category       VARCHAR(100),
+    place_name           VARCHAR(255),
     captured_at          BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     FOREIGN KEY (visit_id) REFERENCES field_visits(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
