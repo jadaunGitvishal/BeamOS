@@ -1,7 +1,35 @@
-/* Field Tech app — deliberately dependency-free. Mobile-first: this is used on a
-   phone in the field, one-handed, sometimes in bright sun. Big tap targets
-   (>=48px), 16px+ text everywhere (also stops iOS Safari auto-zooming form
-   inputs), generous spacing, single column, no desktop density. */
+/* Field Tech app — dependency-free, mobile-first (used on a phone in the field,
+   one-handed, often in bright sun): big tap targets (>=48px), 16px+ text
+   everywhere (also stops iOS Safari auto-zooming inputs), single column.
+
+   Visual branding reuses BeamOS's established Dashboard values verbatim:
+   self-hosted Archivo / IBM Plex Mono (same woff2 files as
+   frontend/dashboard-src/src/styles/fonts/), cyan #17B9E7 accent, the navy
+   sidebar tones for the login screen. Served same-origin from
+   /field-tech/assets/, which the server's fontSrc 'self' CSP already allows —
+   same fix as the Dashboard's font commit (5dd30f1). */
+
+@font-face {
+  font-family: "Archivo";
+  src: url("./fonts/archivo-latin-var.woff2") format("woff2");
+  font-weight: 400 700; /* variable weight axis */
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("./fonts/ibm-plex-mono-latin-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("./fonts/ibm-plex-mono-latin-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
 
 *,
 *::before,
@@ -10,16 +38,34 @@
 }
 
 :root {
-  --bg: #0d1b2a;
+  /* --- BeamOS palette (values from frontend/dashboard-src/src/styles/beamos-theme.css) --- */
+  --navy-950: #071421;
+  --navy-900: #0b1b2a;
+  --canvas: #f2f5f8;
   --card: #ffffff;
-  --ink: #14202e;
-  --muted: #5b6b7c;
-  --line: #d6dee6;
-  --accent: #1f6feb;
-  --accent-press: #1858c0;
-  --error: #c0392b;
-  --dev: #8a6d1d;
-  --dev-bg: #fff7e0;
+  --ink: #111826;
+  --ink2: #4c5868;
+  --muted: #6b7688;
+  --line: #e1e7ee;
+  --line-soft: #edf1f6;
+  --cyan: #17b9e7;
+  --cyan-press: #0fa2ca;
+  --cyan-tint: #e4f5fc;
+  /* pure #17B9E7 fails WCAG AA as text on white (~2.4:1); this darker shade of
+     the same hue is used only where the accent is TEXT (links, back). */
+  --cyan-ink: #0d7c9e;
+  --accent: var(--cyan);
+  --ok: #0e8a47;
+  --ok-tint: #e4f4ea;
+  --warn: #b45309;
+  --warn-tint: #fdf0df;
+  --bad: #be3b31;
+  --bad-tint: #fbe9e7;
+  --error: #be3b31;
+  --dev: #b45309; /* amber — photo low-accuracy warning */
+
+  --f-ui: "Archivo", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 html,
@@ -29,9 +75,10 @@ body {
 }
 
 body {
-  background: var(--bg);
+  background: var(--canvas);
   color: var(--ink);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--f-ui);
+  -webkit-font-smoothing: antialiased;
   -webkit-text-size-adjust: 100%;
 }
 
@@ -44,42 +91,82 @@ body {
   min-height: 100vh;
   min-height: 100dvh;
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
   padding: clamp(16px, 6vw, 40px) 16px calc(env(safe-area-inset-bottom, 0px) + 32px);
 }
 
 .screen--center {
+  justify-content: center;
+}
+
+/* Login screen only — on-brand navy, matching the Dashboard sidebar gradient. */
+.screen--brand {
+  justify-content: center;
+  gap: 22px;
+  background: radial-gradient(circle at 24% 6%, #153b50 0, #071421 38%, #06111d 100%);
+}
+
+/* CXO1.ai wordmark — same lockup as the Dashboard sidebar (.brand-name). */
+.brandmark {
+  display: flex;
+  flex-direction: column;
   align-items: center;
+  gap: 6px;
+}
+.brandmark__name {
+  color: #fff;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.015em;
+}
+.brandmark__name span {
+  color: var(--cyan);
+}
+.brandmark__tag {
+  color: #8fa5b5;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
 }
 
 .card {
   width: 100%;
   max-width: 420px;
   background: var(--card);
-  border-radius: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
   padding: 24px 20px 28px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
-  margin-top: clamp(24px, 12vh, 96px);
+  box-shadow: 0 18px 44px rgba(7, 20, 33, 0.16);
+}
+
+.screen:not(.screen--brand) .card {
+  margin-top: clamp(20px, 8vh, 72px);
 }
 
 .brand {
-  margin: 0 0 20px;
-  font-size: 20px;
+  margin: 0 0 18px;
+  font-size: 18px;
   font-weight: 700;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.005em;
+  color: var(--ink);
+}
+.brand span {
+  color: var(--cyan);
 }
 
 .lead {
-  font-size: 19px;
+  font-size: 18px;
   margin: 4px 0 16px;
 }
 
 .field-label {
   display: block;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--ink2);
   margin: 4px 0 8px;
 }
 
@@ -88,22 +175,25 @@ body {
   width: 100%;
   min-height: 52px;
   padding: 12px 14px;
+  font-family: inherit;
   font-size: 18px;
   color: var(--ink);
   background: #fff;
   border: 1.5px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 
 .input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.18);
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(23, 185, 231, 0.28);
 }
 
 .input--code {
   letter-spacing: 0.35em;
   text-align: center;
+  font-family: var(--f-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -113,56 +203,59 @@ body {
   min-height: 52px;
   margin-top: 18px;
   padding: 14px 16px;
+  font-family: inherit;
   font-size: 18px;
   font-weight: 700;
-  color: #fff;
-  background: var(--accent);
+  letter-spacing: 0.005em;
+  color: var(--navy-950);
+  background: var(--cyan);
   border: none;
-  border-radius: 12px;
+  border-radius: 10px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s;
 }
 
 .button:active {
-  background: var(--accent-press);
+  background: var(--cyan-press);
 }
 
 .button:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: default;
 }
 
 .button--secondary {
-  color: var(--accent);
-  background: #eef4ff;
+  color: var(--cyan-ink);
+  background: var(--cyan-tint);
 }
 
 .button--secondary:active {
-  background: #dfeaff;
+  background: #d3eef8;
 }
 
 .button--link {
   margin-top: 12px;
   min-height: 44px;
-  color: var(--accent);
+  color: var(--cyan-ink);
   background: transparent;
   font-weight: 600;
 }
 
 .button--link:active {
-  background: #f1f5f9;
+  background: var(--line-soft);
 }
 
 .muted {
   color: var(--muted);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.5;
   margin: 0 0 12px;
 }
 
 .error {
   color: var(--error);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.45;
   margin: 12px 0 0;
   font-weight: 600;
@@ -171,20 +264,20 @@ body {
 .dev-note {
   margin: 16px 0 0;
   padding: 10px 12px;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.45;
-  color: var(--dev);
-  background: var(--dev-bg);
+  color: var(--warn);
+  background: var(--warn-tint);
   border: 1px dashed #e3c766;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .kv {
   margin: 0 0 16px;
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 4px 16px;
-  font-size: 16px;
+  gap: 5px 16px;
+  font-size: 15px;
 }
 
 .kv dt {
@@ -194,20 +287,22 @@ body {
 
 .kv dd {
   margin: 0;
+  color: var(--ink2);
   word-break: break-word;
 }
 
-/* ---- B2a: pickers + steps ---- */
+/* ---- pickers + steps ---- */
 
 .step-title {
   margin: 4px 0 4px;
   font-size: 18px;
   font-weight: 700;
+  color: var(--ink);
 }
 
 .step-sub {
   margin: 0 0 14px;
-  font-size: 16px;
+  font-size: 15px;
   color: var(--muted);
 }
 
@@ -216,9 +311,10 @@ body {
   margin: 0 0 12px;
   padding: 6px 4px;
   min-height: 40px;
-  font-size: 16px;
+  font-family: inherit;
+  font-size: 15px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--cyan-ink);
   background: transparent;
   border: none;
   cursor: pointer;
@@ -233,7 +329,6 @@ body {
   gap: 10px;
 }
 
-/* full-width tappable row */
 .row {
   width: 100%;
   min-height: 60px;
@@ -242,16 +337,18 @@ body {
   align-items: flex-start;
   gap: 4px;
   padding: 14px 14px;
+  font-family: inherit;
   background: #f6f8fb;
   border: 1.5px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   text-align: left;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
 
 .row:active {
-  background: #eef2f7;
+  background: var(--cyan-tint);
+  border-color: var(--cyan);
 }
 
 .row:disabled {
@@ -265,32 +362,31 @@ body {
 }
 
 .row__meta {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--muted);
 }
 
-/* status tag on the device rows */
 .tag {
   align-self: flex-start;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 2px 8px;
+  letter-spacing: 0.04em;
+  padding: 2px 9px;
   border-radius: 999px;
 }
 
 .tag--ok {
-  color: #0f6b2e;
-  background: #d8f2df;
+  color: var(--ok);
+  background: var(--ok-tint);
 }
 
 .tag--off {
-  color: #7a3030;
-  background: #f2dede;
+  color: var(--bad);
+  background: var(--bad-tint);
 }
 
-/* visit-type selector */
+/* visit-type / device-status selector */
 .choice-group {
   display: flex;
   flex-direction: column;
@@ -302,23 +398,24 @@ body {
   width: 100%;
   min-height: 52px;
   padding: 12px 14px;
+  font-family: inherit;
   font-size: 17px;
   font-weight: 600;
   color: var(--ink);
   background: #f6f8fb;
   border: 2px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   text-align: left;
   cursor: pointer;
 }
 
 .choice--on {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: #eaf1ff;
+  color: var(--cyan-ink);
+  border-color: var(--cyan);
+  background: var(--cyan-tint);
 }
 
-/* ---- B2b: completion form + photos ---- */
+/* ---- completion form + photos ---- */
 
 .form-field {
   margin: 0 0 16px;
@@ -337,14 +434,14 @@ body {
 }
 
 .mono-sm {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--f-mono);
   font-size: 13px;
   word-break: break-all;
 }
 
 .photo-card {
   border: 1.5px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   overflow: hidden;
   margin-bottom: 12px;
   background: #fff;
@@ -355,7 +452,7 @@ body {
   width: 100%;
   max-height: 260px;
   object-fit: cover;
-  background: #000;
+  background: var(--navy-950);
 }
 
 .photo-card__body {
@@ -366,6 +463,7 @@ body {
   margin: 4px 0 0;
   font-size: 14px;
   line-height: 1.4;
+  font-family: var(--f-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -404,7 +502,7 @@ body {
 
 .button--danger {
   color: #fff;
-  background: var(--error);
+  background: var(--bad);
 }
 
 .button--danger:active {
@@ -416,4 +514,11 @@ body {
   font-size: 15px;
   font-weight: 600;
   color: var(--muted);
+}
+
+/* keyboard focus — cyan, same as the Dashboard's :focus-visible */
+:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+  border-radius: 6px;
 }

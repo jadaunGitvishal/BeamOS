@@ -97,7 +97,7 @@ export default function VisitFlow({ me, onLogout, onSessionExpired }) {
   return (
     <main className="screen">
       <div className="card">
-        <h1 className="brand">BeamOS Field Tech</h1>
+        <h1 className="brand">CXO1<span>.ai</span> · Field Tech</h1>
 
         {step === "workspaces" && (
           <>

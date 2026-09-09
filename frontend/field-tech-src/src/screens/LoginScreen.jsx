@@ -82,10 +82,13 @@ export default function LoginScreen({ onAuthed }) {
   }
 
   return (
-    <main className="screen">
-      <div className="card">
-        <h1 className="brand">BeamOS Field Tech</h1>
+    <main className="screen screen--brand">
+      <div className="brandmark">
+        <span className="brandmark__name">CXO1<span>.ai</span></span>
+        <span className="brandmark__tag">Field Technician</span>
+      </div>
 
+      <div className="card">
         {step === "phone" && (
           <form onSubmit={submitPhone} noValidate>
             <label className="field-label" htmlFor="phone">
@@ -98,7 +101,7 @@ export default function LoginScreen({ onAuthed }) {
               inputMode="tel"
               autoComplete="tel"
               autoFocus
-              placeholder="+1 555 123 4567"
+              placeholder="+91 98765 43210"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
             />
