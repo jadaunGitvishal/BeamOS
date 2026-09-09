@@ -113,7 +113,7 @@ test('write path: PUT /api/auth/me stores the phone CANONICALIZED, not as typed'
 
 test('login then works with EVERY format, because both sides canonicalized', async () => {
   for (const fmt of ['+919876543210', '919876543210', '9876543210', '+91 98765 43210', '09876543210']) {
-    const v = await call('POST', '/api/field-auth/verify-otp', null, { phone: fmt, code: '123456' });
+    const v = await call('POST', '/api/field-auth/verify-otp', null, { phone: fmt, code: '000999' });
     assert.equal(v.status, 200, `login with "${fmt}" should succeed`);
     assert.equal((await v.json()).user.id, 'u-tech');
   }

@@ -333,12 +333,14 @@ test('concurrent identical POSTs with the same client_visit_uuid still yield ONE
 
 // ============================ OTP FLOW ============================
 
+const DUMMY_CODE = '000999';
+
 test('OTP: correct dummy code issues a working BeamOS session token', async () => {
   const send = await call('POST', '/api/field-auth/send-otp', null, { phone: '+1 555-123-0000' });
   assert.equal(send.status, 200);
   assert.deepEqual(await send.json(), { sent: true });
 
-  const verify = await call('POST', '/api/field-auth/verify-otp', null, { phone: '+15551230000', code: '123456' });
+  const verify = await call('POST', '/api/field-auth/verify-otp', null, { phone: '+15551230000', code: DUMMY_CODE });
   assert.equal(verify.status, 200);
   const out = await verify.json();
   assert.ok(out.token, 'token issued');
@@ -351,15 +353,23 @@ test('OTP: correct dummy code issues a working BeamOS session token', async () =
 
 test('OTP: wrong code and unknown phone both fail with 401', async () => {
   assert.equal((await call('POST', '/api/field-auth/verify-otp', null, { phone: '+15551230000', code: '000000' })).status, 401);
-  assert.equal((await call('POST', '/api/field-auth/verify-otp', null, { phone: '+19999999999', code: '123456' })).status, 401);
-  assert.equal((await call('POST', '/api/field-auth/verify-otp', null, { phone: 'not-a-phone', code: '123456' })).status, 400);
+  // the PREVIOUS dummy code (123456) must now be rejected
+  assert.equal((await call('POST', '/api/field-auth/verify-otp', null, { phone: '+15551230000', code: '123456' })).status, 401);
+  assert.equal((await call('POST', '/api/field-auth/verify-otp', null, { phone: '+19999999999', code: DUMMY_CODE })).status, 401);
+  assert.equal((await call('POST', '/api/field-auth/verify-otp', null, { phone: 'not-a-phone', code: DUMMY_CODE })).status, 400);
 });
 
 test('OTP: the placeholder/dummy nature is unmistakable in the source', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'field-auth.js'), 'utf8');
   assert.match(src, /PLACEHOLDER/);
   assert.match(src, /NOT PRODUCTION-READY/i);
-  assert.match(src, /DUMMY_OTP_CODE\s*=\s*'123456'/);
+  assert.match(src, /DUMMY_OTP_CODE\s*=\s*'000999'/);
   // the "send" path does not actually send anything - it logs
   assert.match(src, /no SMS sent|logs the fixed dummy code|console\.warn/);
+});
+
+test('OTP: the dummy code is NOT shown anywhere in the login UI', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'field-tech-src', 'src', 'screens', 'LoginScreen.jsx'), 'utf8');
+  assert.doesNotMatch(src, /000999|123456/);
+  assert.doesNotMatch(src, /dev-note|DEV_OTP_CODE/);
 });

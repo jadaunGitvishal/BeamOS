@@ -2,14 +2,11 @@ import { useRef, useState } from "react";
 import { postJson, getMe, setSession, NetworkError, ApiError } from "../lib/api.js";
 import { normalizePhone } from "../lib/phone.js";
 
-// ⚠️ DEV/TEST AID — remove together with the placeholder OTP backend.
-// The backend (server/routes/field-auth.js) is a documented placeholder: it
-// never sends an SMS, it accepts one hardcoded code. Surfacing that code on the
-// OTP screen (clearly labelled) lets Stage B2 development + the browser
-// verification test drive the real flow without an SMS provider. When
-// field-auth.js gains a real provider, delete this constant and the <p class=
-// "dev-note"> that renders it.
-const DEV_OTP_CODE = "123456";
+// Phone -> OTP login. The backend (server/routes/field-auth.js) is a documented
+// PLACEHOLDER: it never sends an SMS and accepts one hard-coded code. That code
+// is deliberately NOT shown anywhere in this UI — a real technician must be
+// given it out of band. (When field-auth.js gains a real SMS provider, nothing
+// on this screen changes.)
 
 export default function LoginScreen({ onAuthed }) {
   const [step, setStep] = useState("phone"); // "phone" | "otp"
@@ -55,7 +52,7 @@ export default function LoginScreen({ onAuthed }) {
     if (busy) return;
     const trimmed = code.trim();
     if (!/^\d{4,8}$/.test(trimmed)) {
-      setError("Enter the numeric code from your text message.");
+      setError("Enter the numeric code you were given.");
       return;
     }
     setError("");
@@ -109,9 +106,6 @@ export default function LoginScreen({ onAuthed }) {
             <button className="button" type="submit" disabled={busy}>
               {busy ? "Sending…" : "Send code"}
             </button>
-            <p className="dev-note">
-              Testing build — the code is not texted. Use <strong>{DEV_OTP_CODE}</strong>.
-            </p>
           </form>
         )}
 
@@ -131,7 +125,7 @@ export default function LoginScreen({ onAuthed }) {
               autoComplete="one-time-code"
               autoFocus
               maxLength={8}
-              placeholder="123456"
+              placeholder="——————"
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/[^\d]/g, ""))}
             />

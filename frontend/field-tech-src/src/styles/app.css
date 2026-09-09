@@ -261,17 +261,6 @@ body {
   font-weight: 600;
 }
 
-.dev-note {
-  margin: 16px 0 0;
-  padding: 10px 12px;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--warn);
-  background: var(--warn-tint);
-  border: 1px dashed #e3c766;
-  border-radius: 8px;
-}
-
 .kv {
   margin: 0 0 16px;
   display: grid;

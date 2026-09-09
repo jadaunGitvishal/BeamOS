@@ -35,9 +35,9 @@ const { asyncHandler } = require('../lib/async-handler');
 // stored E.164 value. See lib/field-phone.js.
 const { normalizePhone } = require('../lib/field-phone');
 
-// PLACEHOLDER: the one code every field login accepts. Delete when the real
-// SMS-backed flow lands.
-const DUMMY_OTP_CODE = '123456';
+// PLACEHOLDER: the one code every field login accepts. Given to technicians out
+// of band; never shown in the app UI. Delete when the real SMS-backed flow lands.
+const DUMMY_OTP_CODE = '000999';
 
 async function findUserByPhone(phone) {
   return db
