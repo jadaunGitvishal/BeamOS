@@ -95,11 +95,9 @@ async function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
 }
 
 async function logFailedLogin(email, ip, reason) {
-  try {
-    await db.prepare(
-      "INSERT INTO activity_log (user_id, action, details, ip_address) VALUES (NULL, ?, ?, ?)",
-    ).run("auth:login_failed", `${email} - ${reason}`, ip);
-  } catch {}
+  // Ref 17: via logActivity so it lands in the tamper-evident hash chain like
+  // every other audit row (was a raw INSERT).
+  await logActivity(null, "auth:login_failed", `${email} - ${reason}`, null, ip, null);
 }
 
 async function logSuccessfulLogin(userId, email, ip) {
@@ -113,9 +111,8 @@ async function logSuccessfulLogin(userId, email, ip) {
         "SELECT workspace_id FROM workspace_members WHERE user_id = ? ORDER BY joined_at ASC LIMIT 1",
       )
       .get(userId);
-    await db.prepare(
-      "INSERT INTO activity_log (user_id, action, details, ip_address, workspace_id) VALUES (?, ?, ?, ?, ?)",
-    ).run(userId, "auth:login_success", email, ip, ws?.workspace_id || null);
+    // Ref 17: chained, same as every other audit row (was a raw INSERT).
+    await logActivity(userId, "auth:login_success", email, null, ip, ws?.workspace_id || null);
     await db.prepare(
       "UPDATE users SET last_login = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(userId);

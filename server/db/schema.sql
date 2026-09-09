@@ -699,6 +699,16 @@ CREATE TABLE IF NOT EXISTS activity_log (
     details         TEXT,
     ip_address      VARCHAR(45),
     created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    -- Ref 17: tamper-evident hash chain. entry_hash = SHA-256 over EXACTLY
+    -- (prev_hash, user_id, action, details, ip_address, created_at) - see
+    -- lib/activity-chain.js for the precise, canonical serialization and the
+    -- rationale for what is and isn't covered. prev_hash is the previous row's
+    -- entry_hash (a fixed 64-zero genesis for the first row ever). Nullable so
+    -- pre-Ref-17 rows and any non-chained raw insert don't break; the verifier
+    -- treats a NULL entry_hash as an unchained (failed) entry. Written only by
+    -- lib/activity-chain.js appendEntry(), inside a row-locked transaction.
+    prev_hash       CHAR(64),
+    entry_hash      CHAR(64),
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL,
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL,
@@ -707,6 +717,20 @@ CREATE TABLE IF NOT EXISTS activity_log (
 
 CREATE INDEX idx_activity_log_time ON activity_log(created_at DESC);
 CREATE INDEX idx_activity_log_user ON activity_log(user_id, created_at DESC);
+
+-- Ref 17: single-row anchor for the activity_log hash chain. appendEntry() opens
+-- its transaction with an UPDATE of row id=1, taking an exclusive row lock that
+-- serializes every concurrent append so two inserts can't both chain from the
+-- same predecessor (which would fork the chain). last_hash also lets the verifier
+-- detect truncation of the newest rows - deleting from the tail leaves no
+-- successor to notice the gap, but last_hash still points past them.
+CREATE TABLE IF NOT EXISTS activity_log_chain (
+    id          TINYINT PRIMARY KEY,
+    last_hash   CHAR(64) NOT NULL,
+    entry_count BIGINT NOT NULL DEFAULT 0,
+    updated_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT IGNORE INTO activity_log_chain (id, last_hash, entry_count) VALUES (1, REPEAT('0', 64), 0);
 
 -- ===================== WHITE LABEL =====================
 

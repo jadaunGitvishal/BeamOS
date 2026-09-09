@@ -1,5 +1,6 @@
 const { db } = require("../db/database");
 const { sendEmail } = require("./email");
+const { logActivity } = require("./activity");
 
 // Per-(alert_type, target_id) dedup. In-memory Map; restarts reset it, which
 // at current alert volume is fine - worst case is one duplicate alert after
@@ -82,20 +83,16 @@ async function checkOfflineDevices(io) {
       );
 
       // Log activity. Phase 2.2 writer-leak fix: stamp workspace_id from the
-      // device so the row is tenant-queryable.
-      try {
-        await db
-          .prepare(
-            "INSERT INTO activity_log (user_id, device_id, action, details, workspace_id) VALUES (?, ?, ?, ?, ?)",
-          )
-          .run(
-            device.user_id,
-            device.id,
-            "alert:device_offline",
-            `${device.name} offline for ${offlineMinutes}m`,
-            device.workspace_id || null,
-          );
-      } catch {}
+      // device so the row is tenant-queryable. Ref 17: via logActivity so it
+      // joins the tamper-evident hash chain (was a raw INSERT).
+      await logActivity(
+        device.user_id,
+        "alert:device_offline",
+        `${device.name} offline for ${offlineMinutes}m`,
+        device.id,
+        null,
+        device.workspace_id || null,
+      );
     }
   }
 

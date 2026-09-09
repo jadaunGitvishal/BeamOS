@@ -21,6 +21,7 @@ const REQUIRED_TABLES = [
   'campaigns',          // Phase 5 Stage A: campaign wrappers around playlists
   'field_visits',       // Ref 43 Stage A: field-visit inspections
   'field_visit_photos', // Ref 43 Stage A: geotagged inspection photos
+  'activity_log_chain', // Ref 17: single-row anchor for the audit-log hash chain
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
@@ -62,6 +63,12 @@ const REQUIRED_COLUMNS = [
   // Ref 43: reverse-geocoded place name on a field-visit photo. The photo detail
   // route SELECTs it; the upload route UPDATEs it best-effort. Nullable, no default.
   ['field_visit_photos', 'place_name', "ALTER TABLE field_visit_photos ADD COLUMN place_name VARCHAR(255) NULL"],
+  // Ref 17: tamper-evident hash chain on activity_log. appendEntry() writes both
+  // on every new row; lib/activity-chain.js backfillChain() fills them for rows
+  // that predate this column at boot. Nullable - a NULL entry_hash is an
+  // unchained row, which the verifier reports as a failure.
+  ['activity_log', 'prev_hash', "ALTER TABLE activity_log ADD COLUMN prev_hash CHAR(64) NULL"],
+  ['activity_log', 'entry_hash', "ALTER TABLE activity_log ADD COLUMN entry_hash CHAR(64) NULL"],
 ];
 
 function defaultOnMissing(missing) {

@@ -50,9 +50,32 @@ db.exec(`
   );
   CREATE TABLE activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, device_id TEXT, action TEXT,
-    details TEXT, ip_address TEXT, workspace_id TEXT, created_at INTEGER DEFAULT 0
+    details TEXT, ip_address TEXT, workspace_id TEXT, organization_id TEXT,
+    acting_user_id TEXT, was_acting_as INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT 0, prev_hash TEXT, entry_hash TEXT
+  );
+  CREATE TABLE activity_log_chain (
+    id INTEGER PRIMARY KEY, last_hash TEXT NOT NULL, entry_count INTEGER NOT NULL DEFAULT 0, updated_at INTEGER DEFAULT 0
   );
 `);
+db.prepare("INSERT INTO activity_log_chain (id, last_hash, entry_count) VALUES (1, ?, 0)").run('0'.repeat(64));
+
+// Ref 17: logActivity() now appends through lib/activity-chain.appendEntry(),
+// which uses the production db.transaction(fn) contract (an async runner that
+// hands fn a tx handle). better-sqlite3's native .transaction() is sync-only and
+// passes no handle, so override it with a shim of that contract.
+const _rawExec = db.exec.bind(db);
+db.transaction = (fn) => async (...args) => {
+  _rawExec('BEGIN');
+  try {
+    const r = await fn(db, ...args);
+    _rawExec('COMMIT');
+    return r;
+  } catch (e) {
+    try { _rawExec('ROLLBACK'); } catch { /* already rolled back */ }
+    throw e;
+  }
+};
 
 const dbModulePath = require.resolve('../db/database');
 require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };

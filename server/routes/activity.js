@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
+const { db } = require("../db/database");
 const { getActivity, pruneActivityLog } = require("../services/activity");
+const { verifyChain } = require("../lib/activity-chain");
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require("../middleware/auth");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
@@ -103,5 +105,30 @@ router.delete("/prune", (req, res) => {
   pruneActivityLog();
   res.json({ success: true });
 });
+
+// GET /verify-integrity?start_id=&end_id=  (admin only)
+// Ref 17: walk the activity_log hash chain and confirm (a) every entry's stored
+// entry_hash still matches a fresh hash of its content, and (b) every prev_hash
+// links to the actual preceding entry - catching altered content, and
+// deleted/reordered rows. Optional start_id/end_id restricts the walk to a range
+// (the row just before start_id anchors the first link check). No range = whole
+// chain, which additionally checks the newest row against activity_log_chain
+// (tail-truncation) and the row count.
+router.get(
+  "/verify-integrity",
+  asyncHandler(async (req, res) => {
+    if (!ELEVATED_ROLES.includes(req.user.role))
+      return res.status(403).json({ error: "Admin only" });
+
+    const startId = req.query.start_id != null && req.query.start_id !== "" ? Number(req.query.start_id) : null;
+    const endId = req.query.end_id != null && req.query.end_id !== "" ? Number(req.query.end_id) : null;
+    if ((startId != null && !Number.isFinite(startId)) || (endId != null && !Number.isFinite(endId)))
+      return res.status(400).json({ error: "start_id and end_id must be numeric" });
+
+    // Always HTTP 200 - the request succeeded; report.ok is the integrity verdict.
+    const report = await verifyChain(db, { startId, endId });
+    res.json(report);
+  }),
+);
 
 module.exports = router;

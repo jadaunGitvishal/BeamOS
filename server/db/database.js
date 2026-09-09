@@ -243,6 +243,13 @@ async function initDb() {
   const { verifyAndRepairSchema } = require("../lib/schema-check");
   await verifyAndRepairSchema(db);
 
+  // Ref 17: chain any pre-existing activity_log rows into the tamper-evident hash
+  // chain (one-time per row; a no-op once every row is chained). Runs here -
+  // after the columns are guaranteed present, before the server accepts requests
+  // - so there are never concurrent writes racing the backfill.
+  const { backfillChain } = require("../lib/activity-chain");
+  await backfillChain(db);
+
   // Warm the app_settings in-memory cache (lib/app-settings.js) so its get()/getBool()
   // reads - called synchronously inline in the /api/status hot path - never race an
   // empty cache. Required lazily (not at module top) to avoid a require cycle:

@@ -2,6 +2,7 @@ const { db } = require('../db/database');
 const config = require('../config');
 const proxyaddr = require('proxy-addr');
 const { trustedProxies } = require('../config/cloudflareIps');
+const { appendEntry } = require('../lib/activity-chain');
 
 // Gate function: returns true when an immediate TCP peer is one we trust
 // to populate forwarding headers (Cloudflare edges, loopback, link-local,
@@ -40,9 +41,15 @@ async function logActivity(userId, action, details = null, deviceId = null, ipAd
       const d = await db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
       ws = d?.workspace_id || null;
     }
-    await db.prepare(
-      'INSERT INTO activity_log (user_id, device_id, action, details, ip_address, workspace_id) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(userId || null, deviceId || null, action, details || null, ipAddress || null, ws);
+    // Ref 17: every audit row goes through the chained, concurrency-safe writer.
+    await appendEntry(db, {
+      user_id: userId || null,
+      device_id: deviceId || null,
+      action,
+      details: details || null,
+      ip_address: ipAddress || null,
+      workspace_id: ws,
+    });
   } catch (e) {
     console.error('Activity log error:', e.message);
   }
