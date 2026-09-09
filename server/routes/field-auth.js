@@ -34,6 +34,9 @@ const { asyncHandler } = require('../lib/async-handler');
 // typed any way (bare 10-digit, "+91…", "0…", spaces) resolves to the one
 // stored E.164 value. See lib/field-phone.js.
 const { normalizePhone } = require('../lib/field-phone');
+// Ref 17: failed OTP verification is an authentication event the RFP wants
+// captured. Same writer + label as password-login failures in routes/auth.js.
+const { logActivity, getClientIp } = require('../services/activity');
 
 // PLACEHOLDER: the one code every field login accepts. Given to technicians out
 // of band; never shown in the app UI. Delete when the real SMS-backed flow lands.
@@ -74,6 +77,15 @@ router.post('/verify-otp', asyncHandler(async (req, res) => {
   // PLACEHOLDER check — one fixed code, constant-time-ish compare is pointless
   // for a hardcoded stub. Wrong code OR unknown phone -> the same 401.
   if (!user || code !== DUMMY_OTP_CODE) {
+    // Record the attempt (phone + IP only, never the submitted code).
+    logActivity(
+      user?.id || null,
+      'auth:login_failed',
+      `${phone} - ${user ? 'wrong code' : 'unknown phone'} (field OTP)`,
+      null,
+      getClientIp(req),
+      null,
+    ).catch(() => {});
     return res.status(401).json({ error: 'Invalid or expired code' });
   }
 

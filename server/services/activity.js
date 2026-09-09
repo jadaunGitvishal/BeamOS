@@ -1,4 +1,5 @@
 const { db } = require('../db/database');
+const config = require('../config');
 const proxyaddr = require('proxy-addr');
 const { trustedProxies } = require('../config/cloudflareIps');
 
@@ -62,26 +63,39 @@ async function getActivity(options = {}) {
   return db.prepare(sql).all(...params);
 }
 
-// Prune old activity logs (keep 90 days)
+// Prune activity_log rows past the retention window (config.auditLogRetentionDays,
+// ≥365 per RFP compliance). Boundary: a row is deleted once it is strictly older
+// than the window — a row exactly N days old is kept.
+// Only ever invoked by the manual admin action DELETE /api/activity/prune; no
+// scheduler or background sweep calls this.
 async function pruneActivityLog() {
-  await db.prepare("DELETE FROM activity_log WHERE created_at < UNIX_TIMESTAMP() - (90 * 86400)").run();
+  await db
+    .prepare("DELETE FROM activity_log WHERE created_at < UNIX_TIMESTAMP() - (? * 86400)")
+    .run(config.auditLogRetentionDays);
 }
 
-// Express middleware to auto-log API mutations
+// Express middleware to auto-log API mutations + authorization failures.
+// Fire-and-forget throughout: logActivity catches its own errors, and res.json()
+// must stay synchronous (it's a monkey-patched override called by every route
+// handler) - the write landing after the response is sent is fine, this is
+// best-effort audit logging, not part of the request's correctness.
 function activityLogger(req, res, next) {
   const originalJson = res.json.bind(res);
   res.json = function(data) {
-    // Only log successful mutations
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && res.statusCode < 400) {
-      const action = `${req.method} ${req.baseUrl || ''}${req.route?.path || req.path}`;
-      const userId = req.user?.id;
+    const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+    const path = `${req.baseUrl || ''}${req.route?.path || req.path}`;
+
+    if (isMutation && res.statusCode < 400) {
+      // Successful mutation — the audit trail of what changed.
       const deviceId = req.params?.id || req.params?.deviceId || req.body?.device_id;
-      const details = summarizeAction(req);
-      // Fire-and-forget: logActivity already catches its own errors, and res.json()
-      // must stay synchronous (it's a monkey-patched override called by every route
-      // handler) - the write happening after the response is sent is fine, this is
-      // best-effort audit logging, not part of the request's correctness.
-      logActivity(userId, action, details, deviceId, getClientIp(req), req.workspaceId || null).catch(() => {});
+      logActivity(req.user?.id, `${req.method} ${path}`, summarizeAction(req), deviceId, getClientIp(req), req.workspaceId || null).catch(() => {});
+    } else if (res.statusCode === 403) {
+      // Ref 17 (RFP: "authorization failures"): a denied request is a security
+      // event in its own right. Record the ATTEMPT only - who, which route, from
+      // where - plus the server's own refusal reason. Never the request body, so
+      // no submitted values (credentials included) can land in the log.
+      const reason = typeof data?.error === 'string' ? data.error.slice(0, 200) : null;
+      logActivity(req.user?.id || null, `ACCESS_DENIED ${req.method} ${path}`, reason, req.params?.id || req.params?.deviceId || null, getClientIp(req), req.workspaceId || null).catch(() => {});
     }
     return originalJson(data);
   };

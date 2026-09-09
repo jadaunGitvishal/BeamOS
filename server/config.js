@@ -169,6 +169,16 @@ module.exports = {
     String(process.env.AUTO_CREATE_ORG_ON_SIGNUP || "").toLowerCase(),
   ),
 
+  // Ref 17 (audit-log compliance): how many days of activity_log history to keep.
+  // pruneActivityLog() deletes rows older than this; it runs ONLY on the manual
+  // admin action DELETE /api/activity/prune — there is no scheduled/cron caller.
+  // The RFP mandates at least one year of audit retention, so 365 is both the
+  // default and an enforced floor: a lower AUDIT_LOG_RETENTION_DAYS is clamped up.
+  auditLogRetentionDays: Math.max(
+    365,
+    parseInt(process.env.AUDIT_LOG_RETENTION_DAYS) || 365,
+  ),
+
   // #142 event-loop lag telemetry (services/loop-lag.js). perf_hooks
   // monitorEventLoopDelay is C++-backed, so continuous sampling is cheap. Each
   // window's p99 is persisted to event_loop_lag (bounded: indexed + pruned from
