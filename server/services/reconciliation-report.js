@@ -68,6 +68,33 @@ async function resolveFrequencyDays(db) {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : Math.max(1, config.reconciliationFrequencyDays);
 }
 
+// The scheduling state, for surfaces that show WHEN the next report fires (the
+// dashboard's Reconciliation view) without waiting for or triggering a send.
+//   frequency_days   - the effective cadence (resolveFrequencyDays)
+//   last_report_date - watermark 'YYYY-MM-DD', or null if it has never run
+//   next_report_date - last_report_date + frequency_days, or null if never run
+//                      (a never-run report fires on the next sweep)
+//   overdue          - true if the interval has already elapsed (the next
+//                      hourly sweep will send it)
+async function getReportStatus(db, now = new Date()) {
+  const freqDays = await resolveFrequencyDays(db);
+  const last = await getSetting(db, RECON_KEY);
+  let nextDate = null;
+  let overdue = false;
+  if (last) {
+    const d = new Date(last + 'T00:00:00.000Z');
+    d.setUTCDate(d.getUTCDate() + freqDays);
+    nextDate = ymd(d);
+    overdue = daysBetween(last, ymd(now)) >= freqDays;
+  }
+  return {
+    frequency_days: freqDays,
+    last_report_date: last,
+    next_report_date: nextDate,
+    overdue,
+  };
+}
+
 // ---- report rendering --------------------------------------------------
 
 function slug(s) {
@@ -245,6 +272,7 @@ module.exports = {
   runReconciliationReports,
   runReconciliationReport,
   resolveFrequencyDays,
+  getReportStatus,
   buildReconciliationSections,
   renderReconciliationFiles,
   RECON_KEY,

@@ -14,6 +14,7 @@ import IssuesView from "./views/IssuesView";
 import RegionsView from "./views/RegionsView";
 import OperationsView from "./views/OperationsView";
 import CampaignsView from "./views/CampaignsView";
+import ReconciliationView from "./views/ReconciliationView";
 
 export default function App() {
   return (
@@ -49,6 +50,7 @@ function SessionGate() {
         <Route path="regions" element={<RegionsView />} />
         <Route path="operations" element={<OperationsView />} />
         <Route path="campaigns" element={<CampaignsView />} />
+        <Route path="reconciliation" element={<ReconciliationView />} />
         <Route path="issues" element={<IssuesView />} />
         <Route path="*" element={<OverviewView />} />
       </Route>

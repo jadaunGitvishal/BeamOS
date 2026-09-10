@@ -10,6 +10,8 @@ const appSettings = require("../lib/app-settings");
 const config = require("../config");
 const { detectOutages } = require("../lib/outage-detection");
 const { deviceAvailabilityRows } = require("../lib/sla");
+const { getReconciliation } = require("../lib/reconciliation");
+const reconReport = require("../services/reconciliation-report");
 
 // Merged in from BeamOS-Dashboard's routes/reports.js.
 
@@ -308,6 +310,63 @@ router.get(
       .all(startDate, endDate, ...wsScope.params);
 
     res.json(rows);
+  }),
+);
+
+// GET /api/dashboard/reports/reconciliation
+// Ref 49 Stage B — the LIVE, on-demand version of the scheduled reconciliation
+// report (services/reconciliation-report.js). Runs the same lib/reconciliation.js
+// query against the caller's workspace right now, so the dashboard reflects the
+// current state on page load rather than whatever the last email captured.
+//
+// RBAC: workspace-scoped like every sibling route here — resolveTenancy sets
+// req.workspaceId; no workspace -> empty payload. Read-only, any workspace
+// member (a viewer can already see the device list this derives from).
+//
+// `frequency_days` / `last_report_date` / `next_report_date` come from
+// getReportStatus() so the view can show when the next email fires; changing
+// the cadence is a separate platform-admin action (PUT /api/admin/reconciliation-frequency).
+router.get(
+  "/reconciliation",
+  asyncHandler(async (req, res) => {
+    const status = await reconReport.getReportStatus(db);
+
+    if (!req.workspaceId) {
+      return res.json({
+        generated_at: Math.floor(Date.now() / 1000),
+        stale_after_days: config.reconciliationStaleAfterDays,
+        device_count: 0,
+        frequency_days: status.frequency_days,
+        last_report_date: status.last_report_date,
+        next_report_date: status.next_report_date,
+        overdue: status.overdue,
+        counts: { ghost: 0, stale: 0, total: 0 },
+        ghosts: [],
+        stale: [],
+      });
+    }
+
+    const recon = await getReconciliation(db, { workspaceId: req.workspaceId });
+    const dc = await db
+      .prepare("SELECT COUNT(*) AS c FROM devices WHERE workspace_id = ? AND blocked = 0")
+      .get(req.workspaceId);
+
+    res.json({
+      generated_at: recon.generated_at,
+      stale_after_days: recon.stale_after_days,
+      device_count: Number(dc?.c || 0),
+      frequency_days: status.frequency_days,
+      last_report_date: status.last_report_date,
+      next_report_date: status.next_report_date,
+      overdue: status.overdue,
+      counts: {
+        ghost: recon.ghosts.length,
+        stale: recon.stale.length,
+        total: recon.ghosts.length + recon.stale.length,
+      },
+      ghosts: recon.ghosts,
+      stale: recon.stale,
+    });
   }),
 );
 

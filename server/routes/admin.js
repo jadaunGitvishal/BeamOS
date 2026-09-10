@@ -634,4 +634,41 @@ router.put("/status-debug", requirePlatformAdmin, asyncHandler(async (req, res) 
   res.json({ enabled });
 }));
 
+// ===================== Reconciliation report cadence (Ref 49) =====================
+// Platform-admin only. `reconciliation_frequency_days` (app_settings) is how many
+// days services/reconciliation-report.js waits between sends — genuinely free-form
+// (any integer 1..365), not the fixed daily/monthly of the Ref 46 digest. Persisted
+// + cached so the next hourly sweep picks it up with no restart. Platform-wide (one
+// number for the whole platform, like the SLA targets), hence platform-admin, not
+// workspace-admin. Surfaced read-only to any workspace member via
+// GET /api/dashboard/reports/reconciliation.
+router.get("/reconciliation-frequency", requirePlatformAdmin, (req, res) => {
+  res.json({
+    frequency_days: appSettings.getNum(
+      "reconciliation_frequency_days",
+      config.reconciliationFrequencyDays,
+    ),
+  });
+});
+router.put("/reconciliation-frequency", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const n = Math.floor(Number(req.body.frequency_days));
+  if (!Number.isFinite(n) || n < 1 || n > 365) {
+    return res
+      .status(400)
+      .json({ error: "frequency_days must be an integer between 1 and 365" });
+  }
+  await appSettings.set("reconciliation_frequency_days", String(n)); // persists + refreshes the cache
+  // logActivity swallows its own errors; awaited so the audit row is guaranteed
+  // written before we respond (a settings change is worth that certainty).
+  await logActivity(
+    req.user.id,
+    "admin_set_reconciliation_frequency",
+    `days: ${n}`,
+    null,
+    getClientIp(req),
+    null,
+  );
+  res.json({ frequency_days: n });
+}));
+
 module.exports = router;

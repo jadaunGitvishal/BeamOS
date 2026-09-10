@@ -19,6 +19,7 @@ const NAV_GROUPS = [
     items: [
       { path: "/regions", label: "Regions", icon: "regions", countKey: null },
       { path: "/devices", label: "Screens", icon: "screens", countKey: "devices" },
+      { path: "/reconciliation", label: "Reconciliation", icon: "reconciliation", countKey: null },
       { path: "/issues", label: "Issues", icon: "issues", countKey: "issues" },
     ],
   },
@@ -33,6 +34,7 @@ const ICON_PARTS = {
   operations: 3,
   regions: 3,
   screens: 3,
+  reconciliation: 3,
   content: 3,
   issues: 2,
 };

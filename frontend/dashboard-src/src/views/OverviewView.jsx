@@ -36,7 +36,7 @@ export default function OverviewView() {
         if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
         return null;
       };
-      const [overview, devices, sla, slaTrend, tickets, regions, campaigns] = await Promise.all([
+      const [overview, devices, sla, slaTrend, tickets, regions, campaigns, recon] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
         apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(softFail),
@@ -59,6 +59,10 @@ export default function OverviewView() {
         wsId
           ? apiFetch(`/api/workspaces/${encodeURIComponent(wsId)}/campaigns`, { signal }).catch(softFail)
           : Promise.resolve(null),
+        // Reconciliation teaser — the same live GET the Reconciliation page uses
+        // (ghost/stale device counts, computed on demand). Soft-fails to null so
+        // a 403/500 just hides the section.
+        apiFetch("/api/dashboard/reports/reconciliation", { signal }).catch(softFail),
       ]);
       let issues = null;
       if (isAdmin) {
@@ -71,7 +75,7 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues, sla, slaTrend, tickets, regions, campaigns };
+      return { overview, devices, issues, sla, slaTrend, tickets, regions, campaigns, recon };
     },
     [period, isAdmin, wsId, orgId],
   );
@@ -94,7 +98,7 @@ export default function OverviewView() {
   }
   if (!data) return <p className="sub">Loading…</p>;
 
-  const { overview, devices, issues, sla, tickets, regions, campaigns } = data;
+  const { overview, devices, issues, sla, tickets, regions, campaigns, recon } = data;
   const total = overview.total_devices,
     online = overview.online,
     offline = overview.offline;
@@ -131,6 +135,21 @@ export default function OverviewView() {
   const allCampaigns = Array.isArray(campaigns) ? campaigns : null;
   const liveCampaigns = allCampaigns ? allCampaigns.filter((c) => c.status === "live") : [];
   const showCampaigns = allCampaigns != null && allCampaigns.length > 0;
+
+  // --- Overview Stage E: "Reconciliation" teaser — ghost (registered, never
+  // reported) + stale (silent N+ days) device counts from the live
+  // GET /api/dashboard/reports/reconciliation (the SAME on-demand endpoint the
+  // full Reconciliation view uses — never waits for the scheduled email).
+  //
+  // Empty-state follows Stage B's "All clear" model, NOT Stage C/D's
+  // hide-if-unused: reconciliation isn't an opt-in feature you configure (like
+  // regions or campaigns) — every workspace's device inventory is always being
+  // checked — so "0 discrepancies" is a genuine, reassuring status worth
+  // confirming ("every device is accounted for"). The one nuance: a workspace
+  // with NO devices at all has nothing to reconcile, so "all clear" would be a
+  // hollow reassurance — show a neutral "no devices yet" note there instead.
+  // recon == null (soft-fail / no workspace) => hide the section entirely.
+  const reconCounts = recon?.counts ?? null;
 
   // --- Ref 51: SLA compliance (merged into this page, not a separate view) ---
   const slaTarget = sla?.target?.uptime_target_pct ?? null;
@@ -495,6 +514,49 @@ export default function OverviewView() {
                 <Link to="/campaigns" style={{ color: "var(--accent)" }}>
                   Campaigns
                 </Link>
+              </p>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {recon ? (
+        <div className="sec">
+          <div className="ch">
+            <h2>Reconciliation</h2>
+            {reconCounts && reconCounts.total ? (
+              <span className="hint">{n0(reconCounts.total)} to review</span>
+            ) : null}
+          </div>
+          {reconCounts && reconCounts.total ? (
+            <div className="card">
+              <div className="grid g2">
+                <StatTile label="Ghost devices" value={n0(reconCounts.ghost)} sub="registered, never reported" />
+                <StatTile
+                  label="Stale devices"
+                  value={n0(reconCounts.stale)}
+                  sub={`no heartbeat in ${recon.stale_after_days}+ days`}
+                />
+              </div>
+              <div className="mt16">
+                <Link className="btn" to="/reconciliation">
+                  View all in Reconciliation
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <div className="card">
+              <p className="empty" style={{ padding: 0 }}>
+                {recon.device_count === 0 ? (
+                  "No devices registered in this workspace yet."
+                ) : (
+                  <>
+                    All clear — every device is accounted for and reporting.{" "}
+                    <Link to="/reconciliation" style={{ color: "var(--accent)" }}>
+                      Reconciliation
+                    </Link>
+                  </>
+                )}
               </p>
             </div>
           )}
