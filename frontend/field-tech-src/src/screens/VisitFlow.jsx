@@ -182,6 +182,7 @@ export default function VisitFlow({ me, onLogout, onSessionExpired }) {
             workspaceId={activeWs.id}
             visitId={visit.id}
             deviceName={visit.device_name || activeDevice?.name || visit.device_id}
+            device={activeDevice}
             telemetryCaptured={!!visit.technical_metrics}
             onSessionExpired={onSessionExpired}
             onCompleted={(done, photoCount) => {

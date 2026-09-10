@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { apiUpload, apiPatch, newUuid, NetworkError, ApiError } from "../lib/api.js";
+import { hardwarePrefill } from "../lib/hardware-prefill.js";
 
 // Stage B2b: the completion form for an already-started visit — technical
 // fields, geotagged photos (one GPS fix captured per photo, the moment it's
@@ -45,14 +46,18 @@ function getPosition() {
   });
 }
 
-export default function CompletionForm({ workspaceId, visitId, deviceName, telemetryCaptured, onCompleted, onSessionExpired }) {
-  const [fields, setFields] = useState({
-    serial_number: "",
-    mac_address: "",
-    device_model: "",
-    sim_network_info: "",
+export default function CompletionForm({ workspaceId, visitId, deviceName, device, telemetryCaptured, onCompleted, onSessionExpired }) {
+  // Computed once on mount: these are DEFAULT values, not locked — the technician
+  // can overwrite any of them (a swapped-but-not-yet-re-paired device has stale
+  // cached info; a serial number is often only readable off a sticker in person).
+  const [prefill] = useState(() => hardwarePrefill(device));
+  const [fields, setFields] = useState(() => ({
+    serial_number: prefill.serial_number,
+    mac_address: prefill.mac_address,
+    device_model: prefill.device_model,
+    sim_network_info: prefill.sim_network_info,
     remarks: "",
-  });
+  }));
   const [deviceStatus, setDeviceStatus] = useState("");
   const [photos, setPhotos] = useState([]); // see addPhoto() for shape
   const [error, setError] = useState("");
@@ -227,7 +232,10 @@ export default function CompletionForm({ workspaceId, visitId, deviceName, telem
       {/* ---- technical fields ---- */}
       {TEXT_FIELDS.map(([k, label, ph]) => (
         <div className="form-field" key={k}>
-          <label className="field-label" htmlFor={`f-${k}`}>{label}</label>
+          <label className="field-label" htmlFor={`f-${k}`}>
+            {label}
+            {prefill[k] && <span className="muted-inline"> · from device records, edit if changed</span>}
+          </label>
           <input
             id={`f-${k}`}
             className="input"
