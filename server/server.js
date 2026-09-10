@@ -1046,6 +1046,11 @@ async function boot() {
   const { startReportDigests } = require("./services/report-digest");
   startReportDigests();
 
+  // Ref 49: periodic device reconciliation report (ghost / stale devices) — every
+  // `reconciliation_frequency_days` days, same watermark sweep as the report digest
+  const { startReconciliationReport } = require("./services/reconciliation-report");
+  startReconciliationReport();
+
   // Ref 51: long-term outage recorder (feeds SLA MTTR beyond status-log retention)
   const { startOutageHistoryRecorder } = require("./services/outage-history");
   startOutageHistoryRecorder();

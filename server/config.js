@@ -103,6 +103,23 @@ module.exports = {
   // Lowered via env only for tests.
   reportDigestIntervalMs:
     parseInt(process.env.REPORT_DIGEST_INTERVAL_MS) || 60 * 60 * 1000,
+  // Ref 49: device reconciliation report (services/reconciliation-report.js). Same
+  // watermark-based sweep as the report digest - runs on this interval and checks
+  // whether the configured number of days has elapsed since the last send
+  // (watermark in app_settings). Lowered via env only for tests.
+  reconciliationReportIntervalMs:
+    parseInt(process.env.RECONCILIATION_REPORT_INTERVAL_MS) || 60 * 60 * 1000,
+  // Ref 49: how often the reconciliation report fires, in DAYS. This is only the
+  // env DEFAULT - the effective value is the app_settings key
+  // `reconciliation_frequency_days`, admin-configurable to any integer >= 1.
+  reconciliationFrequencyDays:
+    parseInt(process.env.RECONCILIATION_FREQUENCY_DAYS) || 7,
+  // Ref 49: a device that HAS reported before but whose last heartbeat is older
+  // than this many days is "stale" (long-term abandonment, not a routine
+  // connectivity blip - deliberately far longer than heartbeatTimeout / the
+  // offline-detection window, which are seconds).
+  reconciliationStaleAfterDays:
+    parseInt(process.env.RECONCILIATION_STALE_AFTER_DAYS) || 14,
   // SSL: drop your Cloudflare Origin cert + key in certs/ folder
   // or set env vars SSL_CERT and SSL_KEY to custom paths
   sslCert: process.env.SSL_CERT || path.join(certsDir, "cert.pem"),

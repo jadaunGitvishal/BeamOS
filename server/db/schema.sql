@@ -986,12 +986,19 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- final 50% of the budget, "due_today" (see lib/ticket-sla.js). getNum() falls
 -- back to the config.js env default if a row is absent.
 --   ticket_sla_hours_high / _medium / _low
+--
+-- Ref 49 (reconciliation reporting): how often the device-reconciliation report
+-- fires, in DAYS. Genuinely free-form (any integer >= 1), unlike the fixed
+-- daily/monthly report digest. Platform-wide for the same reason as the SLA
+-- targets above; lib/app-settings.getNum() falls back to config.js
+-- (reconciliationFrequencyDays) if the row is ever absent.
 INSERT IGNORE INTO app_settings (`key`, value) VALUES
     ('sla_uptime_target_pct', '99.0'),
     ('sla_escalation_threshold_hours', '4'),
     ('ticket_sla_hours_high', '4'),
     ('ticket_sla_hours_medium', '24'),
-    ('ticket_sla_hours_low', '72');
+    ('ticket_sla_hours_low', '72'),
+    ('reconciliation_frequency_days', '7');
 
 -- ===================== BILLING USAGE ROLLUP =====================
 -- #146 BILLING: durable daily usage rollup (contractual system-of-record). One tiny row
