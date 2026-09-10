@@ -671,4 +671,38 @@ router.put("/reconciliation-frequency", requirePlatformAdmin, asyncHandler(async
   res.json({ frequency_days: n });
 }));
 
+// ===================== Pending-installation report cadence (Ref 48) =====================
+// Same contract as reconciliation-frequency above: platform-admin only,
+// `pending_installation_report_frequency_days` (app_settings) is how many days
+// services/pending-installation-report.js waits between sends, free-form
+// (any integer 1..365), persisted + cached so the next hourly sweep picks it up
+// with no restart. Surfaced read-only to any workspace member via
+// GET /api/dashboard/reports/pending-installations.
+router.get("/pending-installation-frequency", requirePlatformAdmin, (req, res) => {
+  res.json({
+    frequency_days: appSettings.getNum(
+      "pending_installation_report_frequency_days",
+      config.pendingInstallationFrequencyDays,
+    ),
+  });
+});
+router.put("/pending-installation-frequency", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const n = Math.floor(Number(req.body.frequency_days));
+  if (!Number.isFinite(n) || n < 1 || n > 365) {
+    return res
+      .status(400)
+      .json({ error: "frequency_days must be an integer between 1 and 365" });
+  }
+  await appSettings.set("pending_installation_report_frequency_days", String(n)); // persists + refreshes the cache
+  await logActivity(
+    req.user.id,
+    "admin_set_pending_installation_frequency",
+    `days: ${n}`,
+    null,
+    getClientIp(req),
+    null,
+  );
+  res.json({ frequency_days: n });
+}));
+
 module.exports = router;

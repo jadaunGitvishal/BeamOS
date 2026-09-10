@@ -12,6 +12,8 @@ const { detectOutages } = require("../lib/outage-detection");
 const { deviceAvailabilityRows } = require("../lib/sla");
 const { getReconciliation } = require("../lib/reconciliation");
 const reconReport = require("../services/reconciliation-report");
+const { getPendingInstallations } = require("../lib/pending-installations");
+const pendingReport = require("../services/pending-installation-report");
 
 // Merged in from BeamOS-Dashboard's routes/reports.js.
 
@@ -366,6 +368,67 @@ router.get(
       },
       ghosts: recon.ghosts,
       stale: recon.stale,
+    });
+  }),
+);
+
+// GET /api/dashboard/reports/pending-installations
+// Ref 48 Stage B — the LIVE, on-demand version of the scheduled pending-
+// installation report (services/pending-installation-report.js). Runs the same
+// lib/pending-installations.js query against the caller's workspace right now,
+// so the dashboard reflects the current state on page load rather than whatever
+// the last email captured.
+//
+// RBAC: workspace-scoped exactly like the reconciliation sibling above —
+// resolveTenancy sets req.workspaceId; no workspace -> empty payload. Read-only,
+// any workspace member (a workspace_admin already sees the registration_codes
+// list this derives from, and a viewer can be told an install is stuck).
+//
+// `code_count` is every registration_codes row for the workspace, any status —
+// it's the signal the UI uses to tell "this workspace provisions devices some
+// other way" (0 -> hide the Overview teaser) apart from "every code this
+// workspace cut has been activated" (>0 with nothing flagged -> an "all clear"
+// worth confirming). See the empty-state note in OverviewView / the view.
+router.get(
+  "/pending-installations",
+  asyncHandler(async (req, res) => {
+    const status = await pendingReport.getReportStatus(db);
+
+    if (!req.workspaceId) {
+      return res.json({
+        generated_at: Math.floor(Date.now() / 1000),
+        grace_days: config.pendingInstallationGraceDays,
+        code_count: 0,
+        frequency_days: status.frequency_days,
+        last_report_date: status.last_report_date,
+        next_report_date: status.next_report_date,
+        overdue: status.overdue,
+        counts: { pending: 0, abandoned: 0, total: 0 },
+        pending: [],
+        abandoned: [],
+      });
+    }
+
+    const data = await getPendingInstallations(db, { workspaceId: req.workspaceId });
+    const cc = await db
+      .prepare("SELECT COUNT(*) AS c FROM registration_codes WHERE workspace_id = ?")
+      .get(req.workspaceId);
+
+    res.json({
+      generated_at: data.generated_at,
+      grace_days: data.grace_days,
+      code_count: Number(cc?.c || 0),
+      frequency_days: status.frequency_days,
+      last_report_date: status.last_report_date,
+      next_report_date: status.next_report_date,
+      overdue: status.overdue,
+      counts: {
+        pending: data.pending.length,
+        abandoned: data.abandoned.length,
+        total: data.pending.length + data.abandoned.length,
+      },
+      pending: data.pending,
+      abandoned: data.abandoned,
     });
   }),
 );

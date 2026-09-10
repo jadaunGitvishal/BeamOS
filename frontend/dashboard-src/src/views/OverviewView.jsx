@@ -36,7 +36,7 @@ export default function OverviewView() {
         if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
         return null;
       };
-      const [overview, devices, sla, slaTrend, tickets, regions, campaigns, recon] = await Promise.all([
+      const [overview, devices, sla, slaTrend, tickets, regions, campaigns, recon, pendingInst] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
         apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(softFail),
@@ -63,6 +63,10 @@ export default function OverviewView() {
         // (ghost/stale device counts, computed on demand). Soft-fails to null so
         // a 403/500 just hides the section.
         apiFetch("/api/dashboard/reports/reconciliation", { signal }).catch(softFail),
+        // Pending-installations teaser — the same live GET the Pending
+        // Installations page uses (registration codes cut ahead of an install
+        // that no device activated). Soft-fails to null so a 403/500 hides it.
+        apiFetch("/api/dashboard/reports/pending-installations", { signal }).catch(softFail),
       ]);
       let issues = null;
       if (isAdmin) {
@@ -75,7 +79,7 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues, sla, slaTrend, tickets, regions, campaigns, recon };
+      return { overview, devices, issues, sla, slaTrend, tickets, regions, campaigns, recon, pendingInst };
     },
     [period, isAdmin, wsId, orgId],
   );
@@ -98,7 +102,7 @@ export default function OverviewView() {
   }
   if (!data) return <p className="sub">Loading…</p>;
 
-  const { overview, devices, issues, sla, tickets, regions, campaigns, recon } = data;
+  const { overview, devices, issues, sla, tickets, regions, campaigns, recon, pendingInst } = data;
   const total = overview.total_devices,
     online = overview.online,
     offline = overview.offline;
@@ -150,6 +154,25 @@ export default function OverviewView() {
   // hollow reassurance — show a neutral "no devices yet" note there instead.
   // recon == null (soft-fail / no workspace) => hide the section entirely.
   const reconCounts = recon?.counts ?? null;
+
+  // --- Overview Stage F: "Pending installations" teaser — registration codes
+  // cut ahead of an install that no device has activated against: `pending`
+  // (still inside the 30-day window, worth chasing) + `abandoned` (expired
+  // unclaimed). Same live GET the full Pending Installations view uses.
+  //
+  // Empty-state follows the Campaigns (Stage D) model, NOT Reconciliation's
+  // (Stage E) "All clear". Reconciliation always applies — every workspace has a
+  // device inventory being checked, so "0 discrepancies" is a real reassurance
+  // there. Advance registration codes are opt-in: a workspace can pair every
+  // device directly and never cut one, so "0 pending installs" for it is a
+  // non-event, not a reassurance (cf. "no regions" / "no campaigns"). So: hide
+  // the section entirely when the workspace has never generated a code
+  // (code_count === 0); once it has, keep the section even at zero flagged with
+  // an "all clear" note, because for a workspace that DOES provision this way
+  // "every code activated" is worth confirming (cf. Campaigns' "nothing
+  // running"). pendingInst == null (soft-fail / no workspace) => hide.
+  const piCounts = pendingInst?.counts ?? null;
+  const showPending = pendingInst != null && pendingInst.code_count > 0;
 
   // --- Ref 51: SLA compliance (merged into this page, not a separate view) ---
   const slaTarget = sla?.target?.uptime_target_pct ?? null;
@@ -557,6 +580,41 @@ export default function OverviewView() {
                     </Link>
                   </>
                 )}
+              </p>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {showPending ? (
+        <div className="sec">
+          <div className="ch">
+            <h2>Pending installations</h2>
+            {piCounts && piCounts.total ? <span className="hint">{n0(piCounts.total)} to chase</span> : null}
+          </div>
+          {piCounts && piCounts.total ? (
+            <div className="card">
+              <div className="grid g2">
+                <StatTile
+                  label="Pending"
+                  value={n0(piCounts.pending)}
+                  sub={`code cut > ${pendingInst.grace_days}d ago, not activated`}
+                />
+                <StatTile label="Abandoned" value={n0(piCounts.abandoned)} sub="expired, never activated" />
+              </div>
+              <div className="mt16">
+                <Link className="btn" to="/pending-installations">
+                  View all in Pending Installations
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <div className="card">
+              <p className="empty" style={{ padding: 0 }}>
+                All clear — every registration code has been activated or handled.{" "}
+                <Link to="/pending-installations" style={{ color: "var(--accent)" }}>
+                  Pending Installations
+                </Link>
               </p>
             </div>
           )}
