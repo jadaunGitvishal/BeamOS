@@ -992,13 +992,19 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- daily/monthly report digest. Platform-wide for the same reason as the SLA
 -- targets above; lib/app-settings.getNum() falls back to config.js
 -- (reconciliationFrequencyDays) if the row is ever absent.
+--
+-- Ref 48 (pending installation follow-up reporting): how often the
+-- pending-installation report fires, in DAYS. Same free-form cadence and
+-- fallback contract as reconciliation_frequency_days above
+-- (config.pendingInstallationFrequencyDays).
 INSERT IGNORE INTO app_settings (`key`, value) VALUES
     ('sla_uptime_target_pct', '99.0'),
     ('sla_escalation_threshold_hours', '4'),
     ('ticket_sla_hours_high', '4'),
     ('ticket_sla_hours_medium', '24'),
     ('ticket_sla_hours_low', '72'),
-    ('reconciliation_frequency_days', '7');
+    ('reconciliation_frequency_days', '7'),
+    ('pending_installation_report_frequency_days', '7');
 
 -- ===================== BILLING USAGE ROLLUP =====================
 -- #146 BILLING: durable daily usage rollup (contractual system-of-record). One tiny row

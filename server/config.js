@@ -120,6 +120,23 @@ module.exports = {
   // offline-detection window, which are seconds).
   reconciliationStaleAfterDays:
     parseInt(process.env.RECONCILIATION_STALE_AFTER_DAYS) || 14,
+  // Ref 48: pending installation follow-up report (services/pending-installation-report.js).
+  // Same watermark-based sweep as the reconciliation report - runs on this interval and
+  // checks whether the configured number of days has elapsed since the last send
+  // (watermark in app_settings). Lowered via env only for tests.
+  pendingInstallationReportIntervalMs:
+    parseInt(process.env.PENDING_INSTALLATION_REPORT_INTERVAL_MS) || 60 * 60 * 1000,
+  // Ref 48: how often the pending-installation report fires, in DAYS. Only the env
+  // DEFAULT - the effective value is the app_settings key
+  // `pending_installation_report_frequency_days`, admin-configurable to any integer >= 1.
+  pendingInstallationFrequencyDays:
+    parseInt(process.env.PENDING_INSTALLATION_FREQUENCY_DAYS) || 7,
+  // Ref 48: a registration code (routes/registration-codes.js) that is still 'unused'
+  // this many days after it was generated - but not yet past its 30-day expiry - is a
+  // "pending" installation worth chasing. A short grace period keeps a code cut an hour
+  // ago out of the report; well short of the expiry so there is real time left to act.
+  pendingInstallationGraceDays:
+    parseInt(process.env.PENDING_INSTALLATION_GRACE_DAYS) || 3,
   // SSL: drop your Cloudflare Origin cert + key in certs/ folder
   // or set env vars SSL_CERT and SSL_KEY to custom paths
   sslCert: process.env.SSL_CERT || path.join(certsDir, "cert.pem"),

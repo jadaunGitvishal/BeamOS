@@ -1051,6 +1051,12 @@ async function boot() {
   const { startReconciliationReport } = require("./services/reconciliation-report");
   startReconciliationReport();
 
+  // Ref 48: periodic pending-installation follow-up report (registration codes
+  // generated ahead of an install but never activated) — every
+  // `pending_installation_report_frequency_days` days, same watermark sweep
+  const { startPendingInstallationReport } = require("./services/pending-installation-report");
+  startPendingInstallationReport();
+
   // Ref 51: long-term outage recorder (feeds SLA MTTR beyond status-log retention)
   const { startOutageHistoryRecorder } = require("./services/outage-history");
   startOutageHistoryRecorder();
