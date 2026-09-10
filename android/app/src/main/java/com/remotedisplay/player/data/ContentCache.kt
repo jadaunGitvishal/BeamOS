@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class ContentCache(
@@ -17,6 +18,13 @@ class ContentCache(
 ) {
 
     private val cacheDir = File(context.filesDir, "content_cache").also { it.mkdirs() }
+
+    // One lock per content id, so the proactive prefetch loop and the reactive "play now"
+    // path never run two downloads of the SAME content at once (they used to race on the
+    // scratch file - each FileOutputStream truncates it - so under a slow link neither ever
+    // finished). Interned for the life of the process; the set is bounded by distinct
+    // content ever fetched on this device (tens-hundreds), so it is not worth evicting.
+    private val downloadLocks = ConcurrentHashMap<String, Any>()
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.MINUTES)
@@ -41,8 +49,27 @@ class ContentCache(
     }
 
     fun downloadContent(serverUrl: String, contentId: String, filename: String): File? {
+        // Serialize downloads of the same content (see downloadLocks). A caller that was
+        // waiting behind another almost always finds the file already fetched.
+        synchronized(downloadLocks.computeIfAbsent(contentId) { Any() }) {
+            getCachedFile(contentId)?.let { return it }
+            return downloadContentLocked(serverUrl, contentId, filename)
+        }
+    }
+
+    private fun downloadContentLocked(serverUrl: String, contentId: String, filename: String): File? {
         val ext = filename.substringAfterLast('.', "mp4")
-        val file = File(cacheDir, "${contentId}.${ext}")
+        val finalFile = File(cacheDir, "${contentId}.${ext}")
+        // Download into a scratch file in the SAME directory, then publish it with a single
+        // atomic rename(2) once the transfer is verified-complete. The scratch name is
+        // deliberately dot-prefixed and does NOT start with contentId, so the
+        // startsWith(contentId) lookups in getCachedFile()/isContentCached()/deleteContent()
+        // never see a half-written file. Before this, downloads wrote straight to finalFile:
+        // a reader that hit the item mid-download got a truncated file, ExoPlayer played into
+        // it and threw FileDataSourceException past the downloaded bytes, and PlaylistController
+        // fell into a "Playback error, retry" loop instead of showing the clean
+        // "Downloading <file>..." status (which only fires when getCachedFile() returns null).
+        val partFile = File(cacheDir, ".partial-$contentId")
         try {
             val url = "${serverUrl}/api/content/${contentId}/file"
             val request = Request.Builder().url(url).build()
@@ -55,36 +82,59 @@ class ContentCache(
             }
 
             // Content-Length lets us detect a connection that drops mid-transfer -
-            // without it, a truncated large file still has length() > 0 and would be
-            // treated as a permanently valid cache entry by getCachedFile().
+            // without it, a truncated scratch file could still be renamed into place.
             val expectedLength = response.body?.contentLength()?.takeIf { it >= 0 }
 
             response.body?.byteStream()?.use { input ->
-                FileOutputStream(file).use { output ->
+                FileOutputStream(partFile).use { output ->
                     input.copyTo(output)
                 }
             }
 
-            if (expectedLength != null && file.length() != expectedLength) {
-                Log.e("ContentCache", "Download incomplete for $filename: got ${file.length()} of $expectedLength bytes")
-                file.delete()
+            // A null/empty body wrote nothing - treat as a failed fetch and leave any
+            // existing cached copy of this content untouched.
+            if (!partFile.exists()) {
+                Log.e("ContentCache", "Download produced no data for $filename")
                 return null
             }
 
-            Log.i("ContentCache", "Downloaded: $filename -> ${file.absolutePath}")
+            if (expectedLength != null && partFile.length() != expectedLength) {
+                Log.e("ContentCache", "Download incomplete for $filename: got ${partFile.length()} of $expectedLength bytes")
+                partFile.delete()
+                return null
+            }
+
+            // Publish atomically. renameTo() within one directory is rename(2) - it either
+            // fully replaces finalFile or does nothing, so getCachedFile() only ever sees a
+            // whole, verified download. The delete+retry covers the (Linux: never) case of a
+            // filesystem that refuses rename onto an existing target.
+            if (!partFile.renameTo(finalFile)) {
+                finalFile.delete()
+                if (!partFile.renameTo(finalFile)) {
+                    Log.e("ContentCache", "Failed to publish $filename (rename ${partFile.name})")
+                    partFile.delete()
+                    return null
+                }
+            }
+
+            Log.i("ContentCache", "Downloaded: $filename -> ${finalFile.absolutePath}")
             // Ref 39: the cache just grew - reclaim space if we've dropped below the floor.
             // keepIds protects the file we just fetched from being the one evicted.
             enforceStorageLimit(keepIds = setOf(contentId))
-            return file
+            return finalFile
         } catch (e: Exception) {
             Log.e("ContentCache", "Download error: ${e.message}")
-            file.delete()
+            // Interrupted / failed transfer: drop the scratch file so a retry starts clean
+            // and the incomplete bytes don't sit against the Ref 39 free-space floor. There
+            // is no resume logic that would reuse it.
+            partFile.delete()
             return null
         }
     }
 
     fun deleteContent(contentId: String) {
-        cacheDir.listFiles { _, name -> name.startsWith(contentId) }?.forEach { it.delete() }
+        cacheDir.listFiles { _, name -> name.startsWith(contentId) || name == ".partial-$contentId" }
+            ?.forEach { it.delete() }
         Log.i("ContentCache", "Deleted cached content: $contentId")
     }
 
@@ -116,7 +166,9 @@ class ContentCache(
         val free = freeBytes()
         if (free >= minFreeBytes) return 0
 
-        val files = cacheDir.listFiles()?.filter { it.isFile } ?: return 0
+        // Skip in-progress downloads (.partial-<id>): they're not a finished cache entry, and
+        // evicting one would delete a file that's actively being written.
+        val files = cacheDir.listFiles()?.filter { it.isFile && !it.name.startsWith(".partial-") } ?: return 0
         val entries = files.map {
             CacheEviction.Entry(it.nameWithoutExtension, it.length(), it.lastModified())
         }

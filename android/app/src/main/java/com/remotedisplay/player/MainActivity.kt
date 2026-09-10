@@ -61,6 +61,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var introScreen: IntroScreen // org-branded intro shown before every video play/loop
     private lateinit var statusOverlay: View
     private lateinit var statusText: TextView
+    // True while the reactive "Downloading <file>..." status is up for an item whose content
+    // isn't cached yet. The periodic device:registered handler clears transient connection
+    // messages via hideStatus() every ~45-60s; without this flag it also wiped a legitimate
+    // long-running download status, revealing the frozen last video frame behind it.
+    private var showingDownloadStatus = false
     private lateinit var rootView: View
     private lateinit var pipLayout: FrameLayout       // #109: reparented above rootView (see onCreate)
     private lateinit var captureRoot: View            // window content; capture source (includes pipLayout)
@@ -726,7 +731,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         wsService?.onRegistered = { _ ->
-            hideStatus()
+            if (!showingDownloadStatus) hideStatus()
         }
 
         wsService?.onUnpaired = {
@@ -743,6 +748,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun playItem(item: PlaylistItem) {
         hideStatus()
+        showingDownloadStatus = false
         com.remotedisplay.player.util.DebugLog.i("Player", "playItem: ${item.filename} mime=${item.mimeType} widget=${item.widgetId ?: "-"} zone=fullscreen")
 
         // Widget content - render fullscreen in a WebView (single-zone / fullscreen
@@ -792,11 +798,17 @@ class MainActivity : AppCompatActivity() {
         val file = contentCache.getCachedFile(item.contentId)
         if (file == null) {
             Log.w("MainActivity", "Content not cached: ${item.contentId}, downloading...")
+            // Stop any prior video so the frozen last frame doesn't sit behind the overlay,
+            // and keep the status pinned through the periodic re-register (see the flag).
+            if (::mediaPlayer.isInitialized) mediaPlayer.stop()
+            showingDownloadStatus = true
             showStatus("Downloading ${item.filename}...")
             thread {
                 val downloaded = contentCache.downloadContent(config.serverUrl, item.contentId, item.filename)
                 handler.post {
+                    showingDownloadStatus = false
                     if (downloaded != null) {
+                        hideStatus()
                         playFile(item, downloaded)
                     } else {
                         showStatus("Download failed: ${item.filename}")
