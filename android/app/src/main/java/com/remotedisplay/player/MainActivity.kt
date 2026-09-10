@@ -516,7 +516,12 @@ class MainActivity : AppCompatActivity() {
                     val contentId = if (item.isNull("content_id")) "" else item.optString("content_id", "")
                     if (contentId.isEmpty()) continue
                     val filename = item.optString("filename", "content")
-                    val remoteUrl = item.optString("remote_url", null)
+                    // org.json's optString(name, null) COERCES a JSON null to the string
+                    // "null" (not a Kotlin null), so `!remoteUrl.isNullOrEmpty()` was true for
+                    // every local-content item and this loop skipped the download entirely -
+                    // proactive prefetch never fetched anything. Mirror PlaylistController's
+                    // parse: real null only when the key is JSON null or absent/empty.
+                    val remoteUrl = if (item.isNull("remote_url")) null else item.optString("remote_url", "").ifEmpty { null }
 
                     // Skip remote URL content - it streams directly
                     if (!remoteUrl.isNullOrEmpty()) {

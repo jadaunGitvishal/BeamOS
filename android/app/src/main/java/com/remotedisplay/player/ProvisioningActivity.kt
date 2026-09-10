@@ -364,6 +364,14 @@ class ProvisioningActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         cancelConnectTimeout()
+        // The WebSocketService is started (not just bound), so it outlives this activity.
+        // onPaired still holds THIS activity's lambda (which does startActivity(MainActivity,
+        // CLEAR_TASK) + finish()). The server re-emits device:paired on every socket
+        // reconnect, so leaving it set tears MainActivity down - killing any in-flight
+        // content prefetch - on a ~15s loop after activation-code pairing. MainActivity
+        // never registers onPaired, so clearing it here is safe (unlike onRegistered /
+        // onConnectionFailed, which MainActivity does own and re-registers).
+        wsService?.onPaired = null
         if (bound) {
             unbindService(connection)
             bound = false
