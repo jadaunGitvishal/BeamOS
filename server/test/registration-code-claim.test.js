@@ -42,6 +42,9 @@ raw.exec(`
     status TEXT NOT NULL DEFAULT 'offline', blocked INTEGER NOT NULL DEFAULT 0,
     last_heartbeat INTEGER, ip_address TEXT, android_version TEXT, app_version TEXT,
     screen_width INTEGER, screen_height INTEGER, render_width INTEGER, render_height INTEGER,
+    manufacturer TEXT, model TEXT, display_size_inches REAL, mac_address TEXT,
+    serial_number TEXT, sim_iccid TEXT, sim_provider TEXT, sim_network_status TEXT,
+    hardware_captured_at INTEGER,
     device_token TEXT, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE device_fingerprints (
@@ -155,7 +158,16 @@ test('claim: happy path with a planned_device_name assigns workspace + that name
   const rc = seedCode({ planned_device_name: 'Lobby screen — 2nd floor' });
   const res = await claim({
     code: rc.code,
-    device_info: { android_version: '13', app_version: '2.1.0', screen_width: 1920, screen_height: 1080 },
+    device_info: {
+      android_version: '13', app_version: '2.1.0', screen_width: 1920, screen_height: 1080,
+      // Ref 31: one-time hardware identity. The device sends honest markers, never blanks.
+      hardware: {
+        manufacturer: 'Rockchip', model: 'RK3588 TV Box', display_size_inches: null,
+        mac_address: 'unavailable (requires Device Owner)',
+        serial_number: 'unavailable (requires Device Owner)',
+        sim_iccid: 'no SIM hardware', sim_provider: 'no SIM hardware', sim_network_status: 'NO_TELEPHONY',
+      },
+    },
     fingerprint: 'fp-lobby',
   });
   assert.equal(res.status, 201);
@@ -176,6 +188,13 @@ test('claim: happy path with a planned_device_name assigns workspace + that name
   assert.equal(dev.android_version, '13');
   assert.equal(dev.app_version, '2.1.0');
   assert.equal(dev.screen_width, 1920);
+  // Ref 31: hardware identity persisted from the claim payload (markers stored verbatim).
+  assert.equal(dev.manufacturer, 'Rockchip');
+  assert.equal(dev.model, 'RK3588 TV Box');
+  assert.equal(dev.display_size_inches, null, 'a null (impossible) display size stays null, not 0');
+  assert.equal(dev.mac_address, 'unavailable (requires Device Owner)');
+  assert.equal(dev.sim_network_status, 'NO_TELEPHONY');
+  assert.ok(dev.hardware_captured_at > 0, 'hardware_captured_at stamped');
 
   const after = raw.prepare('SELECT * FROM registration_codes WHERE id = ?').get(rc.id);
   assert.equal(after.status, 'claimed');

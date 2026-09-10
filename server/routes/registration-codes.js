@@ -27,6 +27,7 @@ const { canAdminWorkspace } = require('../lib/permissions');
 const { asyncHandler } = require('../lib/async-handler');
 const { getClientIp } = require('../services/activity');
 const { stripDeviceSecrets } = require('../lib/device-sanitize');
+const { hardwareInsertParts } = require('../lib/device-hardware');
 const { workspaceRoom, emitToWorkspace } = require('../lib/socket-rooms');
 const apkCache = require('../lib/apk-cache');
 
@@ -352,23 +353,32 @@ claimRouter.post('/', asyncHandler(async (req, res) => {
     name = 'Display ' + ((c ? c.count : 0) + 1);
   }
 
+  // Ref 31: one-time hardware identity, spliced into the INSERT below so an
+  // activation-code claim populates the device row identically to the
+  // pairing-code flow (which gets it via device:register). Empty when an older
+  // APK sends no `hardware` block - the INSERT is then byte-for-byte the old one.
+  const hw = hardwareInsertParts(info.hardware);
+
   let raced = false;
   try {
     await db.transaction(async (tx) => {
       // Device row created ALREADY claimed. INSERT before the code UPDATE so the
       // registration_codes.claimed_by_device_id FK target exists.
-      await tx.prepare(`
-        INSERT INTO devices (id, user_id, workspace_id, name, status, ip_address,
-          android_version, app_version, screen_width, screen_height, render_width, render_height,
-          device_token, last_heartbeat, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        deviceId, rc.created_by, ws.id, name, ip,
+      const baseCols = ['id', 'user_id', 'workspace_id', 'name', 'status', 'ip_address',
+        'android_version', 'app_version', 'screen_width', 'screen_height', 'render_width', 'render_height',
+        'device_token', 'last_heartbeat', 'created_at', 'updated_at'];
+      const baseVals = [
+        deviceId, rc.created_by, ws.id, name, 'online', ip,
         info.android_version || null, info.app_version || null,
         info.screen_width || null, info.screen_height || null,
         info.render_width || null, info.render_height || null,
         deviceToken, now, now, now,
-      );
+      ];
+      const cols = [...baseCols, ...hw.columns];
+      const vals = [...baseVals, ...hw.values];
+      await tx.prepare(
+        `INSERT INTO devices (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+      ).run(...vals);
 
       // The `AND status = 'unused'` makes this the race gate: two devices POSTing
       // the same code concurrently both INSERT a device, but only the first

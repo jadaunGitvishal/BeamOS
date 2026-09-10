@@ -17,6 +17,7 @@ const logCoalescer = require('../lib/log-coalescer');
 const loopLag = require('../services/loop-lag');
 const { sanitizeCoords } = require('../lib/geo');
 const deviceAudit = require('../lib/device-audit');
+const { persistHardwareInfo } = require('../lib/device-hardware');
 
 // Debounce window for marking a device offline on socket disconnect. Brief
 // flap (Wi-Fi blip, Engine.IO ping miss, server-side eviction-then-reconnect)
@@ -543,6 +544,7 @@ module.exports = function setupDeviceSocket(io) {
                 // #139 Phase 2: older APKs don't send these — default to a clean 'none' state.
                 device_info.ota_status ?? 'none', device_info.ota_target_version ?? null, device_info.ota_attempts ?? 0,
                 device_id);
+            await persistHardwareInfo(db, device_id, device_info.hardware);
           }
 
           heartbeat.registerConnection(device_id, socket.id);

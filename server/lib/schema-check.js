@@ -69,6 +69,19 @@ const REQUIRED_COLUMNS = [
   // unchained row, which the verifier reports as a failure.
   ['activity_log', 'prev_hash', "ALTER TABLE activity_log ADD COLUMN prev_hash CHAR(64) NULL"],
   ['activity_log', 'entry_hash', "ALTER TABLE activity_log ADD COLUMN entry_hash CHAR(64) NULL"],
+  // Ref 31: one-time device hardware identity. The device:register handler
+  // (ws/deviceSocket.js) and the activation-code claim (routes/registration-codes.js)
+  // both write these now, so an un-migrated DB would fail every register/claim until
+  // repaired. All nullable, no default - NULL = "not captured yet".
+  ['devices', 'manufacturer', "ALTER TABLE devices ADD COLUMN manufacturer VARCHAR(100) NULL"],
+  ['devices', 'model', "ALTER TABLE devices ADD COLUMN model VARCHAR(120) NULL"],
+  ['devices', 'display_size_inches', "ALTER TABLE devices ADD COLUMN display_size_inches DOUBLE NULL"],
+  ['devices', 'mac_address', "ALTER TABLE devices ADD COLUMN mac_address VARCHAR(64) NULL"],
+  ['devices', 'serial_number', "ALTER TABLE devices ADD COLUMN serial_number VARCHAR(128) NULL"],
+  ['devices', 'sim_iccid', "ALTER TABLE devices ADD COLUMN sim_iccid VARCHAR(64) NULL"],
+  ['devices', 'sim_provider', "ALTER TABLE devices ADD COLUMN sim_provider VARCHAR(100) NULL"],
+  ['devices', 'sim_network_status', "ALTER TABLE devices ADD COLUMN sim_network_status VARCHAR(50) NULL"],
+  ['devices', 'hardware_captured_at', "ALTER TABLE devices ADD COLUMN hardware_captured_at BIGINT NULL"],
 ];
 
 function defaultOnMissing(missing) {

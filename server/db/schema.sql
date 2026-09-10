@@ -240,6 +240,19 @@ CREATE TABLE IF NOT EXISTS devices (
     screen_height   INT,
     render_width    INT,
     render_height   INT,
+    -- Ref 31: one-time device hardware identity, captured once at pairing/registration
+    -- (not recurring telemetry). Every column is nullable; NULL means "not captured yet"
+    -- and the app stores an explicit honest string ("unavailable (requires Device Owner)",
+    -- "no SIM hardware", ...) rather than leaving privileged/absent fields blank.
+    manufacturer        VARCHAR(100),
+    model               VARCHAR(120),
+    display_size_inches DOUBLE,
+    mac_address         VARCHAR(64),
+    serial_number       VARCHAR(128),
+    sim_iccid           VARCHAR(64),
+    sim_provider        VARCHAR(100),
+    sim_network_status  VARCHAR(50),
+    hardware_captured_at BIGINT,
     playlist_id     VARCHAR(64),
     layout_id       VARCHAR(64),
     timezone        VARCHAR(100) DEFAULT 'UTC',

@@ -14,6 +14,7 @@ import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.remotedisplay.player.data.ServerConfig
+import com.remotedisplay.player.service.DeviceAdminReceiver
 import com.remotedisplay.player.service.OtaThrottle
 import java.security.MessageDigest
 import org.json.JSONObject
@@ -64,6 +65,158 @@ class DeviceInfo(private val context: Context) {
             put("ota_status", OtaThrottle.statusFor(ota, System.currentTimeMillis()))
             put("ota_target_version", cfg.otaTargetVersion)
             put("ota_attempts", cfg.otaAttempts)
+            // Ref 31: one-time hardware identity, nested so an old server just ignores it
+            // and so the server-side write is a single clearly-scoped block.
+            try { put("hardware", getHardwareInfo()) } catch (_: Throwable) {}
+        }
+    }
+
+    /**
+     * Ref 31: device hardware identity, captured best-effort. The contract with the
+     * dashboard is: NEVER a silently-blank field. Every entry is either a real value or
+     * an explicit honest marker:
+     *   - "unavailable (requires Device Owner)" — a privileged field (real MAC / serial /
+     *     SIM ICCID) not readable because the app is not Device Owner (an operator can fix
+     *     this by provisioning the app as Device Owner).
+     *   - "unavailable" — the app IS Device Owner and tried the privileged path, but this
+     *     hardware simply doesn't expose the value (e.g. emulators, no cellular baseband).
+     *   - "no SIM hardware" / "NO_TELEPHONY" — this device has no cellular radio at all
+     *     (the common case for a signage TV box), which is distinct from a restriction.
+     *   - "no SIM" — telephony hardware present, but no SIM card inserted.
+     * display_size_inches is JSON null when DisplayMetrics reports a physically
+     * impossible value (very common on cheap TV boxes) rather than a bogus number.
+     */
+    fun getHardwareInfo(): JSONObject {
+        val deviceOwner = try { DeviceAdminReceiver.isDeviceOwner(context) } catch (_: Throwable) { false }
+        // Not Device Owner -> the field is behind a privilege this build doesn't hold, and
+        // the operator CAN fix that (provision as Device Owner). Device Owner but the read
+        // still came back empty -> we tried the privileged path and this hardware just
+        // doesn't expose the value (common on emulators / SIM-less boxes) - a plain
+        // "unavailable", no false promise that Device Owner would help.
+        val privMarker = if (deviceOwner) "unavailable" else "unavailable (requires Device Owner)"
+
+        return JSONObject().apply {
+            // Always available — the AOSP Build fields.
+            put("manufacturer", Build.MANUFACTURER?.trim().takeUnless { it.isNullOrEmpty() } ?: "unknown")
+            put("model", Build.MODEL?.trim().takeUnless { it.isNullOrEmpty() } ?: "unknown")
+            put("display_size_inches", computeDisplaySizeInches() ?: JSONObject.NULL)
+
+            // SIM / telephony. getSimOperatorName() / getSimState() need no permission on
+            // any API level; distinguish "no radio" from "no SIM" from "restricted".
+            val hasTelephony = context.packageManager
+                .hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEPHONY)
+            if (!hasTelephony) {
+                put("sim_network_status", "NO_TELEPHONY")
+                put("sim_provider", "no SIM hardware")
+                put("sim_iccid", "no SIM hardware")
+            } else {
+                val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+                val state = try { tm?.simState } catch (_: Throwable) { null }
+                    ?: android.telephony.TelephonyManager.SIM_STATE_UNKNOWN
+                put("sim_network_status", simStateName(state))
+                val operator = try { tm?.simOperatorName?.trim().orEmpty() } catch (_: Throwable) { "" }
+                put("sim_provider", when {
+                    state == android.telephony.TelephonyManager.SIM_STATE_ABSENT -> "no SIM"
+                    operator.isNotEmpty() -> operator
+                    else -> "unavailable"
+                })
+                put("sim_iccid", when {
+                    state == android.telephony.TelephonyManager.SIM_STATE_ABSENT -> "no SIM"
+                    deviceOwner -> readSimIccid(tm) ?: privMarker
+                    else -> "unavailable (requires Device Owner)"
+                })
+            }
+
+            // Real MAC + serial: Device-Owner-privileged on modern Android. Attempt the
+            // privileged path only when we actually hold Device Owner; otherwise say so.
+            put("mac_address", readMacAddress(deviceOwner) ?: privMarker)
+            put("serial_number", readSerialNumber(deviceOwner) ?: privMarker)
+        }
+    }
+
+    private fun simStateName(state: Int): String = when (state) {
+        android.telephony.TelephonyManager.SIM_STATE_ABSENT -> "ABSENT"
+        android.telephony.TelephonyManager.SIM_STATE_READY -> "READY"
+        android.telephony.TelephonyManager.SIM_STATE_PIN_REQUIRED -> "PIN_REQUIRED"
+        android.telephony.TelephonyManager.SIM_STATE_PUK_REQUIRED -> "PUK_REQUIRED"
+        android.telephony.TelephonyManager.SIM_STATE_NETWORK_LOCKED -> "NETWORK_LOCKED"
+        android.telephony.TelephonyManager.SIM_STATE_NOT_READY -> "NOT_READY"          // API 26
+        android.telephony.TelephonyManager.SIM_STATE_PERM_DISABLED -> "PERM_DISABLED"  // API 26
+        android.telephony.TelephonyManager.SIM_STATE_CARD_IO_ERROR -> "CARD_IO_ERROR"  // API 26
+        android.telephony.TelephonyManager.SIM_STATE_CARD_RESTRICTED -> "CARD_RESTRICTED" // API 28
+        else -> "UNKNOWN"
+    }
+
+    /** Physical diagonal in inches from the real render metrics; null if not sane. */
+    private fun computeDisplaySizeInches(): Double? {
+        return try {
+            val dm = DisplayMetrics()
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(dm)
+            val xdpi = dm.xdpi.toDouble()
+            val ydpi = dm.ydpi.toDouble()
+            if (xdpi <= 0.0 || ydpi <= 0.0) return null
+            val wIn = dm.widthPixels / xdpi
+            val hIn = dm.heightPixels / ydpi
+            val diag = kotlin.math.sqrt(wIn * wIn + hIn * hIn)
+            // Reject the common TV-box garbage (reports 0.x" or absurdly large).
+            if (diag < 1.0 || diag > 200.0) null else kotlin.math.round(diag * 10.0) / 10.0
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Real hardware MAC. Only the Device Owner path is trustworthy on API 24+. */
+    private fun readMacAddress(deviceOwner: Boolean): String? {
+        if (deviceOwner && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE)
+                    as android.app.admin.DevicePolicyManager
+                val admin = android.content.ComponentName(context, DeviceAdminReceiver::class.java)
+                val mac = dpm.getWifiMacAddress(admin)?.trim()
+                if (!mac.isNullOrEmpty() && !mac.equals("02:00:00:00:00:00", ignoreCase = true)) return mac
+            } catch (_: Throwable) { /* fall through */ }
+        }
+        // Pre-M devices expose the real MAC without privilege; M+ non-owner only gets the
+        // 02:00:00:00:00:00 sentinel, which we treat as "not available", not a real value.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            try {
+                @Suppress("DEPRECATION")
+                val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION", "HardwareIds")
+                val mac = wm.connectionInfo?.macAddress?.trim()
+                if (!mac.isNullOrEmpty() && !mac.equals("02:00:00:00:00:00", ignoreCase = true)) return mac
+            } catch (_: Throwable) { /* fall through */ }
+        }
+        return null
+    }
+
+    /** Real device serial. Free pre-O; Device-Owner (or privileged) only on O+. */
+    @Suppress("HardwareIds")
+    private fun readSerialNumber(deviceOwner: Boolean): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            @Suppress("DEPRECATION")
+            val s = Build.SERIAL?.trim()
+            return if (!s.isNullOrEmpty() && !s.equals(Build.UNKNOWN, ignoreCase = true)) s else null
+        }
+        if (!deviceOwner) return null
+        return try {
+            val s = Build.getSerial()?.trim()
+            if (!s.isNullOrEmpty() && !s.equals(Build.UNKNOWN, ignoreCase = true)) s else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** SIM ICCID. Device-Owner / privileged / carrier only on API 29+. */
+    @Suppress("HardwareIds")
+    private fun readSimIccid(tm: android.telephony.TelephonyManager?): String? {
+        return try {
+            val iccid = tm?.simSerialNumber?.trim()
+            if (!iccid.isNullOrEmpty()) iccid else null
+        } catch (_: Throwable) {
+            null
         }
     }
 

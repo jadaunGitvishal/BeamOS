@@ -4,7 +4,7 @@ import { useApi } from "../hooks/useApi";
 import { usePeriod } from "../hooks/usePeriod";
 import { useBreadcrumb } from "../hooks/useBreadcrumb";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
-import { n0, periodWindow, periodLabel, isoDateOnly, fmtCoords, osmUrl } from "../lib/format";
+import { n0, periodWindow, periodLabel, isoDateOnly, fmtCoords, osmUrl, timeAgo } from "../lib/format";
 import { isWeakSignal } from "../lib/risk";
 import { buildStatusStrip } from "../lib/transmissionStrip";
 import StatTile from "../components/StatTile";
@@ -14,6 +14,70 @@ import { DetailScreenshot } from "../components/DeviceScreenshot";
 import AuditTrail from "../components/AuditTrail";
 import StatusHeatmap from "../components/StatusHeatmap";
 import FieldVisits from "../components/FieldVisits";
+
+// Ref 31: render one captured hardware field. The device deliberately sends an
+// honest marker string ("unavailable (requires Device Owner)", "no SIM hardware",
+// …) rather than a blank, so we only dim those and the never-captured (null) case
+// — a real value shows normally.
+function hwCell(value) {
+  if (value === null || value === undefined || value === "") {
+    return <dd className="hw-na">Not captured yet</dd>;
+  }
+  const s = String(value);
+  const isMarker = /^(unavailable|no SIM|NO_TELEPHONY|UNKNOWN$)/i.test(s);
+  return <dd className={isMarker ? "hw-na" : undefined}>{s}</dd>;
+}
+
+function HardwareCard({ d }) {
+  const anyCaptured =
+    d.hardware_captured_at ||
+    [d.manufacturer, d.model, d.mac_address, d.serial_number, d.sim_provider, d.sim_network_status].some(
+      (v) => v !== null && v !== undefined && v !== "",
+    );
+  return (
+    <div className="card mt16">
+      <div className="ch">
+        <h2>Hardware</h2>
+        <span className="hint">
+          {d.hardware_captured_at
+            ? "captured " + timeAgo(d.hardware_captured_at)
+            : anyCaptured
+              ? "reported by the device"
+              : "not reported — device predates this, or hasn’t re-registered"}
+        </span>
+      </div>
+      <dl className="hw-kv">
+        <dt>Make</dt>
+        {hwCell(d.manufacturer)}
+        <dt>Model</dt>
+        {hwCell(d.model)}
+        <dt>Display size</dt>
+        {d.display_size_inches ? <dd>{d.display_size_inches}″ diagonal</dd> : <dd className="hw-na">Unavailable</dd>}
+        <dt>Resolution</dt>
+        {d.screen_width && d.screen_height ? (
+          <dd>
+            {d.screen_width}×{d.screen_height}
+            {d.render_width && d.render_height && (d.render_width !== d.screen_width || d.render_height !== d.screen_height)
+              ? ` (rendering ${d.render_width}×${d.render_height})`
+              : ""}
+          </dd>
+        ) : (
+          <dd className="hw-na">Not captured yet</dd>
+        )}
+        <dt>MAC address</dt>
+        {hwCell(d.mac_address)}
+        <dt>Serial number</dt>
+        {hwCell(d.serial_number)}
+        <dt>SIM status</dt>
+        {hwCell(d.sim_network_status)}
+        <dt>SIM provider</dt>
+        {hwCell(d.sim_provider)}
+        <dt>SIM ICCID</dt>
+        {hwCell(d.sim_iccid)}
+      </dl>
+    </div>
+  );
+}
 
 export default function DeviceDetailView() {
   const { id } = useParams();
@@ -151,6 +215,8 @@ export default function DeviceDetailView() {
         <StatTile label="App version" value={d.app_version || "—"} card />
         <StatTile label="Android version" value={d.android_version || "—"} card />
       </div>
+
+      <HardwareCard d={d} />
 
       <div className="card mt16">
         <div className="ch">
