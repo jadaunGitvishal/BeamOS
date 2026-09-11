@@ -13,28 +13,24 @@
 //   5. Assign-time hardening: a zone_id not in the device's active layout is cleared to
 //      null on POST; a valid one is kept.
 //
-// Mirrors mute.test.js: boots the real server.js against an isolated DB and seeds rows on
-// one connection (FK off) to avoid WAL visibility races. No player/DOM/Playwright tests.
+// In-process against the real MySQL database (see test/helpers/inprocess-app.js). Every
+// row this test creates is disposable: workspace-scoped rows (device, playlist, layouts)
+// cascade from the disposable user's org; `content` rows are seeded with workspace_id
+// left NULL (the platform-template shape) so they do NOT cascade and are cleaned up
+// explicitly (test/helpers/disposable.js's cleanupContent).
+// No player/DOM/Playwright tests.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
-const crypto = require('node:crypto');
-const Database = require('better-sqlite3');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers, cleanupContent } = require('./helpers/disposable');
 
-const PORT = 3996;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-zone-test-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-zone-' + crypto.randomBytes(4).toString('hex') + '.log');
-const PW = 'Passw0rd123';
-let proc, db;
+let base, db, stop;
 const S = {};
+const created = { userIds: [], contentIds: [] };
 
 async function jfetch(p, opts = {}) {
-  const res = await fetch(BASE + p, opts);
+  const res = await fetch(base + p, opts);
   let body = null; try { body = await res.json(); } catch { /* non-JSON */ }
   return { status: res.status, body };
 }
@@ -55,22 +51,12 @@ async function getOrphanCount() {
 }
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  ({ base, db, stop } = await startInProcessApp({ only: ['/api/auth', '/api/devices', '/api/layouts', '/api/playlists', '/api/assignments'] }));
 
-  // First user -> platform_admin; register returns the JWT, the user, and the workspace.
-  const reg = await jfetch('/api/auth/register', post(null, { email: 'z' + crypto.randomBytes(4).toString('hex') + '@x.local', password: PW }));
+  const tag = randTag();
+  const reg = await jfetch('/api/auth/register', post(null, { email: `devzone-${tag}@x.local`, password: 'Passw0rd123' }));
   S.jwt = reg.body.token;
+  created.userIds.push(reg.body.user.id);
   S.userId = reg.body.user.id;
   S.wsA = reg.body.current_workspace_id;
 
@@ -84,36 +70,37 @@ before(async () => {
   const pl = await jfetch('/api/playlists', post(S.jwt, { name: 'zone-pl' }));
   S.playlistId = pl.body.id;
 
-  // Seed content, a device, and playlist_items on one connection (FK off). The orphan item
-  // is seeded DIRECTLY so it bypasses assign-time validation — that's how real orphans
-  // arise (assigned under a different layout / layout switched after the fact).
-  db = new Database(path.join(DATA_DIR, 'db', 'remote_display.db'), { timeout: 5000 });
-  db.pragma('foreign_keys = OFF');
-  const mkContent = (name) => {
-    const id = crypto.randomUUID();
-    db.prepare("INSERT INTO content (id, filename, filepath, mime_type, file_size, remote_url) VALUES (?,?,?,?,0,?)")
-      .run(id, name, '', 'image/png', 'https://example.com/' + name + '.png');
+  // Content rows are seeded directly (workspace_id left NULL — the platform-template
+  // shape; tracked in created.contentIds for explicit cleanup) and a device + playlist_items
+  // via the real db module. The orphan item is seeded DIRECTLY so it bypasses assign-time
+  // validation — that's how real orphans arise (assigned under a different layout / layout
+  // switched after the fact).
+  const mkContent = async (name) => {
+    const id = `${tag}-c-${name}`;
+    await db.prepare("INSERT INTO content (id, filename, filepath, mime_type, file_size, remote_url) VALUES (?,?,?,?,0,?)")
+      .run(id, name, '', 'image/png', `https://example.com/${name}.png`);
+    created.contentIds.push(id);
     return id;
   };
-  S.cMute = mkContent('mute'); S.cValid = mkContent('valid'); S.cOrphan = mkContent('orphan');
-  S.cPostStale = mkContent('post-stale'); S.cPostOk = mkContent('post-ok');
+  S.cMute = await mkContent('mute'); S.cValid = await mkContent('valid'); S.cOrphan = await mkContent('orphan');
+  S.cPostStale = await mkContent('post-stale'); S.cPostOk = await mkContent('post-ok');
 
-  S.deviceId = crypto.randomUUID();
-  db.prepare("INSERT INTO devices (id, name, status, workspace_id, user_id, layout_id, playlist_id) VALUES (?,?,?,?,?,?,?)")
+  S.deviceId = `${tag}-dev`;
+  await db.prepare("INSERT INTO devices (id, name, status, workspace_id, user_id, layout_id, playlist_id) VALUES (?,?,?,?,?,?,?)")
     .run(S.deviceId, 'ZoneDev', 'online', S.wsA, S.userId, S.L1, S.playlistId);
 
-  const addItem = (contentId, zoneId, sort) =>
-    db.prepare("INSERT INTO playlist_items (playlist_id, content_id, zone_id, sort_order, duration_sec, muted) VALUES (?,?,?,?,10,0)")
-      .run(S.playlistId, contentId, zoneId, sort).lastInsertRowid;
-  S.itemMute = addItem(S.cMute, null, 0);     // no zone — for the mute round-trip
-  S.itemValid = addItem(S.cValid, S.Z1, 1);   // zone in the active layout -> NOT orphan
-  S.itemOrphan = addItem(S.cOrphan, S.ZX, 2); // zone from L2 -> orphan
+  const addItem = async (contentId, zoneId, sort) =>
+    (await db.prepare("INSERT INTO playlist_items (playlist_id, content_id, zone_id, sort_order, duration_sec, muted) VALUES (?,?,?,?,10,0)")
+      .run(S.playlistId, contentId, zoneId, sort)).lastInsertRowid;
+  S.itemMute = await addItem(S.cMute, null, 0);     // no zone — for the mute round-trip
+  S.itemValid = await addItem(S.cValid, S.Z1, 1);   // zone in the active layout -> NOT orphan
+  S.itemOrphan = await addItem(S.cOrphan, S.ZX, 2); // zone from L2 -> orphan
 });
 
 after(async () => {
-  try { db?.close(); } catch { /* */ }
-  if (proc) proc.kill('SIGKILL');
-  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  await cleanupContent(db, created.contentIds);
+  await cleanupUsers(db, created.userIds);
+  await stop();
 });
 
 // 1. muted must round-trip through the device payload SELECT — both states.

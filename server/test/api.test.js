@@ -19,6 +19,8 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
 const { PUBLIC_ROUTERS, JWT_ONLY_ROUTERS } = require('../config/api-surface');
+const { db } = require('../db/database');
+const { deleteUserCascade } = require('../lib/user-deletion');
 
 const PORT = 3978;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -52,11 +54,28 @@ before(async () => {
   }
   if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
 
-  // user1 (first user -> platform_admin, workspace A); user2 (workspace B)
-  let r = await jfetch('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'u1@test.local', password: 'test12345', name: 'U1' }) });
+  // user1 (first user -> platform_admin, workspace A); user2 (workspace B). Randomly
+  // tagged (not the old fixed u1@test.local/u2@test.local) so a run against the real
+  // shared MySQL database never collides with a prior run's leftovers or with itself.
+  const tag = crypto.randomBytes(4).toString('hex');
+  const u1Email = `apitest-u1-${tag}@x.local`;
+  let r = await jfetch('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: u1Email, password: 'test12345', name: 'U1' }) });
   S.jwt = r.body.token; S.user1 = r.body.user.id;
-  r = await jfetch('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'u2@test.local', password: 'test12345', name: 'U2' }) });
-  S.jwt2 = r.body.token;
+  r = await jfetch('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: `apitest-u2-${tag}@x.local`, password: 'test12345', name: 'U2' }) });
+  S.jwt2 = r.body.token; S.user2 = r.body.user.id;
+  // The original design relied on user1 being the FIRST EVER row in `users` (empty
+  // fresh DB per run -> auto platform_admin, routes/auth.js's userCount === 0 check).
+  // That held for an isolated flat-file SQLite DB per spawned subprocess; it does not
+  // hold against the real, already-populated shared MySQL database this now runs
+  // against. Several tests below (documented inline at their own call sites) depend
+  // on user1 genuinely being platform_admin - promote explicitly instead.
+  await db.prepare("UPDATE users SET role = 'platform_admin' WHERE id = ?").run(S.user1);
+  // JWTs already carry the OLD role in their signed payload from registration above;
+  // re-authenticate so S.jwt reflects the promotion (requireAuth re-reads role from
+  // the DB per request in this codebase, but re-issuing keeps this test independent
+  // of that implementation detail rather than relying on it).
+  r = await jfetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: u1Email, password: 'test12345' }) });
+  S.jwt = r.body.token;
 
   // scoped tokens (read/write/full) for user1, all bound to workspace A
   S.tok = {};
@@ -81,25 +100,35 @@ before(async () => {
   const layB = await jfetch('/api/layouts', post(S.jwt2, { name: 'LB', zones: [zone('ZB')] }));
   S.layoutB = layB.body.id; S.zoneB = layB.body.zones[0].id;
 
-  // a paired device with a known token (for the WS round-trip) - inserted into the
-  // server's live DB (WAL: a second connection's commit is visible to the server).
-  const db = new (require('better-sqlite3'))(path.join(DATA_DIR, 'db', 'remote_display.db'), { timeout: 5000 });
+  // a paired device with a known token (for the WS round-trip) - inserted via the real
+  // async db module (real MySQL; the spawned subprocess above and this test process
+  // both connect to the same real database - no WAL/file-visibility concern the old
+  // flat-file SQLite comment mentioned, that was specific to the pre-migration
+  // architecture where DATA_DIR resolved to a real on-disk file server.js created).
   S.deviceId = crypto.randomUUID();
   S.deviceToken = 'devtok_' + crypto.randomBytes(16).toString('hex');
-  db.prepare("INSERT INTO devices (id,name,user_id,workspace_id,device_token,status,created_at) VALUES (?,?,?,?,?,'offline',strftime('%s','now'))")
+  await db.prepare("INSERT INTO devices (id,name,user_id,workspace_id,device_token,status,created_at) VALUES (?,?,?,?,?,'offline',UNIX_TIMESTAMP())")
     .run(S.deviceId, 'WS-dev', S.user1, S.wsA, S.deviceToken);
   // #109 PiP fixtures: a device in workspace B (cross-tenant isolation) and the wsA
   // device as a member of the wsA group (group-targeting expansion).
   S.deviceIdB = crypto.randomUUID();
-  db.prepare("INSERT INTO devices (id,name,user_id,workspace_id,device_token,status,created_at) VALUES (?,?,?,?,?,'offline',strftime('%s','now'))")
+  await db.prepare("INSERT INTO devices (id,name,user_id,workspace_id,device_token,status,created_at) VALUES (?,?,?,?,?,'offline',UNIX_TIMESTAMP())")
     .run(S.deviceIdB, 'WS-dev-B', S.user1, S.wsB, 'devtok_' + crypto.randomBytes(16).toString('hex'));
-  db.prepare('INSERT INTO device_group_members (group_id, device_id) VALUES (?, ?)').run(S.groupId, S.deviceId);
-  db.close();
+  await db.prepare('INSERT INTO device_group_members (group_id, device_id) VALUES (?, ?)').run(S.groupId, S.deviceId);
 });
 
-after(() => {
+after(async () => {
   if (proc) proc.kill('SIGKILL');
   for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  // Disposable-ID + cleanup discipline (test/helpers/disposable.js's pattern, inlined
+  // here since this file spawns its own subprocess rather than using
+  // helpers/inprocess-app.js): both users deleted via the real cascade path, which
+  // also removes their orgs/workspaces/playlists/layouts/tokens/devices/group members.
+  for (const id of [S.user1, S.user2].filter(Boolean)) {
+    try { await deleteUserCascade(db, { targetId: id, actingAdminId: id }); }
+    catch (e) { console.warn(`[api.test.js] cleanup(${id}) failed: ${e.message}`); }
+  }
+  await db.close();
 });
 
 // ───────────────────────── TIER 1: PARTITION FIREWALL ─────────────────────────
