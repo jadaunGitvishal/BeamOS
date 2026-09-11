@@ -8,13 +8,20 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 process.env.DATA_DIR = path.join(os.tmpdir(), 'st-thru-' + crypto.randomBytes(4).toString('hex'));
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { rollingCounter, bump, read } = require('../lib/rolling-counter');
 const flap = require('../lib/flap-limiter');
 const breaker = require('../lib/ota-breaker');
 const guard = require('../lib/ota-download-guard');
 const config = require('../config');
+
+// The last test below lazily requires db/database (a real mysql2 pool) - never
+// closed before, which is the same open-handle-keeps-the-process-alive hang
+// found in Stage 1/2 (`node --test` waits for the event loop to quiesce).
+after(async () => {
+  await require('../db/database').db.close();
+});
 
 test('rolling-counter: total accrues; lastWindow = last CLOSED window; idle decays to 0', () => {
   const c = rollingCounter(1000);

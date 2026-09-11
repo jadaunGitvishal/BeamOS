@@ -50,10 +50,15 @@ before(async () => {
   base = `http://127.0.0.1:${httpServer.address().port}`;
 });
 
-after(() => {
+after(async () => {
   try { setupDeviceSocket.__resetTimers(); } catch { /* */ }
   try { io.close(); } catch { /* */ }
   try { httpServer.close(); } catch { /* */ }
+  // ws/deviceSocket transitively requires db/database, which creates a real
+  // mysql2 pool - never closed here before, which is a strong hang suspect
+  // (same root cause found in Stage 1/2: an open pool keeps the event loop
+  // alive so `node --test` never sees the process quiesce).
+  await require('../db/database').db.close();
 });
 
 const connect = () => ioClient(`${base}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
