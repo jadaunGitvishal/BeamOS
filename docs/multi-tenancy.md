@@ -219,9 +219,9 @@ not a re-implementation of the check:
 - `GET /pending-installations: workspace-scoped — WS2 member sees only WS2 codes`
 
 *(These two run against the live MySQL database rather than an in-memory
-stub — see the honest note on re-run scope in §3.11 below; not re-executed
-fresh for this document, but the assertions are real and were passing at
-last run.)*
+stub — see §3.11 for the fix that made that possible in this environment
+and the fresh run: both now confirmed 15/15 passing against real MySQL,
+today.)*
 
 ### 3.6 Device provisioning & registration codes
 
@@ -262,8 +262,9 @@ last run.)*
   another tenant), not just top-level resource ownership
 - `pip: workspace isolation — wsA token cannot target a wsB device (404)`
 
-*(`api.test.js` runs against the live MySQL database — see §3.11; not
-re-executed fresh for this document.)*
+*(`api.test.js` runs against the live MySQL database; still not
+re-executed cleanly for this document — see §3.11 for why fixing the
+credential gap wasn't enough to resolve it.)*
 
 ### 3.8 Device audit trail (Phase 2) and field visits (Ref 43)
 
@@ -347,29 +348,71 @@ $ node --test server/test/tenancy-cross-tenant.test.js \
 # fail 0
 ```
 
-**Honest gap in this specific re-run**, two different reasons:
+**Update, same day: the "no `.env`" gap originally noted here was a
+misdiagnosis of the real mechanism — corrected below rather than
+silently.** The original note said `reconciliation.test.js`,
+`pending-installation-report.test.js`, and `api.test.js` were skipped
+because this environment had no `.env`. That premise was wrong:
+`server/.env` existed the whole time with real
+credentials — `npm test` (and every bare `node --test` invocation) simply
+never loaded it. `start`/`dev` already passed Node's
+`--env-file-if-exists=.env` flag; `test` didn't. Fixed in
+[`server/package.json`](../server/package.json) (`"test": "node
+--env-file-if-exists=.env --test"`), matching `start`/`dev`. Re-investigating
+with real credentials now available produced three genuinely different
+outcomes, not one uniform "now it works":
 
-- `reconciliation.test.js` (§3.5), `pending-installation-report.test.js`
-  (§3.5), and `api.test.js` (§3.7) connect to the real MySQL database
-  rather than an in-memory stub, and this working environment has no
-  `.env` / `MYSQL_PASSWORD` configured for it right now
-  (`ER_ACCESS_DENIED_ERROR` for `beamos_user`, against an otherwise-running
-  local MySQL) — a local environment gap, not a code regression.
+- **`reconciliation.test.js` and `pending-installation-report.test.js`
+  were genuinely credential-blocked, and are now confirmed passing.**
+  Re-run fresh against the real MySQL database, each in its own process:
+  ```
+  $ node --env-file-if-exists=.env --test server/test/reconciliation.test.js
+  # tests 15
+  # pass 15
+  # fail 0
+
+  $ node --env-file-if-exists=.env --test server/test/pending-installation-report.test.js
+  # tests 15
+  # pass 15
+  # fail 0
+  ```
+  The citations in §3.5 now stand on a fresh, real run, not a "last
+  known-passing" claim.
+
+- **`api.test.js` (§3.7) is a partial correction, not a clean resolution.**
+  Credentials were genuinely part of the failure — with the fix, the real
+  server now boots against real MySQL. But that only uncovers a second,
+  independent, pre-existing bug: the test's own `before()` hook opens
+  `DATA_DIR/db/remote_display.db` directly via `better-sqlite3` — a flat-file
+  SQLite path from before this codebase's MySQL migration
+  (`server.js` hasn't created that file since ~2026-07-21). Re-run fresh:
+  ```
+  $ node --env-file-if-exists=.env --test server/test/api.test.js
+  # tests 61
+  # pass 0
+  # fail 61
+  ```
+  Same fail count as before the fix, for a **different, unrelated reason**
+  now. The cross-tenant assertions cited from this file in §3.7 are still
+  standing on their last known-passing run, not today's — the npm-test fix
+  did not resolve this file, and fixing it further is unrelated,
+  pre-migration test-fixture work, not a tenancy-isolation question.
+
 - `agency.test.js` and `registration-codes-device-owner-qr.test.js` (§3.9)
-  spawn a real, separate `node server.js` process (the former) or depend
-  on a resolved APK fixture (the latter) rather than running in-process —
-  excluded from this fast sample for the same practical reason
-  `rbac.md`/`data-export.md` scope their own "re-run fresh" commands to
-  the in-process suites, not because of any known issue.
+  remain excluded from the in-process re-run for the original, unrelated
+  reason (spawn a real separate `node server.js` process / depend on a
+  resolved APK fixture) — nothing about this investigation changes that.
 
-None of the four were re-executed for this document; they're cited above
-on the strength of their last known-passing run, not today's. The 184-test
-run above is still a substantial, genuinely fresh, genuinely representative
-sample spanning every feature area in this section — the core resolver
-guard (including the regression it caught), exports, dashboards, SLA
-rollups, regions, campaigns, tickets, registration codes, field visits,
-device audit, the agency-token confinement boundary, and the shared-template
-exception.
+The 184-test in-process run above is unaffected by any of this — none of
+those 20 files touch MySQL — and remains a substantial, genuinely fresh,
+genuinely representative sample spanning every feature area in this
+section: the core resolver guard (including the regression it caught),
+exports, dashboards, SLA rollups, regions, campaigns, tickets, registration
+codes, field visits, device audit, the agency-token confinement boundary,
+and the shared-template exception. Adding the two now-confirmed real-MySQL
+runs above, **214 tests across 22 files are now fresh, real, and passing**
+for this document — up from 184, with the one remaining gap (`api.test.js`)
+honestly attributed to its actual, different cause.
 
 ## 4. Encryption
 
