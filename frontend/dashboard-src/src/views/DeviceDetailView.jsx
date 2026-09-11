@@ -14,6 +14,7 @@ import { DetailScreenshot } from "../components/DeviceScreenshot";
 import AuditTrail from "../components/AuditTrail";
 import StatusHeatmap from "../components/StatusHeatmap";
 import FieldVisits from "../components/FieldVisits";
+import TelemetryHistory from "../components/TelemetryHistory";
 
 // Ref 31: render one captured hardware field. The device deliberately sends an
 // honest marker string ("unavailable (requires Device Owner)", "no SIM hardware",
@@ -103,7 +104,7 @@ export default function DeviceDetailView() {
       // workspace_id, which only the /api/dashboard/devices row carries.
       const devices = await apiFetch("/api/dashboard/devices", { signal });
       const wsId = devices.find((x) => x.id === id)?.workspace_id;
-      const [history, uptimeRows, availRows, trail, heatmap, visits] = await Promise.all([
+      const [history, uptimeRows, availRows, trail, heatmap, telemetryHistory, visits] = await Promise.all([
         apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/status-history?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`, {
           signal,
         }),
@@ -113,6 +114,10 @@ export default function DeviceDetailView() {
         apiFetch(`/api/dashboard/reports/availability?start=${isoDateOnly(start)}&end=${isoDateOnly(end)}`, { signal }),
         apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/audit-trail?limit=60`, { signal }).catch(softFail),
         apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/status-heatmap?days=7`, { signal }).catch(softFail),
+        // Ref 45 Stage B: RAM/CPU/battery-temperature trend charts. Soft-fail like
+        // the audit trail/heatmap above so an unexpected error never blanks the
+        // rest of the page.
+        apiFetch(`/api/dashboard/devices/${encodeURIComponent(id)}/telemetry-history?hours=24`, { signal }).catch(softFail),
         // Ref 43 Stage C: field-visit history. Any workspace member can read
         // (Stage A GET routes are canAccessWorkspace-scoped); soft-fail so an
         // unexpected error never blanks the rest of the page.
@@ -120,7 +125,7 @@ export default function DeviceDetailView() {
           ? apiFetch(`/api/workspaces/${encodeURIComponent(wsId)}/field-visits?device_id=${encodeURIComponent(id)}`, { signal }).catch(softFail)
           : Promise.resolve(null),
       ]);
-      return { devices, history, uptimeRows, availRows, trail, heatmap, visits, wsId, start, end };
+      return { devices, history, uptimeRows, availRows, trail, heatmap, telemetryHistory, visits, wsId, start, end };
     },
     [period, id],
   );
@@ -145,7 +150,7 @@ export default function DeviceDetailView() {
   if (!device) return <h1>Device not found</h1>;
 
   const d = device;
-  const { history, uptimeRows, availRows, trail, heatmap, visits, wsId, start, end } = data;
+  const { history, uptimeRows, availRows, trail, heatmap, telemetryHistory, visits, wsId, start, end } = data;
   const uptimeRow = uptimeRows[0];
   const availRow = availRows.find((a) => a.device_id === id);
   const segs = buildStatusStrip(history, start.getTime(), end.getTime());
@@ -232,6 +237,11 @@ export default function DeviceDetailView() {
             one-metric-per-tile pattern of the tiles above. */}
         <StatTile label="App version" value={d.app_version || "—"} card />
         <StatTile label="Android version" value={d.android_version || "—"} card />
+      </div>
+
+      <div className="sec">
+        <h2>RAM, CPU &amp; temperature — last 24 hours</h2>
+        <TelemetryHistory rows={telemetryHistory} />
       </div>
 
       <HardwareCard d={d} />

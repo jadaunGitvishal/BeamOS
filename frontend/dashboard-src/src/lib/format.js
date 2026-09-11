@@ -45,3 +45,12 @@ export function fmtCoords(lat, lng) {
 export function osmUrl(lat, lng) {
   return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=15/${lat}/${lng}`;
 }
+
+// Ref 45 Stage B: short local-time label for telemetry-history chart X axis
+// ticks (e.g. "14:32"). Absolute time, not timeAgo()'s relative "5m ago" -
+// a trend chart's axis needs a fixed reference, not one that reflows as the
+// page sits open.
+export function fmtTime(epochSeconds) {
+  if (epochSeconds === null || epochSeconds === undefined) return "";
+  return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}

@@ -326,4 +326,43 @@ router.get(
   }),
 );
 
+// GET /api/dashboard/devices/:id/telemetry-history?hours=24
+// Ref 45 Stage B (final piece) — RAM/CPU/battery-temperature history for the
+// Device Detail trend charts. Reads device_telemetry directly (the same table
+// the RAM/Storage/CPU/Battery-temperature tiles already read the LATEST row
+// from — this is just its history). Windowed by `hours` (default 24, capped
+// at 168 = 7 days so a caller can't ask for the whole table) and capped at
+// TELEMETRY_HISTORY_ROW_CAP rows within that window (a chart doesn't benefit
+// from thousands of points, and real heartbeat cadence can be as tight as
+// HEARTBEAT_INTERVAL) — oldest-first (ASC) so the chart data is already in
+// the order it should render, same shape as :id/status-history.
+const TELEMETRY_HISTORY_ROW_CAP = 500;
+router.get(
+  "/:id/telemetry-history",
+  asyncHandler(async (req, res) => {
+    if (!(await resolveDeviceForRead(req, res))) return;
+
+    const hoursReq = parseInt(req.query.hours, 10);
+    const hours = Number.isFinite(hoursReq) && hoursReq > 0 ? Math.min(hoursReq, 168) : 24;
+    const sinceEpoch = Math.floor(Date.now() / 1000) - hours * 3600;
+
+    const rows = await db
+      .prepare(
+        `
+      SELECT reported_at, ram_free_mb, ram_total_mb, cpu_usage, battery_temperature_c
+      FROM (
+        SELECT reported_at, ram_free_mb, ram_total_mb, cpu_usage, battery_temperature_c
+        FROM device_telemetry
+        WHERE device_id = ? AND reported_at >= ?
+        ORDER BY reported_at DESC
+        LIMIT ?
+      ) recent
+      ORDER BY reported_at ASC
+    `,
+      )
+      .all(req.params.id, sinceEpoch, TELEMETRY_HISTORY_ROW_CAP);
+    res.json(rows);
+  }),
+);
+
 module.exports = router;
