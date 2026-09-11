@@ -40,14 +40,25 @@ async function cleanupUsers(db, userIds) {
   for (const id of (userIds || []).filter(Boolean)) await cleanupUser(db, id);
 }
 
-// For rows that do NOT cascade from a user/org/workspace deletion - most
-// commonly `content` rows seeded with workspace_id left NULL (the platform-
-// template shape, schema.sql), which is sometimes the simplest way to seed a
-// fixture but means the row is invisible to cleanupUser(s). Delete by exact id.
-async function cleanupContent(db, contentIds) {
-  for (const id of (contentIds || []).filter(Boolean)) {
-    try { await db.prepare('DELETE FROM content WHERE id = ?').run(id); } catch (e) { /* already gone */ }
+// Generic "DELETE FROM <table> WHERE <key> = ?" for rows that do NOT cascade
+// from a user/org/workspace deletion — most commonly: `content` rows seeded
+// with workspace_id left NULL (the platform-template shape, schema.sql),
+// devices provisioned via a bare pairing_code (no claiming user/workspace
+// yet, the #143 auth-flow tests' shape), or `device_fingerprints` (primary
+// keyed on `fingerprint`, not `id`; ON DELETE SET NULL from devices means
+// deleting the device does NOT remove its fingerprint row). `table`/`key` are
+// never caller-controlled user input in this codebase's test suite, but are
+// still validated against a fixed allowlist rather than interpolated blindly.
+const ALLOWED = { content: 'id', devices: 'id', device_fingerprints: 'fingerprint' };
+async function cleanupRows(db, table, ids) {
+  const key = ALLOWED[table];
+  if (!key) throw new Error(`cleanupRows: table "${table}" is not in the allowlist`);
+  for (const id of (ids || []).filter(Boolean)) {
+    try { await db.prepare(`DELETE FROM ${table} WHERE ${key} = ?`).run(id); } catch (e) { /* already gone */ }
   }
 }
+const cleanupContent = (db, contentIds) => cleanupRows(db, 'content', contentIds);
+const cleanupDevices = (db, deviceIds) => cleanupRows(db, 'devices', deviceIds);
+const cleanupFingerprints = (db, fingerprints) => cleanupRows(db, 'device_fingerprints', fingerprints);
 
-module.exports = { randTag, cleanupUser, cleanupUsers, cleanupContent };
+module.exports = { randTag, cleanupUser, cleanupUsers, cleanupRows, cleanupContent, cleanupDevices, cleanupFingerprints };

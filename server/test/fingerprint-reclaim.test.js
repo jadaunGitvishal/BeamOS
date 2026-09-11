@@ -2,9 +2,16 @@
 
 // #143 — fingerprint-reclaim stuck loop. A device gone by every RUNTIME signal
 // (no live socket + stale heartbeat) must be reclaimable; a genuinely-live device
-// must still be rejected; the deferral log must not flood. Devices are seeded by
-// direct SQLite (mimics the real DB state + avoids the disconnect-debounce window
-// leaving a stale liveConn). Unique PORT 3988 (not 3982-3987).
+// must still be rejected; the deferral log must not flood. Devices are seeded
+// directly via the real db module (mimics the real DB state + avoids the
+// disconnect-debounce window leaving a stale liveConn). Unique PORT 3988 (not
+// 3982-3987).
+//
+// Spawns a REAL server.js subprocess (genuine socket.io connection lifecycle,
+// genuine in-memory liveConn/reclaim-deferral state, and real elapsed-time
+// debounce windows below — none of that is fakeable in-process) against the
+// real MySQL database, with disposable-ID + cleanup discipline
+// (test/helpers/disposable.js).
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,15 +21,16 @@ const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
-const Database = require('better-sqlite3');
+const { db } = require('../db/database');
+const { randTag, cleanupDevices, cleanupFingerprints } = require('./helpers/disposable');
 
 const PORT = 3988;
 const BASE = `http://127.0.0.1:${PORT}`;
 const DATA_DIR = path.join(os.tmpdir(), 'st-recl-' + crypto.randomBytes(4).toString('hex'));
 const LOG = path.join(os.tmpdir(), 'st-recl-' + crypto.randomBytes(4).toString('hex') + '.log');
-const DB_PATH = path.join(DATA_DIR, 'db', 'remote_display.db');
-let proc, tdb;
+let proc;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const created = { deviceIds: [], fingerprints: [] };
 
 before(async () => {
   const logFd = fs.openSync(LOG, 'w');
@@ -34,18 +42,25 @@ before(async () => {
   let up = false;
   for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await sleep(250); }
   if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
-  tdb = new Database(DB_PATH); tdb.pragma('busy_timeout = 3000'); tdb.pragma('foreign_keys = OFF');
 });
-after(() => { try { tdb && tdb.close(); } catch { /* */ } try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => {
+  try { proc.kill('SIGKILL'); } catch { /* */ }
+  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  await cleanupFingerprints(db, created.fingerprints);
+  await cleanupDevices(db, created.deviceIds);
+  await db.close();
+});
 
 // Seed a device + its fingerprint link directly (no socket -> no lingering liveConn).
-function seedDevice(fp, { token, heartbeatAgo }) {
+async function seedDevice(fp, { token, heartbeatAgo }) {
   const id = crypto.randomUUID();
-  tdb.prepare("INSERT INTO devices (id, status, last_heartbeat, device_token) VALUES (?, 'offline', strftime('%s','now') - ?, ?)").run(id, heartbeatAgo, token);
-  tdb.prepare('INSERT INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)').run(fp, id);
+  await db.prepare("INSERT INTO devices (id, status, last_heartbeat, device_token) VALUES (?, 'offline', UNIX_TIMESTAMP() - ?, ?)").run(id, heartbeatAgo, token);
+  await db.prepare('INSERT INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)').run(fp, id);
+  created.deviceIds.push(id);
+  created.fingerprints.push(fp);
   return { id, token };
 }
-function staleHeartbeat(id, ago) { tdb.prepare("UPDATE devices SET last_heartbeat = strftime('%s','now') - ? WHERE id = ?").run(ago, id); }
+async function staleHeartbeat(id, ago) { await db.prepare('UPDATE devices SET last_heartbeat = UNIX_TIMESTAMP() - ? WHERE id = ?').run(ago, id); }
 
 function attempt(payload) { // one-shot register; resolves and closes
   return new Promise((resolve) => {
@@ -70,8 +85,8 @@ function connectLive(payload) { // keeps the socket open (live connection); call
 const rnd = () => String(crypto.randomInt(100000, 1000000));
 
 test('#143 repro: a gone device (no live conn + stale heartbeat) is reclaimable', async () => {
-  const fp = 'fp-gone-' + crypto.randomBytes(4).toString('hex');
-  const dev = seedDevice(fp, { token: 'tok', heartbeatAgo: 99999 }); // ~27h stale, never connected
+  const fp = `fp-gone-${randTag()}`;
+  const dev = await seedDevice(fp, { token: 'tok', heartbeatAgo: 99999 }); // ~27h stale, never connected
   const r = await attempt({ pairing_code: rnd(), fingerprint: fp }); // no device_id -> reclaim path
   assert.ok(r.registered, 'reclaim SUCCEEDS for a gone device');
   assert.equal(r.newId, dev.id, 'it reclaims the SAME device identity');
@@ -79,8 +94,8 @@ test('#143 repro: a gone device (no live conn + stale heartbeat) is reclaimable'
 });
 
 test('no regression: a genuinely live device REJECTS a fingerprint reclaim', async () => {
-  const fp = 'fp-live-' + crypto.randomBytes(4).toString('hex');
-  const dev = seedDevice(fp, { token: 'tok2', heartbeatAgo: 10 });
+  const fp = `fp-live-${randTag()}`;
+  const dev = await seedDevice(fp, { token: 'tok2', heartbeatAgo: 10 });
   const live = await connectLive({ device_id: dev.id, device_token: 'tok2', device_info: {} });
   assert.ok(live.registered, 'device is live (has a connection)');
   const r = await attempt({ pairing_code: rnd(), fingerprint: fp });
@@ -89,8 +104,8 @@ test('no regression: a genuinely live device REJECTS a fingerprint reclaim', asy
 });
 
 test('clear-on-leave: after disconnect, liveConn is cleared so a (stale) device reclaims', async () => {
-  const fp = 'fp-leave-' + crypto.randomBytes(4).toString('hex');
-  const dev = seedDevice(fp, { token: 'tok3', heartbeatAgo: 99999 });
+  const fp = `fp-leave-${randTag()}`;
+  const dev = await seedDevice(fp, { token: 'tok3', heartbeatAgo: 99999 });
   const live = await connectLive({ device_id: dev.id, device_token: 'tok3', device_info: {} });
   assert.ok(live.registered);
   // while live, reclaim is rejected (liveConn present)
@@ -99,14 +114,14 @@ test('clear-on-leave: after disconnect, liveConn is cleared so a (stale) device 
   // leave: close + wait past the 5s offline-debounce so removeConnection runs
   try { live.sock.close(); } catch { /* */ }
   await sleep(6000);
-  staleHeartbeat(dev.id, 99999); // the live register bumped last_heartbeat; re-stale it
+  await staleHeartbeat(dev.id, 99999); // the live register bumped last_heartbeat; re-stale it
   r = await attempt({ pairing_code: rnd(), fingerprint: fp });
   assert.ok(r.registered, 'after disconnect cleared liveConn, the gone device reclaims');
 });
 
 test('log noise: a retried reclaim logs at most once per device per window', async () => {
-  const fp = 'fp-log-' + crypto.randomBytes(4).toString('hex');
-  const dev = seedDevice(fp, { token: 'tok4', heartbeatAgo: 5 }); // recent -> reclaim deferred
+  const fp = `fp-log-${randTag()}`;
+  const dev = await seedDevice(fp, { token: 'tok4', heartbeatAgo: 5 }); // recent -> reclaim deferred
   const live = await connectLive({ device_id: dev.id, device_token: 'tok4', device_info: {} });
   for (let i = 0; i < 4; i++) { const r = await attempt({ pairing_code: rnd(), fingerprint: fp }); assert.ok(r.authError, 'each retry is deferred'); }
   try { live.sock.close(); } catch { /* */ }

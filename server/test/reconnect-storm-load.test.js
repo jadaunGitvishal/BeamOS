@@ -17,6 +17,11 @@
 //   STATUS_LOG_FLUSH_MS=300                            -> batching is observable fast.
 //   RECONNECT_* tightened so a single-device storm trips without thousands of connects
 //     while a 12-device fleet herd stays under the ceiling (same shape as the #142 test).
+//
+// Spawns a REAL server.js subprocess (genuine socket.io connection lifecycle, real
+// reconnect-breaker/status-checker timers, real batched-write flushing - none of
+// that is fakeable in-process) against the real MySQL database, with disposable-ID +
+// cleanup discipline (test/helpers/disposable.js).
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -26,13 +31,15 @@ const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
-const Database = require('better-sqlite3');
+const { db } = require('../db/database');
+const { cleanupDevices } = require('./helpers/disposable');
 
 const PORT = 3997;   // must be unique across the suite (files run concurrently under `node --test`)
 const BASE = `http://127.0.0.1:${PORT}`;
 const DATA_DIR = path.join(os.tmpdir(), 'st-storm-' + crypto.randomBytes(4).toString('hex'));
 const LOG = path.join(os.tmpdir(), 'st-storm-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc, rdb;
+let proc;
+const created = { deviceIds: [] };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -54,19 +61,17 @@ before(async () => {
     await sleep(250);
   }
   if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
-  // Second connection to the same WAL db; SELECT-only, autocommit so each read sees
-  // the server's latest commit. Never writes.
-  rdb = new Database(path.join(DATA_DIR, 'db', 'remote_display.db'));
-  rdb.pragma('busy_timeout = 3000');
 });
 
-after(() => {
-  try { rdb && rdb.close(); } catch { /* */ }
+after(async () => {
   try { proc.kill('SIGKILL'); } catch { /* */ }
+  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  await cleanupDevices(db, created.deviceIds);
+  await db.close();
 });
 
-const statusOf = (id) => rdb.prepare('SELECT status FROM devices WHERE id = ?').get(id)?.status;
-const logCount = (id) => rdb.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id = ?').get(id).c;
+const statusOf = async (id) => (await db.prepare('SELECT status FROM devices WHERE id = ?').get(id))?.status;
+const logCount = async (id) => (await db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id = ?').get(id)).c;
 
 // Provision a brand-new device via a unique pairing code -> {id, token}.
 function provision() {
@@ -77,6 +82,11 @@ function provision() {
     sock.on('device:registered', (d) => { try { sock.close(); } catch { /* */ } resolve({ id: d.device_id, token: d.device_token }); });
     setTimeout(() => { try { sock.close(); } catch { /* */ } resolve(null); }, 4000);
   });
+}
+async function provisionTracked() {
+  const dev = await provision();
+  if (dev) created.deviceIds.push(dev.id);
+  return dev;
 }
 
 // One genuine reconnect on a fresh socket that CLOSES right after -> {registered, throttled, retryAfterMs}.
@@ -104,7 +114,7 @@ function reconnectHold(dev) {
 
 // (a) breaker engages on a flapper + backs it off ---------------------------------
 test('(a) a flapping device trips the reconnect breaker with a backoff', async () => {
-  const dev = await provision();
+  const dev = await provisionTracked();
   assert.ok(dev, 'provisioned');
   let throttled = 0, registered = 0, sawBackoff = false;
   for (let i = 0; i < 12; i++) {           // 12 genuine reconnects in the 5s window > ceiling 8
@@ -124,36 +134,36 @@ test('(a) a flapping device trips the reconnect breaker with a backoff', async (
 // live-but-silent socket offline within ~1.5s (stuck-offline flapping); post-fix the
 // live socket short-circuits the checker so it stays cleanly online.
 test('(b) a reconnected device clears offline and is NOT re-marked offline while live', async () => {
-  const dev = await provision();
+  const dev = await provisionTracked();
   assert.ok(dev);
 
   // Drive it offline: open then immediately close a socket, let the checker mark it.
   const s0 = await reconnectHold(dev);
   s0.close();
   let offline = false;
-  for (let i = 0; i < 12; i++) { await sleep(300); if (statusOf(dev.id) === 'offline') { offline = true; break; } }
+  for (let i = 0; i < 12; i++) { await sleep(300); if ((await statusOf(dev.id)) === 'offline') { offline = true; break; } }
   assert.ok(offline, 'device should be marked offline after its socket drops');
 
   // Reconnect and HOLD the socket open, sending no heartbeats.
   const s1 = await reconnectHold(dev);
-  assert.equal(statusOf(dev.id), 'online', 'reconnect clears offline immediately');
+  assert.equal(await statusOf(dev.id), 'online', 'reconnect clears offline immediately');
 
   // Stay live for >2x heartbeat timeout (1500ms). Must remain online the whole time.
   for (let i = 0; i < 8; i++) {
     await sleep(500);
-    assert.equal(statusOf(dev.id), 'online', `must stay online while the socket is live (tick ${i})`);
+    assert.equal(await statusOf(dev.id), 'online', `must stay online while the socket is live (tick ${i})`);
   }
   s1.close();
 });
 
 // (c) a normal reconnect is never throttled and is online immediately --------------
 test('(c) a single normal reconnect is not throttled and clears status at once', async () => {
-  const dev = await provision();
+  const dev = await provisionTracked();
   assert.ok(dev);
   // make it offline first so we can see the clear
   const s0 = await reconnectHold(dev); s0.close();
   let offline = false;
-  for (let i = 0; i < 12; i++) { await sleep(300); if (statusOf(dev.id) === 'offline') { offline = true; break; } }
+  for (let i = 0; i < 12; i++) { await sleep(300); if ((await statusOf(dev.id)) === 'offline') { offline = true; break; } }
   assert.ok(offline, 'device offline before the clean reconnect');
 
   const r = await reconnect(dev);
@@ -161,18 +171,18 @@ test('(c) a single normal reconnect is not throttled and clears status at once',
   assert.ok(!r.throttled, 'normal reconnect is NOT throttled');
   // status went online on reconnect (reconnect() closes its socket, but the UPDATE
   // to devices.status already happened during register).
-  assert.equal(statusOf(dev.id), 'online', 'a normal reconnect clears offline immediately');
+  assert.equal(await statusOf(dev.id), 'online', 'a normal reconnect clears offline immediately');
 });
 
 // (d) status-log writes are batched/coalesced -------------------------------------
 test('(d) a flap storm does NOT write one status-log row per transition', async () => {
-  const dev = await provision();
+  const dev = await provisionTracked();
   assert.ok(dev);
-  const before = logCount(dev.id);
+  const before = await logCount(dev.id);
   const FLAPS = 20;
   for (let i = 0; i < FLAPS; i++) { const s = await reconnectHold(dev); s.close(); }
   await sleep(1000);   // let the 300ms flusher settle
-  const written = logCount(dev.id) - before;
+  const written = (await logCount(dev.id)) - before;
   assert.ok(written < FLAPS, `batched: ${written} rows for ${FLAPS} flaps must be < ${FLAPS}`);
   assert.ok(written <= 6, `coalesced to net state: expected a handful of rows, got ${written}`);
 });
@@ -180,7 +190,7 @@ test('(d) a flap storm does NOT write one status-log row per transition', async 
 // (e) loop-lag stays bounded under churn ------------------------------------------
 test('(e) loop-lag stays bounded while the fleet churns', async () => {
   const fleet = [];
-  for (let i = 0; i < 10; i++) { const d = await provision(); if (d) fleet.push(d); }
+  for (let i = 0; i < 10; i++) { const d = await provisionTracked(); if (d) fleet.push(d); }
   assert.ok(fleet.length >= 8, 'fleet provisioned');
   // Two rounds of whole-fleet reconnects concurrently — a churn burst.
   for (let round = 0; round < 2; round++) await Promise.all(fleet.map(reconnect));

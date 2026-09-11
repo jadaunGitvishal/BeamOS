@@ -11,15 +11,30 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const Database = require('better-sqlite3');
+const { db } = require('../db/database');
 
 const PORT = 3982;
 const BASE = `http://127.0.0.1:${PORT}`;
 const DATA_DIR = path.join(os.tmpdir(), 'st-lag-int-' + crypto.randomBytes(4).toString('hex'));
 const LOG = path.join(os.tmpdir(), 'st-lag-int-' + crypto.randomBytes(4).toString('hex') + '.log');
 let proc;
+let startId; // event_loop_lag.id watermark, so the row-count assertion below counts
+             // only THIS test's own sampling - the real shared database already has
+             // a large pre-existing event_loop_lag history from genuine server
+             // activity (unlike the old flat-file-per-run architecture, where the
+             // table always started empty).
+let priorDebugSetting; // app_settings is a real, PERSISTENT, GLOBAL singleton (not a
+             // disposable row this file creates) - a prior test/admin session can
+             // leave status_debug_enabled=false, which would make this file's own
+             // "debug block present" assertion fail for a reason that has nothing
+             // to do with anything this file is testing. Snapshot + restore rather
+             // than assuming a default.
 
 before(async () => {
+  const existing = await db.prepare("SELECT value FROM app_settings WHERE `key` = 'status_debug_enabled'").get();
+  priorDebugSetting = existing ? existing.value : null; // null = "no row" (falls back to config default)
+  await db.prepare("INSERT INTO app_settings (`key`, value) VALUES ('status_debug_enabled', 'true') ON DUPLICATE KEY UPDATE value = 'true'").run();
+
   const logFd = fs.openSync(LOG, 'w');
   proc = spawn('node', ['server.js'], {
     cwd: path.join(__dirname, '..'),
@@ -38,9 +53,19 @@ before(async () => {
     await new Promise(r => setTimeout(r, 250));
   }
   if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  startId = (await db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM event_loop_lag').get()).id;
 });
 
-after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => {
+  try { proc.kill('SIGKILL'); } catch { /* */ }
+  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  // Restore the real, global status_debug_enabled setting to whatever it was
+  // before this test touched it (see `before()`) - not a disposable row this
+  // file owns, so "cleanup" here means putting it back, not deleting it.
+  if (priorDebugSetting === null) await db.prepare("DELETE FROM app_settings WHERE `key` = 'status_debug_enabled'").run();
+  else await db.prepare("UPDATE app_settings SET value = ? WHERE `key` = 'status_debug_enabled'").run(priorDebugSetting);
+  await db.close();
+});
 
 test('/api/status exposes a current loop_lag snapshot', async () => {
   const r = await fetch(BASE + '/api/status');
@@ -73,10 +98,9 @@ test('lag samples are persisted AND bounded by retention prune (not unbounded)',
   // retention pruned every 400ms the table must stay small — proving the table
   // can never become a second unbounded-growth table.
   await new Promise(r => setTimeout(r, 1800));
-  const dbPath = path.join(DATA_DIR, 'db', 'remote_display.db');
-  const db = new Database(dbPath, { readonly: true });
-  const count = db.prepare('SELECT COUNT(*) c FROM event_loop_lag').get().c;
-  db.close();
+  // Scoped to id > startId (see `before()`) - the real shared database's
+  // event_loop_lag table is never empty, unlike the old per-run flat-file DB.
+  const count = (await db.prepare('SELECT COUNT(*) c FROM event_loop_lag WHERE id > ?').get(startId)).c;
   assert.ok(count >= 1, 'lag samples are being persisted');
   assert.ok(count < 15, `table is bounded by the prune (held ${count} rows over ~3s of 200ms sampling)`);
 });
