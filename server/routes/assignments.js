@@ -24,9 +24,9 @@ async function markDraft(playlistId) {
 // Returns the zone_id to persist (the given one, or null if it isn't in the device's
 // active layout). deviceLayoutId may be null (device on fullscreen) -> any zone_id is
 // stale, so cleared.
-function validZoneForLayout(zoneId, deviceLayoutId, ctx) {
+async function validZoneForLayout(zoneId, deviceLayoutId, ctx) {
   if (!zoneId) return null;
-  if (zoneInLayout(zoneId, deviceLayoutId)) return zoneId;
+  if (await zoneInLayout(zoneId, deviceLayoutId)) return zoneId;
   console.warn(`[assign] cleared stale zone_id ${zoneId} (not in active layout ${deviceLayoutId || 'none'})${ctx ? ' ' + ctx : ''}`);
   return null;
 }
@@ -119,7 +119,7 @@ router.post('/device/:deviceId', asyncHandler(async (req, res) => {
 
   // Hardening: clear a zone_id that isn't in THIS device's active layout (prevents new orphans).
   const devLayout = await db.prepare('SELECT layout_id FROM devices WHERE id = ?').get(req.params.deviceId);
-  const effZone = validZoneForLayout(zone_id, devLayout?.layout_id, `on add to device ${req.params.deviceId}`);
+  const effZone = await validZoneForLayout(zone_id, devLayout?.layout_id, `on add to device ${req.params.deviceId}`);
 
   let order = sort_order;
   if (order === undefined || order === null) {
@@ -235,7 +235,7 @@ router.put('/:id', asyncHandler(async (req, res) => {
     let effZone = zone_id || null;
     if (effZone) {
       const devs = await db.prepare('SELECT layout_id FROM devices WHERE playlist_id = ? AND layout_id IS NOT NULL').all(item.playlist_id);
-      if (devs.length === 1) effZone = validZoneForLayout(effZone, devs[0].layout_id, `on update of item ${req.params.id}`);
+      if (devs.length === 1) effZone = await validZoneForLayout(effZone, devs[0].layout_id, `on update of item ${req.params.id}`);
     }
     updates.push('zone_id = ?'); values.push(effZone);
   }
