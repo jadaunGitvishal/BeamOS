@@ -191,6 +191,24 @@ export default function DeviceDetailView() {
           card
         />
         <StatTile
+          label="CPU usage"
+          value={d.cpu_usage !== null && d.cpu_usage !== undefined ? Number(d.cpu_usage).toFixed(1) + "%" : "—"}
+          card
+        />
+        {/* Ref 45 Stage A: labeled specifically as battery temperature, not "CPU
+            temperature" or a generic "internal temperature" - Android exposes no
+            generic SoC thermal sensor via public API, so battery temp (the one real
+            signal the player can read) is what this honestly is. */}
+        <StatTile
+          label="Battery temperature"
+          value={
+            d.battery_temperature_c !== null && d.battery_temperature_c !== undefined
+              ? Number(d.battery_temperature_c).toFixed(1) + "°C"
+              : "—"
+          }
+          card
+        />
+        <StatTile
           label="Wi-Fi signal"
           value={d.wifi_rssi !== null && d.wifi_rssi !== undefined ? d.wifi_rssi + " dBm" : "—"}
           sub={isWeakSignal(d) ? "weak" : d.wifi_ssid || null}

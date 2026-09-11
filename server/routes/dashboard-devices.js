@@ -65,7 +65,7 @@ router.get(
       ${STATUS_CATEGORY_SQL} AS status_category,
       t.battery_level, t.battery_charging, t.storage_free_mb, t.storage_total_mb,
       t.ram_free_mb, t.ram_total_mb, t.wifi_ssid, t.wifi_rssi, t.uptime_seconds,
-      t.cpu_usage, t.latitude, t.longitude, t.reported_at AS last_heartbeat,
+      t.cpu_usage, t.battery_temperature_c, t.latitude, t.longitude, t.reported_at AS last_heartbeat,
       s.filepath as screenshot_path, s.captured_at as screenshot_at
     FROM devices d
     LEFT JOIN (

@@ -30,6 +30,11 @@ class DeviceInfo(private val context: Context) {
             put("ram_free_mb", getRamFreeMB())
             put("ram_total_mb", getRamTotalMB())
             put("cpu_usage", getCpuUsage())
+            // Ref 45 Stage A: battery temperature, an honest proxy for "internal
+            // temperature" - Android exposes no generic SoC/internal thermal sensor via
+            // public API. Omitted (not a 0/null placeholder) when EXTRA_TEMPERATURE is
+            // absent, matching the lat/long pattern below.
+            getBatteryTemperatureC()?.let { put("battery_temperature_c", it) }
             put("wifi_ssid", getWifiSSID())
             put("wifi_rssi", getWifiRSSI())
             put("uptime_seconds", getUptimeSeconds())
@@ -237,6 +242,21 @@ class DeviceInfo(private val context: Context) {
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
         return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    /**
+     * Ref 45 Stage A: battery temperature in real Celsius, or null if the sticky
+     * ACTION_BATTERY_CHANGED broadcast doesn't carry EXTRA_TEMPERATURE (some
+     * emulators/hardware omit it). EXTRA_TEMPERATURE is reported in tenths of a
+     * degree Celsius (e.g. 253 == 25.3°C) - divide by 10 for a real value.
+     */
+    private fun getBatteryTemperatureC(): Double? {
+        val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        if (intent != null && intent.hasExtra(BatteryManager.EXTRA_TEMPERATURE)) {
+            val tenthsC = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+            if (tenthsC != Int.MIN_VALUE) return tenthsC / 10.0
+        }
+        return null
     }
 
     private fun getStorageFreeMB(): Long {

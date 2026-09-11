@@ -40,6 +40,11 @@ const REQUIRED_COLUMNS = [
   // write until repaired. Nullable, no default - absent lat/long is the norm.
   ['device_telemetry', 'latitude', "ALTER TABLE device_telemetry ADD COLUMN latitude DOUBLE NULL"],
   ['device_telemetry', 'longitude', "ALTER TABLE device_telemetry ADD COLUMN longitude DOUBLE NULL"],
+  // Ref 45 Stage A: battery temperature (honest proxy for "internal temperature").
+  // The heartbeat INSERT (ws/deviceSocket.js) always lists this column now, so an
+  // un-migrated DB would fail every telemetry write until repaired. Nullable, no
+  // default - EXTRA_TEMPERATURE is absent on some emulators/hardware.
+  ['device_telemetry', 'battery_temperature_c', "ALTER TABLE device_telemetry ADD COLUMN battery_temperature_c DOUBLE NULL"],
   // Ref 30: registration-code TTL. The claim + generate paths both read/write
   // expires_at, so an un-migrated DB (table created before this column existed)
   // needs the repair. Nullable - a pre-TTL row with NULL expires_at never expires.

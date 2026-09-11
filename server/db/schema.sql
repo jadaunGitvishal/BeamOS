@@ -284,6 +284,12 @@ CREATE TABLE IF NOT EXISTS device_telemetry (
     device_id       VARCHAR(64) NOT NULL,
     battery_level   INT,
     battery_charging TINYINT(1) NOT NULL DEFAULT 0,
+    -- Ref 45 Stage A: battery temperature, captured as an honest proxy for
+    -- "internal temperature" - Android exposes no generic SoC/internal thermal
+    -- sensor via public API; battery temp (EXTRA_TEMPERATURE) is the closest
+    -- real, always-attempted signal. Nullable - absent on emulators/hardware
+    -- that don't report it.
+    battery_temperature_c DOUBLE,
     storage_free_mb INT,
     storage_total_mb INT,
     ram_free_mb     INT,

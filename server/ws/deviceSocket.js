@@ -702,8 +702,8 @@ module.exports = function setupDeviceSocket(io) {
         const coords = sanitizeCoords(telemetry.latitude, telemetry.longitude);
         await db.prepare(`
           INSERT INTO device_telemetry (device_id, battery_level, battery_charging, storage_free_mb, storage_total_mb,
-            ram_free_mb, ram_total_mb, cpu_usage, wifi_ssid, wifi_rssi, uptime_seconds, latitude, longitude)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ram_free_mb, ram_total_mb, cpu_usage, battery_temperature_c, wifi_ssid, wifi_rssi, uptime_seconds, latitude, longitude)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           device_id,
           telemetry.battery_level ?? null,
@@ -713,6 +713,8 @@ module.exports = function setupDeviceSocket(io) {
           telemetry.ram_free_mb ?? null,
           telemetry.ram_total_mb ?? null,
           telemetry.cpu_usage ?? null,
+          // Ref 45 Stage A: omitted by the player when unavailable (never a false 0).
+          telemetry.battery_temperature_c ?? null,
           telemetry.wifi_ssid ?? null,
           telemetry.wifi_rssi ?? null,
           telemetry.uptime_seconds ?? null,
