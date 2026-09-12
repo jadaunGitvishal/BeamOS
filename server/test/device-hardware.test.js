@@ -48,6 +48,14 @@ test('strings are trimmed; empty -> null; over-width -> truncated', () => {
   assert.equal(n.model.length, 120, 'capped to the column width');
 });
 
+test('is_device_owner: real booleans -> 1/0, anything else -> null (never coerced to false)', () => {
+  assert.equal(normalizeHardware({ is_device_owner: true }).is_device_owner, 1);
+  assert.equal(normalizeHardware({ is_device_owner: false }).is_device_owner, 0);
+  assert.equal(normalizeHardware({}).is_device_owner, null, 'absent (old APK) -> null, not false');
+  assert.equal(normalizeHardware({ is_device_owner: 'true' }).is_device_owner, null, 'string is not a real boolean');
+  assert.equal(normalizeHardware({ is_device_owner: 1 }).is_device_owner, null, 'number is not a real boolean');
+});
+
 test('display_size_inches: sane number kept & rounded, impossible values -> null', () => {
   assert.equal(normalizeHardware({ display_size_inches: 54.63 }).display_size_inches, 54.6);
   assert.equal(normalizeHardware({ display_size_inches: '43' }).display_size_inches, 43);

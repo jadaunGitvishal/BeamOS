@@ -22,6 +22,7 @@ const REQUIRED_TABLES = [
   'field_visits',       // Ref 43 Stage A: field-visit inspections
   'field_visit_photos', // Ref 43 Stage A: geotagged inspection photos
   'activity_log_chain', // Ref 17: single-row anchor for the audit-log hash chain
+  'device_network_usage', // Ref 44: daily SIM/network data-usage aggregates
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
@@ -87,6 +88,11 @@ const REQUIRED_COLUMNS = [
   ['devices', 'sim_provider', "ALTER TABLE devices ADD COLUMN sim_provider VARCHAR(100) NULL"],
   ['devices', 'sim_network_status', "ALTER TABLE devices ADD COLUMN sim_network_status VARCHAR(50) NULL"],
   ['devices', 'hardware_captured_at', "ALTER TABLE devices ADD COLUMN hardware_captured_at BIGINT NULL"],
+  // Ref 44: whether the app currently holds Device Owner, re-sent alongside the
+  // rest of the hardware block. device:register writes it now, so an un-migrated
+  // DB would fail every register until repaired. Nullable - NULL means "not
+  // reported" (old APK), distinct from the real false.
+  ['devices', 'is_device_owner', "ALTER TABLE devices ADD COLUMN is_device_owner TINYINT(1) NULL"],
 ];
 
 function defaultOnMissing(missing) {

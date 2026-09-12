@@ -733,6 +733,24 @@ class WebSocketService : Service() {
         } catch (e: Throwable) { Log.w("WebSocketService", "sendDeviceEvent($eventType): ${e.message}") }
     }
 
+    // Ref 44: daily SIM/network data-usage report (device:network-usage ->
+    // device_network_usage). Called by NetworkUsageReporter ONLY when it has a
+    // genuine reading (Device Owner + querySummary() succeeded) - fire-and-forget
+    // and fully guarded like every other emitter here, so a not-connected socket
+    // never disturbs the daily check itself (it'll just retry next cycle).
+    fun sendNetworkUsage(report: JSONObject) {
+        if (socket?.connected() != true) return
+        try {
+            socket?.emit("device:network-usage", JSONObject().apply {
+                put("device_id", config.deviceId)
+                put("date", report.optString("date"))
+                put("bytes_received", report.optLong("bytes_received"))
+                put("bytes_sent", report.optLong("bytes_sent"))
+                put("sim_provider", report.optString("sim_provider"))
+            })
+        } catch (e: Throwable) { Log.w("WebSocketService", "sendNetworkUsage: ${e.message}") }
+    }
+
     // Proof-of-play (offline-resilient). MainActivity writes every play_start/play_end to
     // PlayEventQueue BEFORE calling this — this only ever tries to drain what's already
     // durably queued, and never deletes a row itself except via the ack in sendOne(). Only the

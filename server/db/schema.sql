@@ -252,6 +252,13 @@ CREATE TABLE IF NOT EXISTS devices (
     sim_iccid           VARCHAR(64),
     sim_provider        VARCHAR(100),
     sim_network_status  VARCHAR(50),
+    -- Ref 44: whether the app currently holds Device Owner, reported alongside
+    -- the rest of the hardware block (same honest-capability channel, not
+    -- one-time - re-sent on every device:register so a status change, however
+    -- rare, is reflected). The single source of truth the dashboard uses to
+    -- tell "no network-usage data because not Device Owner" apart from "no
+    -- network-usage data yet" for an otherwise-eligible device.
+    is_device_owner     TINYINT(1),
     hardware_captured_at BIGINT,
     playlist_id     VARCHAR(64),
     layout_id       VARCHAR(64),
@@ -1025,6 +1032,31 @@ CREATE TABLE IF NOT EXISTS device_usage_daily (
     PRIMARY KEY (device_id, day)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_usage_daily_day ON device_usage_daily(day);
+
+-- Ref 44: SIM/network data consumption, daily aggregates (not raw per-request
+-- data). Reported once a day by NetworkUsageReporter.kt, ONLY when the app is
+-- Device Owner AND NetworkStatsManager.querySummary() genuinely returned data
+-- (see that file for why: NetworkStatsManager exempts Device Owner apps from
+-- needing PACKAGE_USAGE_STATS at all for querySummary(), so there is no grant
+-- step - if the app isn't Device Owner, it reports nothing here, ever; the
+-- honest "why is there no data" answer lives on devices.is_device_owner, not
+-- as a placeholder row in this table). PRIMARY KEY (device_id, date) mirrors
+-- device_usage_daily above - a same-day re-report (app restart, reconnect)
+-- upserts in place rather than duplicating.
+CREATE TABLE IF NOT EXISTS device_network_usage (
+    device_id       VARCHAR(64) NOT NULL,
+    date            VARCHAR(10) NOT NULL,
+    bytes_received  BIGINT NOT NULL DEFAULT 0,
+    bytes_sent      BIGINT NOT NULL DEFAULT 0,
+    -- Which SIM/radio this total is for (carrier name, "no SIM hardware", "no
+    -- SIM", ...) - same sim_provider vocabulary DeviceInfo.kt already reports
+    -- in the one-time hardware block (devices.sim_provider), reused verbatim.
+    sim_provider    VARCHAR(100),
+    reported_at     BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (device_id, date),
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_network_usage_date ON device_network_usage(date);
 
 -- ===================== OUTAGE HISTORY (Ref 51, SLA Dashboard) =====================
 -- Durable record of COMPLETED device outages (offline -> back online), one row per

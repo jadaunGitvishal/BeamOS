@@ -33,6 +33,7 @@ import com.remotedisplay.player.player.WallController
 import com.remotedisplay.player.player.ZoneManager
 import com.remotedisplay.player.remote.ScreenshotCapture
 import com.remotedisplay.player.remote.TouchInjector
+import com.remotedisplay.player.service.NetworkUsageReporter
 import com.remotedisplay.player.service.UpdateChecker
 import com.remotedisplay.player.service.WebSocketService
 import org.json.JSONObject
@@ -51,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mediaPlayer: MediaPlayerManager
     private lateinit var playlistController: PlaylistController
     private lateinit var updateChecker: UpdateChecker
+    private lateinit var networkUsageReporter: NetworkUsageReporter
     private var zoneManager: ZoneManager? = null
     private lateinit var wallController: WallController
     private lateinit var pipOverlay: PipOverlay // #109: PiP overlay layer
@@ -295,6 +297,12 @@ class MainActivity : AppCompatActivity() {
         // for the device audit trail. Same lazy wsService read; sendDeviceEvent no-ops offline.
         updateChecker.eventReporter = { eventType, message -> wsService?.sendDeviceEvent(eventType, message) }
         updateChecker.startPeriodicCheck()
+
+        // Ref 44: daily SIM/network data-usage check. Same lazy wsService-read wiring
+        // as updateChecker above; sendNetworkUsage no-ops offline (retries next cycle).
+        networkUsageReporter = NetworkUsageReporter(this)
+        networkUsageReporter.usageReporter = { report -> wsService?.sendNetworkUsage(report) }
+        networkUsageReporter.startPeriodicCheck()
 
     }
 

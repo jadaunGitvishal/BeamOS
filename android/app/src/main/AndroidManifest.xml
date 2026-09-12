@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -21,6 +22,16 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Ref 44: declares intent to use NetworkStatsManager (required by convention,
+         per its own AOSP doc: "declaring the permission implies intention to use the
+         API"). Normally needs a user grant via Settings > Usage access, which we never
+         request - Device Owner apps are exempted from that requirement entirely for
+         querySummary() (confirmed against NetworkStatsManager's own class docs before
+         implementing; see NetworkUsageReporter.kt). On a non-Device-Owner build this
+         permission simply stays ungranted and NetworkUsageReporter never attempts the
+         call at all. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:name=".RemoteDisplayApp"

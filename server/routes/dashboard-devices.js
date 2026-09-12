@@ -365,4 +365,35 @@ router.get(
   }),
 );
 
+// GET /api/dashboard/devices/:id/network-usage-history?days=30
+// Ref 44 — daily SIM/network data-usage trend for Device Detail, same shape
+// and same RBAC gate as :id/telemetry-history above (daily rows instead of
+// per-heartbeat readings, so `days` instead of `hours`; capped at 90 days).
+// device_network_usage only ever has rows the device itself reported (see
+// ws/deviceSocket.js device:network-usage) - a device that is not Device
+// Owner has none, ever, which the dashboard tells apart from "no data yet"
+// via the separate devices.is_device_owner column, not anything read here.
+router.get(
+  "/:id/network-usage-history",
+  asyncHandler(async (req, res) => {
+    if (!(await resolveDeviceForRead(req, res))) return;
+
+    const daysReq = parseInt(req.query.days, 10);
+    const days = Number.isFinite(daysReq) && daysReq > 0 ? Math.min(daysReq, 90) : 30;
+    const sinceDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+    const rows = await db
+      .prepare(
+        `
+      SELECT date, bytes_received, bytes_sent, sim_provider
+      FROM device_network_usage
+      WHERE device_id = ? AND date >= ?
+      ORDER BY date ASC
+    `,
+      )
+      .all(req.params.id, sinceDate);
+    res.json(rows);
+  }),
+);
+
 module.exports = router;

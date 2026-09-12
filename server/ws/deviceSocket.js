@@ -700,28 +700,46 @@ module.exports = function setupDeviceSocket(io) {
         // for a missing/out-of-range/(0,0) fix, so lat/long land as NULL and the rest
         // of the row is unaffected.
         const coords = sanitizeCoords(telemetry.latitude, telemetry.longitude);
-        await db.prepare(`
-          INSERT INTO device_telemetry (device_id, battery_level, battery_charging, storage_free_mb, storage_total_mb,
-            ram_free_mb, ram_total_mb, cpu_usage, battery_temperature_c, wifi_ssid, wifi_rssi, uptime_seconds, latitude, longitude)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          device_id,
-          telemetry.battery_level ?? null,
-          telemetry.battery_charging ? 1 : 0,
-          telemetry.storage_free_mb ?? null,
-          telemetry.storage_total_mb ?? null,
-          telemetry.ram_free_mb ?? null,
-          telemetry.ram_total_mb ?? null,
-          telemetry.cpu_usage ?? null,
-          // Ref 45 Stage A: omitted by the player when unavailable (never a false 0).
-          telemetry.battery_temperature_c ?? null,
-          telemetry.wifi_ssid ?? null,
-          telemetry.wifi_rssi ?? null,
-          telemetry.uptime_seconds ?? null,
-          coords ? coords.latitude : null,
-          coords ? coords.longitude : null
+        // Hardening (found during Ref 44 live testing): two overlapping heartbeats for
+        // the SAME device_id — an old socket's still-in-flight heartbeat handler
+        // racing a just-reconnected new socket's first one, since evictPriorSocket()
+        // closes the OLD SOCKET but can't cancel an already-dispatched handler — can
+        // deadlock InnoDB here: the INSERT and the prune DELETE's range scan both take
+        // gap locks on the shared idx_telemetry_device(device_id, reported_at) index.
+        // Real under normal operation (a natural reconnect mid-heartbeat), not just
+        // artificial rapid reconnect cycling — rare per-event, but a real fleet
+        // reconnecting continuously will hit it again over time. Both statements run
+        // in ONE transaction (so a deadlock rolls back the insert too, making a retry
+        // of the whole thing safe/idempotent — retrying just the DELETE after the
+        // INSERT already auto-committed would double-insert this sample) and the whole
+        // transaction retries on ER_LOCK_DEADLOCK — the standard MySQL-recommended
+        // response to this exact class of deadlock.
+        await db.retryOnDeadlock(() =>
+          db.transaction(async (tx) => {
+            await tx.prepare(`
+              INSERT INTO device_telemetry (device_id, battery_level, battery_charging, storage_free_mb, storage_total_mb,
+                ram_free_mb, ram_total_mb, cpu_usage, battery_temperature_c, wifi_ssid, wifi_rssi, uptime_seconds, latitude, longitude)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              device_id,
+              telemetry.battery_level ?? null,
+              telemetry.battery_charging ? 1 : 0,
+              telemetry.storage_free_mb ?? null,
+              telemetry.storage_total_mb ?? null,
+              telemetry.ram_free_mb ?? null,
+              telemetry.ram_total_mb ?? null,
+              telemetry.cpu_usage ?? null,
+              // Ref 45 Stage A: omitted by the player when unavailable (never a false 0).
+              telemetry.battery_temperature_c ?? null,
+              telemetry.wifi_ssid ?? null,
+              telemetry.wifi_rssi ?? null,
+              telemetry.uptime_seconds ?? null,
+              coords ? coords.latitude : null,
+              coords ? coords.longitude : null
+            );
+            await pruneTelemetry(device_id, tx);
+          })(),
         );
-        await pruneTelemetry(device_id);
 
         // #74/#75: capture the player's reported clock (OS IANA zone + its UTC time)
         // for effective-timezone resolution and the dashboard clock-skew indicator.
@@ -738,6 +756,30 @@ module.exports = function setupDeviceSocket(io) {
           telemetry: { ...telemetry, latitude: coords ? coords.latitude : null, longitude: coords ? coords.longitude : null }
         });
       }
+    });
+
+    // Ref 44: daily SIM/network data-usage aggregate, sent once a day by
+    // NetworkUsageReporter.kt - ONLY when the app is Device Owner and
+    // NetworkStatsManager.querySummary() genuinely returned data (see that
+    // file: Device Owner apps are exempted from needing PACKAGE_USAGE_STATS
+    // for querySummary(), so there is no permission-grant step and nothing
+    // is ever sent on a non-Device-Owner build). One row per device per day -
+    // upsert so a same-day re-report (app restart, reconnect) replaces
+    // rather than duplicates, matching PRIMARY KEY (device_id, date).
+    socket.on('device:network-usage', async (data) => {
+      if (!requireDeviceAuth()) return;
+      const { device_id, date, bytes_received, bytes_sent, sim_provider } = data;
+      if (!device_id || device_id !== currentDeviceId) return;
+      if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+      const rx = Number.isFinite(bytes_received) ? Math.max(0, Math.trunc(bytes_received)) : 0;
+      const tx = Number.isFinite(bytes_sent) ? Math.max(0, Math.trunc(bytes_sent)) : 0;
+      const provider = typeof sim_provider === 'string' && sim_provider.trim() ? sim_provider.trim().slice(0, 100) : null;
+      await db.prepare(`
+        INSERT INTO device_network_usage (device_id, date, bytes_received, bytes_sent, sim_provider, reported_at)
+        VALUES (?, ?, ?, ?, ?, UNIX_TIMESTAMP())
+        ON DUPLICATE KEY UPDATE bytes_received = VALUES(bytes_received), bytes_sent = VALUES(bytes_sent),
+          sim_provider = VALUES(sim_provider), reported_at = VALUES(reported_at)
+      `).run(device_id, date, rx, tx, provider);
     });
 
     // Screenshot received from device - relay via WebSocket, keep latest in memory

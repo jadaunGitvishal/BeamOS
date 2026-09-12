@@ -13,8 +13,8 @@
 // arrived. A NULL column means an older APK that predates this feature and never
 // sent a `hardware` block at all.
 
-// The 8 hardware columns + the capture timestamp, in a stable order the INSERT
-// path can splice into its column list.
+// The hardware/capability columns + the capture timestamp, in a stable order
+// the INSERT path can splice into its column list.
 const HARDWARE_COLUMNS = [
   'manufacturer',
   'model',
@@ -24,6 +24,11 @@ const HARDWARE_COLUMNS = [
   'sim_iccid',
   'sim_provider',
   'sim_network_status',
+  // Ref 44: not hardware identity, but rides the same honest-capability
+  // channel (re-sent every device:register, same as the fields above) - the
+  // one place the dashboard can tell "not Device Owner" apart from "Device
+  // Owner but no network-usage data yet" for Ref 44's daily usage chart.
+  'is_device_owner',
 ];
 
 // Coerce one incoming value: trim strings, cap to the column width, keep null.
@@ -44,8 +49,17 @@ function cleanInches(value) {
   return Math.round(n * 10) / 10;
 }
 
-// Normalize a `hardware` payload object -> { column: value } for all 8 columns.
-// Returns null when there is nothing usable (no payload / not an object).
+// is_device_owner is the only boolean field. Anything but a real boolean
+// (missing, wrong type) -> null ("not reported"), never coerced to false -
+// an old APK that predates this field must never read as "confirmed not
+// Device Owner".
+function cleanBool(value) {
+  return typeof value === 'boolean' ? (value ? 1 : 0) : null;
+}
+
+// Normalize a `hardware` payload object -> { column: value } for every column
+// in HARDWARE_COLUMNS. Returns null when there is nothing usable (no payload /
+// not an object).
 function normalizeHardware(hw) {
   if (!hw || typeof hw !== 'object') return null;
   return {
@@ -57,6 +71,7 @@ function normalizeHardware(hw) {
     sim_iccid: clean(hw.sim_iccid, 64),
     sim_provider: clean(hw.sim_provider, 100),
     sim_network_status: clean(hw.sim_network_status, 50),
+    is_device_owner: cleanBool(hw.is_device_owner),
   };
 }
 

@@ -119,12 +119,7 @@ class DeviceInfo(private val context: Context) {
                 val state = try { tm?.simState } catch (_: Throwable) { null }
                     ?: android.telephony.TelephonyManager.SIM_STATE_UNKNOWN
                 put("sim_network_status", simStateName(state))
-                val operator = try { tm?.simOperatorName?.trim().orEmpty() } catch (_: Throwable) { "" }
-                put("sim_provider", when {
-                    state == android.telephony.TelephonyManager.SIM_STATE_ABSENT -> "no SIM"
-                    operator.isNotEmpty() -> operator
-                    else -> "unavailable"
-                })
+                put("sim_provider", simProviderFor(tm, state))
                 put("sim_iccid", when {
                     state == android.telephony.TelephonyManager.SIM_STATE_ABSENT -> "no SIM"
                     deviceOwner -> readSimIccid(tm) ?: privMarker
@@ -136,7 +131,40 @@ class DeviceInfo(private val context: Context) {
             // privileged path only when we actually hold Device Owner; otherwise say so.
             put("mac_address", readMacAddress(deviceOwner) ?: privMarker)
             put("serial_number", readSerialNumber(deviceOwner) ?: privMarker)
+            // Ref 44: re-sent every call (not one-time) so a status change, however rare,
+            // is reflected - the dashboard's single source of truth for telling "not
+            // Device Owner" apart from "Device Owner but no network-usage data yet".
+            put("is_device_owner", deviceOwner)
         }
+    }
+
+    // Extracted from getHardwareInfo()'s sim_provider branch so Ref 44's
+    // NetworkUsageReporter can label a day's usage total with the same
+    // provider name / honest marker ("no SIM", "unavailable") without
+    // duplicating this logic.
+    private fun simProviderFor(tm: android.telephony.TelephonyManager?, state: Int): String {
+        val operator = try { tm?.simOperatorName?.trim().orEmpty() } catch (_: Throwable) { "" }
+        return when {
+            state == android.telephony.TelephonyManager.SIM_STATE_ABSENT -> "no SIM"
+            operator.isNotEmpty() -> operator
+            else -> "unavailable"
+        }
+    }
+
+    /**
+     * Ref 44: the SIM/carrier name to label a day's network-usage total with -
+     * same vocabulary as getHardwareInfo()'s sim_provider ("no SIM hardware" /
+     * "no SIM" / a real carrier name / "unavailable"). Needs no permission on
+     * any API level, unlike the reads gated in getHardwareInfo().
+     */
+    fun getSimProviderName(): String {
+        val hasTelephony = context.packageManager
+            .hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEPHONY)
+        if (!hasTelephony) return "no SIM hardware"
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+        val state = try { tm?.simState } catch (_: Throwable) { null }
+            ?: android.telephony.TelephonyManager.SIM_STATE_UNKNOWN
+        return simProviderFor(tm, state)
     }
 
     private fun simStateName(state: Int): String = when (state) {
