@@ -70,6 +70,18 @@ function HardwareCard({ d }) {
         {hwCell(d.mac_address)}
         <dt>Serial number</dt>
         {hwCell(d.serial_number)}
+        {/* PMI's requirement names "Dongle serial" - this platform treats the
+            Android box as the one and only display device, and many signage
+            setups colloquially call that box a "streaming dongle", so this
+            surfaces the SAME serial_number under that label rather than
+            inventing a speculative second hardware-tracking system (no new
+            column, no new capture path). Deliberately shares hwCell's exact
+            "unavailable"/"Not captured yet" behavior with Serial number above
+            - it's the same underlying value, so it must never diverge. If PMI's
+            real deployment turns out to have a genuinely separate physical
+            dongle, this can be revisited once that's confirmed. */}
+        <dt>Dongle serial</dt>
+        {hwCell(d.serial_number)}
         <dt>SIM status</dt>
         {hwCell(d.sim_network_status)}
         <dt>SIM provider</dt>
