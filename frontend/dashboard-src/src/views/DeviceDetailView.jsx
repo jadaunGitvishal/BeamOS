@@ -4,7 +4,7 @@ import { useApi } from "../hooks/useApi";
 import { usePeriod } from "../hooks/usePeriod";
 import { useBreadcrumb } from "../hooks/useBreadcrumb";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
-import { n0, periodWindow, periodLabel, isoDateOnly, fmtCoords, osmUrl, timeAgo } from "../lib/format";
+import { n0, periodWindow, periodLabel, isoDateOnly, fmtCoords, fmtDate, osmUrl, timeAgo } from "../lib/format";
 import { isWeakSignal } from "../lib/risk";
 import { buildStatusStrip } from "../lib/transmissionStrip";
 import StatTile from "../components/StatTile";
@@ -76,6 +76,8 @@ function HardwareCard({ d }) {
         {hwCell(d.sim_provider)}
         <dt>SIM ICCID</dt>
         {hwCell(d.sim_iccid)}
+        <dt>Installed</dt>
+        {d.installed_at ? <dd>{fmtDate(d.installed_at)}</dd> : <dd className="hw-na">—</dd>}
       </dl>
     </div>
   );

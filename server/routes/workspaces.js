@@ -1274,6 +1274,10 @@ const FV_REMARKS_MAX = 10000;
 const FV_PHOTO_CATEGORY_MAX = 100;
 const FV_CLIENT_UUID_MAX = 64;
 const FV_STATUSES = ["in_progress", "completed"];
+// Ref 43: installation-date field, technician-set on the COMPLETION form.
+// 'YYYY-MM-DD' only - matches devices.installed_at's storage format exactly,
+// so the value here can be written straight through with no conversion.
+const FV_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // A GPS "accuracy" beyond this (metres) isn't a fix, it's a placeholder/garbage.
 const FV_GPS_ACCURACY_MAX_M = 100000;
 const FV_LIST_CAP = 500;
@@ -1424,6 +1428,21 @@ function fvTrimOrNull(v, max) {
   const s = String(v).trim();
   if (!s) return null;
   return s.length > max ? s.slice(0, max) : s;
+}
+
+// 'YYYY-MM-DD' -> the same string if it's a real calendar date not in the
+// future, else null (caller turns null into a 400 - installed_at is either a
+// genuine confirmed date or rejected outright, never silently clamped/dropped
+// the way a free-text field would be).
+function fvInstallDateOrNull(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const s = String(v).trim();
+  if (!FV_DATE_RE.test(s)) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  if (s > today) return null;
+  return s;
 }
 
 // POST /:id/field-visits - start a visit. Body: { device_id, visit_type,
@@ -1613,7 +1632,39 @@ router.patch(
       }
     }
 
+    // Ref 43: installed_at lives on devices, NOT field_visits (like the other 5
+    // hardware fields on the Hardware card - it stays visible on the device
+    // regardless of visit history, rather than being scoped to one visit's
+    // record). So this writes straight to the devices row instead of joining
+    // the field_visits `updates`/`values` above, and isn't gated by the
+    // `updates.length === 0` early-return below (an installed_at-only PATCH
+    // must still take effect even though it changes nothing on field_visits).
+    if ("installed_at" in req.body) {
+      const raw = req.body.installed_at;
+      if (raw === null || raw === undefined || raw === "") {
+        await db.prepare("UPDATE devices SET installed_at = NULL WHERE id = ?").run(visit.device_id);
+        changed.push("device.installed_at: cleared");
+      } else {
+        const installedAt = fvInstallDateOrNull(raw);
+        if (!installedAt) {
+          return res.status(400).json({ error: "installed_at must be a real calendar date (YYYY-MM-DD), not in the future" });
+        }
+        await db.prepare("UPDATE devices SET installed_at = ? WHERE id = ?").run(installedAt, visit.device_id);
+        changed.push(`device.installed_at: ${installedAt}`);
+      }
+    }
+
     if (updates.length === 0) {
+      if (changed.length > 0) {
+        logActivity(
+          req.user.id,
+          "field_visit_updated",
+          `workspace: ${ws.name} (${ws.id}), visit: ${visit.id}, ${changed.join(", ")}`,
+          visit.device_id,
+          getClientIp(req),
+          ws.id,
+        );
+      }
       const row = await db.prepare(`${FV_SELECT} WHERE fv.id = ?`).get(visit.id);
       return res.json(fieldVisitRow(row));
     }

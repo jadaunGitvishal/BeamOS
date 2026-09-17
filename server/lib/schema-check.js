@@ -93,6 +93,11 @@ const REQUIRED_COLUMNS = [
   // DB would fail every register until repaired. Nullable - NULL means "not
   // reported" (old APK), distinct from the real false.
   ['devices', 'is_device_owner', "ALTER TABLE devices ADD COLUMN is_device_owner TINYINT(1) NULL"],
+  // Ref 43: technician-set date of physical installation ('YYYY-MM-DD'). The
+  // field-visit PATCH route writes this now, so an un-migrated DB would fail
+  // every visit-completion update that includes it until repaired. Nullable -
+  // NULL = not yet recorded by a technician.
+  ['devices', 'installed_at', "ALTER TABLE devices ADD COLUMN installed_at VARCHAR(10) NULL"],
 ];
 
 function defaultOnMissing(missing) {

@@ -260,6 +260,14 @@ CREATE TABLE IF NOT EXISTS devices (
     -- network-usage data yet" for an otherwise-eligible device.
     is_device_owner     TINYINT(1),
     hardware_captured_at BIGINT,
+    -- Ref 43: date of physical installation, technician-set/confirmed during a
+    -- field visit (POST .../field-visits/:visitId/... completion). 'YYYY-MM-DD',
+    -- same date-only convention as device_network_usage.date - not a BIGINT
+    -- timestamp, since there's no meaningful time-of-day and storing/parsing a
+    -- bare date avoids the timezone-drift class of bug a UTC-midnight epoch would
+    -- invite. Distinct from created_at (first-paired time), which only
+    -- approximates it. NULL = not yet recorded by a technician.
+    installed_at        VARCHAR(10),
     playlist_id     VARCHAR(64),
     layout_id       VARCHAR(64),
     timezone        VARCHAR(100) DEFAULT 'UTC',

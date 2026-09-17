@@ -51,11 +51,16 @@ export default function CompletionForm({ workspaceId, visitId, deviceName, devic
   // can overwrite any of them (a swapped-but-not-yet-re-paired device has stale
   // cached info; a serial number is often only readable off a sticker in person).
   const [prefill] = useState(() => hardwarePrefill(device));
+  // Ref 43: installed_at isn't one of hardwarePrefill()'s marker-stripped
+  // fields - devices.installed_at is either a real 'YYYY-MM-DD' or absent,
+  // never one of Android's "unavailable"/"no SIM"-style honest markers, so
+  // there's nothing to strip. Read it straight off the device row.
   const [fields, setFields] = useState(() => ({
     serial_number: prefill.serial_number,
     mac_address: prefill.mac_address,
     device_model: prefill.device_model,
     sim_network_info: prefill.sim_network_info,
+    installed_at: (device && device.installed_at) || "",
     remarks: "",
   }));
   const [deviceStatus, setDeviceStatus] = useState("");
@@ -143,6 +148,10 @@ export default function CompletionForm({ workspaceId, visitId, deviceName, devic
       const v = fields[k].trim();
       if (v) out[k] = v;
     }
+    // Ref 43: installed_at isn't in TEXT_FIELDS - it updates devices.installed_at
+    // server-side, not a field_visits column, so it's sent alongside rather than
+    // looped with the free-text fields above.
+    if (fields.installed_at) out.installed_at = fields.installed_at;
     const remarks = fields.remarks.trim();
     if (remarks) out.remarks = remarks;
     return out;
@@ -248,6 +257,24 @@ export default function CompletionForm({ workspaceId, visitId, deviceName, devic
           />
         </div>
       ))}
+
+      {/* Ref 43: separate from TEXT_FIELDS above - a date input, not free text,
+          and it updates devices.installed_at directly rather than a field_visits
+          column (see payload()). Same visual pattern as the other 4 fields. */}
+      <div className="form-field">
+        <label className="field-label" htmlFor="f-installed_at">
+          Installation date
+          {device && device.installed_at && <span className="muted-inline"> · from device records, edit if changed</span>}
+        </label>
+        <input
+          id="f-installed_at"
+          className="input"
+          type="date"
+          max={new Date().toISOString().slice(0, 10)}
+          value={fields.installed_at}
+          onChange={setField("installed_at")}
+        />
+      </div>
 
       <div className="form-field">
         <p className="field-label">Device status</p>
