@@ -647,17 +647,38 @@ class MainActivity : AppCompatActivity() {
         wsService?.onCommand = { type, payload ->
             Log.i("MainActivity", "Command received: $type")
             when (type) {
-                "reboot", "shutdown", "power_menu" -> {
-                    val svc = com.remotedisplay.player.service.PowerAccessibilityService.instance
-                    if (svc != null) {
-                        svc.showPowerDialog()
-                        Log.i("MainActivity", "Power dialog shown via accessibility")
-                    } else {
-                        Log.w("MainActivity", "Accessibility service not enabled - trying fallback")
-                        thread {
-                            try { Runtime.getRuntime().exec(arrayOf("input", "keyevent", "--longpress", "26")).waitFor() } catch (_: Exception) {}
+                // Ref 50 Stage A: "reboot" now does an actual unattended restart when we hold
+                // Device Owner, via DevicePolicyManager.reboot(admin) (API 24+, Device-Owner-only,
+                // no confirmation UI) - same isDeviceOwner()/ComponentName pattern KioskLockdown
+                // already uses for its DPM calls. dpm.reboot() throws if there's an active phone
+                // call in progress (relevant here since Ref 44 gives this device a telephony/SIM
+                // stack) - caught and logged explicitly, then falls back to the power dialog
+                // rather than silently doing nothing.
+                //
+                // "shutdown" deliberately stays on the power-dialog fallback permanently:
+                // DevicePolicyManager has no public Device-Owner shutdown API at all (Android
+                // doesn't expose one, by design - a powered-off device can't be remotely
+                // recovered/re-woken the way a rebooted one can), so there is no unattended path
+                // to build here. Same for "power_menu", which is explicitly the human-in-the-loop
+                // option. Non-Device-Owner devices also always fall through to this path.
+                "reboot" -> {
+                    if (com.remotedisplay.player.service.DeviceAdminReceiver.isDeviceOwner(this@MainActivity)) {
+                        try {
+                            val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                            val admin = ComponentName(this@MainActivity, com.remotedisplay.player.service.DeviceAdminReceiver::class.java)
+                            dpm.reboot(admin)
+                            Log.i("MainActivity", "dpm.reboot() invoked - unattended restart in progress")
+                        } catch (e: Throwable) {
+                            Log.e("MainActivity", "dpm.reboot() failed (${e.message}) - falling back to power dialog")
+                            showPowerDialogOrKeyeventFallback()
                         }
+                    } else {
+                        Log.w("MainActivity", "reboot requested but Device Owner not held - falling back to power dialog")
+                        showPowerDialogOrKeyeventFallback()
                     }
+                }
+                "shutdown", "power_menu" -> {
+                    showPowerDialogOrKeyeventFallback()
                 }
                 "screen_off" -> {
                     thread {
@@ -839,6 +860,23 @@ class MainActivity : AppCompatActivity() {
 
         // Report playback state
         wsService?.sendPlaybackState(item.contentId, 0f)
+    }
+
+    /** The human-in-the-loop path shared by "shutdown"/"power_menu" always, and by "reboot"
+     *  whenever Device Owner isn't held or dpm.reboot() itself fails: shows the stock Android
+     *  power dialog (via the accessibility service), or as a last resort simulates a physical
+     *  long-press of the power key. Either way a human still has to tap the dialog. */
+    private fun showPowerDialogOrKeyeventFallback() {
+        val svc = com.remotedisplay.player.service.PowerAccessibilityService.instance
+        if (svc != null) {
+            svc.showPowerDialog()
+            Log.i("MainActivity", "Power dialog shown via accessibility")
+        } else {
+            Log.w("MainActivity", "Accessibility service not enabled - trying fallback")
+            thread {
+                try { Runtime.getRuntime().exec(arrayOf("input", "keyevent", "--longpress", "26")).waitFor() } catch (_: Exception) {}
+            }
+        }
     }
 
     private fun showStatus(message: String) {
