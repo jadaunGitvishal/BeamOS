@@ -98,6 +98,40 @@ export async function render(container) {
          </div>
 
     <div class="settings-section">
+      <h3>Entra ID Service Principals</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">
+        Machine-to-machine API access (Ref 9). Register the Application (client) ID of an Entra ID Service Principal against a workspace + scope, matching the same read/write/full/billing:read/agency scopes an API token uses. See docs/entra-auth.md for how to create the Entra app registration this expects.
+      </p>
+      <div id="entraSpForm" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+        <div>
+          <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px">Client ID (GUID)</label>
+          <input type="text" id="entraSpClientId" class="input" placeholder="00001111-aaaa-2222-bbbb-3333cccc4444" style="width:280px">
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px">Name</label>
+          <input type="text" id="entraSpName" class="input" placeholder="Acme ERP integration" style="width:200px">
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px">Workspace ID</label>
+          <input type="text" id="entraSpWorkspaceId" class="input" placeholder="workspace UUID (see Organizations above)" style="width:280px">
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px">Scope</label>
+          <select id="entraSpScope" class="input" style="background:var(--bg-input)">
+            <option value="read">read</option>
+            <option value="write">write</option>
+            <option value="full">full</option>
+            <option value="agency">agency</option>
+            <option value="billing:read">billing:read</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-sm" id="entraSpCreateBtn">Register</button>
+      </div>
+      <div id="entraSpError" style="color:var(--danger);font-size:12px;margin-bottom:8px"></div>
+      <div id="entraSpTable"><p style="color:var(--text-muted)">${t("common.loading")}</p></div>
+    </div>
+
+    <div class="settings-section">
       <h3>${t("admin.system")}</h3>
       <div id="systemInfo"><p style="color:var(--text-muted)">${t("common.loading")}</p></div>
     </div>
@@ -140,11 +174,82 @@ export async function render(container) {
       });
     });
 
+  document.getElementById("entraSpCreateBtn")?.addEventListener("click", async () => {
+    const errEl = document.getElementById("entraSpError");
+    errEl.textContent = "";
+    const client_id = document.getElementById("entraSpClientId").value.trim();
+    const name = document.getElementById("entraSpName").value.trim();
+    const workspace_id = document.getElementById("entraSpWorkspaceId").value.trim();
+    const scope = document.getElementById("entraSpScope").value;
+    try {
+      await api.adminCreateEntraSP({ client_id, name, workspace_id, scope });
+      document.getElementById("entraSpClientId").value = "";
+      document.getElementById("entraSpName").value = "";
+      document.getElementById("entraSpWorkspaceId").value = "";
+      showToast(`Service Principal "${name}" registered`, "success");
+      loadEntraSPs();
+    } catch (err) {
+      errEl.textContent = err.message || "Failed to register Service Principal";
+    }
+  });
+
   loadUsers();
   loadOrgs();
   loadBranding();
   loadSystem();
   loadStatusDebug();
+  loadEntraSPs();
+}
+
+// Ref 9: list + revoke registered Entra ID Service Principals. Same list/revoke
+// shape as the self-service API-token settings page (frontend/js/views/settings.js),
+// but platform-admin-only and cross-workspace (shows every registration, not just
+// the caller's own workspace).
+async function loadEntraSPs() {
+  const el = document.getElementById("entraSpTable");
+  if (!el) return;
+  let rows;
+  try {
+    rows = await api.adminListEntraSPs();
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--danger)">${esc(err.message || "Failed to load Service Principals")}</p>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<p style="color:var(--text-muted)">No Service Principals registered yet.</p>`;
+    return;
+  }
+  el.innerHTML = `
+    <table class="data-table">
+      <thead><tr>
+        <th>Name</th><th>Client ID</th><th>Workspace</th><th>Scope</th>
+        <th>Registered by</th><th>Last used</th><th></th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((r) => `
+          <tr>
+            <td>${esc(r.name)}</td>
+            <td style="font-family:monospace;font-size:12px">${esc(r.client_id)}</td>
+            <td>${esc(r.workspace_name || r.workspace_id)}</td>
+            <td>${esc(r.scope)}</td>
+            <td>${esc(r.created_by_email || "—")}</td>
+            <td>${r.last_used_at ? new Date(r.last_used_at * 1000).toLocaleString() : "Never"}</td>
+            <td>${r.revoked_at
+              ? `<span style="color:var(--text-muted)">Revoked</span>`
+              : `<button class="btn btn-danger btn-sm" data-revoke-entra-sp="${esc(r.id)}" data-name="${esc(r.name)}">Revoke</button>`}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+
+  el.querySelectorAll("[data-revoke-entra-sp]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.revokeEntraSp, name = btn.dataset.name;
+      if (!confirm(`Revoke "${name}"? It will immediately lose API access.`)) return;
+      await api.adminRevokeEntraSP(id);
+      showToast(`"${name}" revoked`, "success");
+      loadEntraSPs();
+    }),
+  );
 }
 
 // #36: list organizations with owner + resource counts; platform admin can

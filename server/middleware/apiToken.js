@@ -16,6 +16,9 @@ const crypto = require('crypto');
 const { db } = require('../db/database');
 const { requireAuth, isPlatformRole } = require('./auth');
 const { asyncHandler } = require('../lib/async-handler');
+// Ref 9: Entra ID Service Principal auth - a third front door alongside st_ tokens
+// and JWT sessions. No circular require (entraToken.js doesn't import this file).
+const { looksLikeEntraToken, entraTokenAuth } = require('./entraToken');
 
 const TOKEN_PREFIX = 'st_';
 
@@ -79,11 +82,14 @@ const apiTokenAuth = asyncHandler(async function apiTokenAuth(req, res, next) {
   next();
 });
 
-// Front door: token path for "Bearer st_...", else the existing JWT requireAuth
-// (unchanged). Used in place of requireAuth on the public routers only.
+// Front door: token path for "Bearer st_...", the Entra ID Service Principal path
+// for a Bearer JWT that looks Entra-issued (Ref 9), else the existing JWT
+// requireAuth (unchanged). Used in place of requireAuth on the public routers only.
 function bearerAuth(req, res, next) {
   const header = req.headers.authorization || '';
   if (header.startsWith('Bearer ' + TOKEN_PREFIX)) return apiTokenAuth(req, res, next);
+  const raw = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (looksLikeEntraToken(raw)) return entraTokenAuth(req, res, next);
   return requireAuth(req, res, next);
 }
 

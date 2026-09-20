@@ -240,6 +240,12 @@ mapping configuration surface (which groups map to which role, per org),
 and a sync path that keeps role assignments current as group membership
 changes.
 
+Note: this gap is about *human* sign-in. [`docs/entra-auth.md`](entra-auth.md)
+(Ref 9) documents a separate, since-built capability — Entra ID Service
+Principal (machine-to-machine, OAuth 2.0 client-credentials) API
+authentication for non-human callers — which does **not** close this gap
+and isn't intended to.
+
 ## Secondary finding: billing actions were not role-gated (now fixed)
 
 While tracing every write path for this document, one more real gap

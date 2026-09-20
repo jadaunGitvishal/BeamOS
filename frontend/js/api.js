@@ -257,6 +257,10 @@ export const api = {
   adminListOrgs: () => request('/admin/orgs'),
   adminDeleteOrg: (id) => request(`/admin/orgs/${id}`, { method: 'DELETE' }),
   adminDeleteWorkspace: (id) => request(`/admin/workspaces/${id}`, { method: 'DELETE' }),
+  // Ref 9: Entra ID Service Principal client_id -> workspace+scope registrations.
+  adminListEntraSPs: () => request('/admin/entra-service-principals'),
+  adminCreateEntraSP: (data) => request('/admin/entra-service-principals', { method: 'POST', body: JSON.stringify(data) }),
+  adminRevokeEntraSP: (id) => request(`/admin/entra-service-principals/${id}`, { method: 'DELETE' }),
   aiGetSettings: () => request('/ai/settings'),
   aiSaveSettings: (data) => request('/ai/settings', { method: 'PUT', body: JSON.stringify(data) }),
   aiGenerateDesign: (prompt) => request('/ai/generate-design', { method: 'POST', body: JSON.stringify({ prompt }) }),

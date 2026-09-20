@@ -23,6 +23,7 @@ const REQUIRED_TABLES = [
   'field_visit_photos', // Ref 43 Stage A: geotagged inspection photos
   'activity_log_chain', // Ref 17: single-row anchor for the audit-log hash chain
   'device_network_usage', // Ref 44: daily SIM/network data-usage aggregates
+  'entra_service_principals', // Ref 9: Entra ID Service Principal client_id -> workspace+scope
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is

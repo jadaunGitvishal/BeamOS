@@ -177,6 +177,16 @@ module.exports = {
   // to Graph). Intended for local dev that pulls fresh prod DB copies - keeps
   // us from accidentally emailing real prod users. UNSET on prod systemd unit.
   graphDevRestrictTo: process.env.GRAPH_DEV_RESTRICT_TO || "",
+  // Ref 9: Entra ID Service Principal (OAuth 2.0 client credentials) auth for
+  // machine-to-machine API access - a SEPARATE app registration from the Graph
+  // one above (see docs/entra-auth.md for why). entraTenantId pins which Entra
+  // tenant's issuer/JWKS this server trusts; entraApiClientId is THIS app
+  // registration's own Application (client) ID, which incoming tokens must
+  // carry as their `aud` claim. Both empty = Entra auth disabled entirely
+  // (middleware/entraToken.js refuses every request rather than validating
+  // against an unset tenant/audience).
+  entraTenantId: process.env.ENTRA_TENANT_ID || "",
+  entraApiClientId: process.env.ENTRA_API_CLIENT_ID || "",
   // Self-hosted mode: if true, first user gets enterprise plan and no billing
   // selfHosted: process.env.SELF_HOSTED === "true",
   selfHosted: true, // Permanently hardcoded for BeamOS - not dependent on env var

@@ -10,11 +10,17 @@
 // fails. This is the firewall-rule-as-code.
 //
 //   PUBLIC_ROUTERS   - token-reachable. Mounted with the bearerAuth front door +
-//                      resolveTenancy + tokenScopeGate. A scoped API token AND a JWT
-//                      session both reach these.
-//   JWT_ONLY_ROUTERS - requireAuth only (no token front door). A `Bearer st_` token
-//                      fails jwt.verify -> 401, so these are unreachable by any token
-//                      (secure by exclusion). Privileged surfaces live here.
+//                      resolveTenancy + tokenScopeGate. A scoped API token, a JWT
+//                      session, AND a registered Entra ID Service Principal's
+//                      access token (Ref 9 - middleware/entraToken.js) all reach
+//                      these; the latter two both resolve down to the exact same
+//                      req.viaToken/req.tokenScope shape a token produces, so
+//                      tokenScopeGate enforces identically for all three.
+//   JWT_ONLY_ROUTERS - requireAuth only (no token front door). A `Bearer st_`
+//                      token or an Entra-issued JWT both fail requireAuth's
+//                      jwt.verify (wrong format / wrong signing algorithm) -> 401,
+//                      so these are unreachable by either (secure by exclusion,
+//                      not by extra code). Privileged surfaces live here.
 //
 // Per-entry flags:
 //   renderBypass: also exposes a public GET /:id/render (device render) that skips auth.

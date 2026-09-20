@@ -14,6 +14,8 @@ const { asyncHandler } = require('../lib/async-handler');
 // #73: 'agency' is OFF the read/write/full ladder (not in apiToken.js SCOPE_RANK), so a
 // tokenScopeGate-mounted router rejects it; it reaches only the AGENCY_ROUTER via agencyGate.
 // #146: 'billing:read' is likewise off-ladder — reaches only /api/billing via requireBillingRead.
+// Exported so Ref 9's Entra Service Principal admin endpoints (routes/admin.js) validate
+// against this SAME array rather than a second, driftable copy of the vocabulary.
 const SCOPES = ['read', 'write', 'full', 'agency', 'billing:read'];
 
 // List the caller's tokens in the active workspace. Never returns the secret/hash.
@@ -127,3 +129,4 @@ router.put('/:id/targets', asyncHandler(async (req, res) => {
 }));
 
 module.exports = router;
+module.exports.SCOPES = SCOPES;

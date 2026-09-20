@@ -705,4 +705,105 @@ router.put("/pending-installation-frequency", requirePlatformAdmin, asyncHandler
   res.json({ frequency_days: n });
 }));
 
+// ===================== ENTRA ID SERVICE PRINCIPALS (Ref 9) =====================
+// Platform-admin-only registration of an Entra ID Service Principal's client_id ->
+// workspace + scope mapping. Deliberately admin-only (unlike api_tokens, which is
+// self-service per workspace member) - registering WHICH external application may
+// call the API on a workspace's behalf is an administrative trust decision, not
+// something any workspace member should be able to grant themselves. See
+// docs/entra-auth.md for the full setup guide and middleware/entraToken.js for how
+// a registered client_id's token is validated and turned into the same
+// req.viaToken/req.tokenScope shape api_tokens produces.
+const { SCOPES: ENTRA_SP_SCOPES } = require("./tokens");
+// Entra Application (client) IDs are always GUIDs.
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ENTRA_SP_NAME_MAX = 255;
+
+const ENTRA_SP_SELECT = `
+  SELECT sp.id, sp.client_id, sp.name, sp.workspace_id, sp.scope, sp.created_by,
+    sp.created_at, sp.last_used_at, sp.revoked_at,
+    w.name AS workspace_name, u.email AS created_by_email
+  FROM entra_service_principals sp
+  LEFT JOIN workspaces w ON w.id = sp.workspace_id
+  LEFT JOIN users u ON u.id = sp.created_by
+`;
+
+// GET /api/admin/entra-service-principals - list every registered Service
+// Principal across every workspace. Platform-admin only (same tier as /orgs).
+router.get("/entra-service-principals", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const rows = await db.prepare(`${ENTRA_SP_SELECT} ORDER BY sp.created_at DESC`).all();
+  res.json(rows);
+}));
+
+// POST /api/admin/entra-service-principals - register a Service Principal's
+// client_id against a workspace + scope. Body: { client_id, name, workspace_id, scope }.
+router.post("/entra-service-principals", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const clientId = String(req.body?.client_id || "").trim().toLowerCase();
+  if (!GUID_RE.test(clientId)) {
+    return res.status(400).json({ error: "client_id must be a valid GUID (the Service Principal's Application (client) ID from Entra ID)" });
+  }
+  const name = String(req.body?.name || "").trim();
+  if (!name) return res.status(400).json({ error: "name is required" });
+  if (name.length > ENTRA_SP_NAME_MAX) {
+    return res.status(400).json({ error: `name must be ${ENTRA_SP_NAME_MAX} characters or fewer` });
+  }
+  const workspaceId = String(req.body?.workspace_id || "").trim();
+  const ws = workspaceId ? await db.prepare("SELECT id FROM workspaces WHERE id = ?").get(workspaceId) : null;
+  if (!ws) return res.status(400).json({ error: "workspace_id must reference an existing workspace" });
+  const scope = String(req.body?.scope || "read").trim();
+  if (!ENTRA_SP_SCOPES.includes(scope)) {
+    return res.status(400).json({ error: `scope must be one of: ${ENTRA_SP_SCOPES.join(", ")}` });
+  }
+
+  const existing = await db.prepare("SELECT id, revoked_at FROM entra_service_principals WHERE client_id = ?").get(clientId);
+  if (existing && !existing.revoked_at) {
+    return res.status(409).json({ error: "This client_id is already registered. Revoke the existing registration first if you want to re-register it." });
+  }
+
+  const id = uuidv4();
+  if (existing) {
+    // A previously-revoked registration for the same client_id - replace it in
+    // place rather than leaving two rows (client_id is UNIQUE) so re-registering
+    // a rotated/reused Service Principal doesn't require a manual cleanup step.
+    await db.prepare(
+      `UPDATE entra_service_principals SET id = ?, name = ?, workspace_id = ?, scope = ?, created_by = ?, created_at = UNIX_TIMESTAMP(), last_used_at = NULL, revoked_at = NULL WHERE client_id = ?`,
+    ).run(id, name, workspaceId, scope, req.user.id, clientId);
+  } else {
+    await db.prepare(
+      `INSERT INTO entra_service_principals (id, client_id, name, workspace_id, scope, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
+    ).run(id, clientId, name, workspaceId, scope, req.user.id);
+  }
+
+  logActivity(
+    req.user.id,
+    "admin_register_entra_sp",
+    `client_id: ${clientId}, workspace: ${ws.id}, scope: ${scope}`,
+    null,
+    getClientIp(req),
+    ws.id,
+  );
+  const row = await db.prepare(`${ENTRA_SP_SELECT} WHERE sp.id = ?`).get(id);
+  res.status(201).json(row);
+}));
+
+// DELETE /api/admin/entra-service-principals/:id - revoke. Soft delete (same
+// pattern as DELETE /api/tokens/:id) so the registration stays as an audit record;
+// entraTokenAuth checks revoked_at on every lookup, so this takes effect immediately.
+router.delete("/entra-service-principals/:id", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const row = await db.prepare("SELECT id, client_id, workspace_id, revoked_at FROM entra_service_principals WHERE id = ?").get(req.params.id);
+  if (!row) return res.status(404).json({ error: "Service Principal registration not found" });
+  if (!row.revoked_at) {
+    await db.prepare("UPDATE entra_service_principals SET revoked_at = UNIX_TIMESTAMP() WHERE id = ?").run(row.id);
+    logActivity(
+      req.user.id,
+      "admin_revoke_entra_sp",
+      `client_id: ${row.client_id}`,
+      null,
+      getClientIp(req),
+      row.workspace_id,
+    );
+  }
+  res.json({ success: true });
+}));
+
 module.exports = router;

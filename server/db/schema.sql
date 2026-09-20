@@ -979,6 +979,36 @@ CREATE TABLE IF NOT EXISTS agency_notifications (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_agency_notifications_unsent ON agency_notifications(sent_at);
 
+-- ===================== ENTRA ID SERVICE PRINCIPALS (Ref 9) =====================
+-- A platform-admin-curated mapping from an Entra ID Service Principal's client_id
+-- (the token's 'azp' claim) to a workspace + scope - the M2M/OAuth-client-credentials
+-- counterpart to api_tokens above. Deliberately mirrors api_tokens' shape (workspace,
+-- scope, created_at/last_used_at/revoked_at) so it plugs into the EXACT SAME
+-- scope-enforcement gates (middleware/apiToken.js's tokenScopeGate/requireScope/
+-- agencyGate/requireBillingRead) - see middleware/entraToken.js. No secret/hash
+-- columns: there's nothing to store server-side, Entra ID itself holds the
+-- credential (the Service Principal's client secret or certificate) and proves
+-- possession via a signed JWT we verify against Entra's own JWKS on every request.
+-- created_by plays the same role api_tokens.user_id does: request handling ACTS AS
+-- this real user (role forced to 'user', same as a token), so workspace-role
+-- resolution (resolveTenancy) works unmodified - scope then caps it further, same
+-- ladder as a token. See docs/entra-auth.md for the full setup + security model.
+CREATE TABLE IF NOT EXISTS entra_service_principals (
+    id              VARCHAR(64) PRIMARY KEY,
+    client_id       VARCHAR(64) NOT NULL UNIQUE,   -- Entra 'azp' claim: the SP's Application (client) ID, a GUID
+    name            VARCHAR(255) NOT NULL,          -- admin-given label, e.g. "Acme ERP integration"
+    workspace_id    VARCHAR(64) NOT NULL,
+    scope           VARCHAR(50) NOT NULL DEFAULT 'read',  -- same vocabulary as api_tokens.scope
+    created_by      VARCHAR(64) NOT NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    last_used_at    BIGINT,
+    revoked_at      BIGINT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_entra_sp_client ON entra_service_principals(client_id);
+CREATE INDEX idx_entra_sp_workspace ON entra_service_principals(workspace_id);
+
 -- ===================== APP SETTINGS =====================
 -- #146: minimal global key/value settings for admin-toggleable runtime flags (none
 -- existed - ai_settings is per-workspace, white_labels is branding). Originally added
