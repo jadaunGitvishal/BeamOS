@@ -99,6 +99,11 @@ const REQUIRED_COLUMNS = [
   // every visit-completion update that includes it until repaired. Nullable -
   // NULL = not yet recorded by a technician.
   ['devices', 'installed_at', "ALTER TABLE devices ADD COLUMN installed_at VARCHAR(10) NULL"],
+  // Ref 52: technician-set warranty expiry date ('YYYY-MM-DD'). The field-visit
+  // PATCH route writes this now, so an un-migrated DB would fail every
+  // visit-completion update that includes it until repaired. Nullable - NULL =
+  // not yet recorded by a technician.
+  ['devices', 'warranty_expiry_date', "ALTER TABLE devices ADD COLUMN warranty_expiry_date VARCHAR(10) NULL"],
 ];
 
 function defaultOnMissing(missing) {

@@ -61,6 +61,9 @@ export default function CompletionForm({ workspaceId, visitId, deviceName, devic
     device_model: prefill.device_model,
     sim_network_info: prefill.sim_network_info,
     installed_at: (device && device.installed_at) || "",
+    // Ref 52: same reasoning as installed_at directly above - devices.warranty_expiry_date
+    // is either a real 'YYYY-MM-DD' or absent, read straight off the device row.
+    warranty_expiry_date: (device && device.warranty_expiry_date) || "",
     remarks: "",
   }));
   const [deviceStatus, setDeviceStatus] = useState("");
@@ -152,6 +155,9 @@ export default function CompletionForm({ workspaceId, visitId, deviceName, devic
     // server-side, not a field_visits column, so it's sent alongside rather than
     // looped with the free-text fields above.
     if (fields.installed_at) out.installed_at = fields.installed_at;
+    // Ref 52: same reasoning - updates devices.warranty_expiry_date server-side,
+    // not a field_visits column.
+    if (fields.warranty_expiry_date) out.warranty_expiry_date = fields.warranty_expiry_date;
     const remarks = fields.remarks.trim();
     if (remarks) out.remarks = remarks;
     return out;
@@ -273,6 +279,24 @@ export default function CompletionForm({ workspaceId, visitId, deviceName, devic
           max={new Date().toISOString().slice(0, 10)}
           value={fields.installed_at}
           onChange={setField("installed_at")}
+        />
+      </div>
+
+      {/* Ref 52: same pattern as installed_at above - a date input that updates
+          devices.warranty_expiry_date directly (see payload()). Deliberately no
+          `max` here - unlike an installation date, a warranty expiry is expected
+          to be in the future. */}
+      <div className="form-field">
+        <label className="field-label" htmlFor="f-warranty_expiry_date">
+          Warranty expiry date
+          {device && device.warranty_expiry_date && <span className="muted-inline"> · from device records, edit if changed</span>}
+        </label>
+        <input
+          id="f-warranty_expiry_date"
+          className="input"
+          type="date"
+          value={fields.warranty_expiry_date}
+          onChange={setField("warranty_expiry_date")}
         />
       </div>
 

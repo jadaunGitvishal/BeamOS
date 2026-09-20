@@ -268,6 +268,13 @@ CREATE TABLE IF NOT EXISTS devices (
     -- invite. Distinct from created_at (first-paired time), which only
     -- approximates it. NULL = not yet recorded by a technician.
     installed_at        VARCHAR(10),
+    -- Ref 52: warranty expiry, technician-set/confirmed during a field visit
+    -- (same completion PATCH as installed_at, same 'YYYY-MM-DD' date-only
+    -- convention, same NULL-means-not-recorded-yet semantics). Unlike
+    -- installed_at this is legitimately expected to be in the future (that's
+    -- the whole point of a 30-day-prior alert), so it carries no
+    -- not-in-the-future constraint at the validation layer.
+    warranty_expiry_date VARCHAR(10),
     playlist_id     VARCHAR(64),
     layout_id       VARCHAR(64),
     timezone        VARCHAR(100) DEFAULT 'UTC',

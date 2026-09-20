@@ -1445,6 +1445,20 @@ function fvInstallDateOrNull(v) {
   return s;
 }
 
+// 'YYYY-MM-DD' -> the same string if it's a real calendar date, else null.
+// Ref 52: warranty_expiry_date shares installed_at's format/real-date checks
+// but deliberately NOT its "not in the future" rule - a warranty expiry is
+// normally set well ahead of the date it lapses, so rejecting future dates
+// would make the field unusable for its actual purpose.
+function fvCalendarDateOrNull(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const s = String(v).trim();
+  if (!FV_DATE_RE.test(s)) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null;
+  return s;
+}
+
 // POST /:id/field-visits - start a visit. Body: { device_id, visit_type,
 // client_visit_uuid? }. Auto-snapshots the device's current telemetry.
 router.post(
@@ -1651,6 +1665,25 @@ router.patch(
         }
         await db.prepare("UPDATE devices SET installed_at = ? WHERE id = ?").run(installedAt, visit.device_id);
         changed.push(`device.installed_at: ${installedAt}`);
+      }
+    }
+
+    // Ref 52: warranty_expiry_date lives on devices, NOT field_visits - same
+    // reasoning and same write path as installed_at directly above (stays
+    // visible on the device regardless of visit history; not gated by the
+    // `updates.length === 0` early-return below).
+    if ("warranty_expiry_date" in req.body) {
+      const raw = req.body.warranty_expiry_date;
+      if (raw === null || raw === undefined || raw === "") {
+        await db.prepare("UPDATE devices SET warranty_expiry_date = NULL WHERE id = ?").run(visit.device_id);
+        changed.push("device.warranty_expiry_date: cleared");
+      } else {
+        const warrantyExpiry = fvCalendarDateOrNull(raw);
+        if (!warrantyExpiry) {
+          return res.status(400).json({ error: "warranty_expiry_date must be a real calendar date (YYYY-MM-DD)" });
+        }
+        await db.prepare("UPDATE devices SET warranty_expiry_date = ? WHERE id = ?").run(warrantyExpiry, visit.device_id);
+        changed.push(`device.warranty_expiry_date: ${warrantyExpiry}`);
       }
     }
 

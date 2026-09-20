@@ -90,6 +90,8 @@ function HardwareCard({ d }) {
         {hwCell(d.sim_iccid)}
         <dt>Installed</dt>
         {d.installed_at ? <dd>{fmtDate(d.installed_at)}</dd> : <dd className="hw-na">—</dd>}
+        <dt>Warranty expiry</dt>
+        {d.warranty_expiry_date ? <dd>{fmtDate(d.warranty_expiry_date)}</dd> : <dd className="hw-na">—</dd>}
       </dl>
     </div>
   );
