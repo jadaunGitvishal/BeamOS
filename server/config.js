@@ -386,6 +386,16 @@ module.exports = {
   // Lowered via env only for tests.
   outageEscalationIntervalMs:
     parseInt(process.env.OUTAGE_ESCALATION_INTERVAL_MS) || 15 * 60 * 1000,
+  // Ref 52: warranty-expiry alert sweep (services/warranty-alert.js). Same
+  // shape as outage-escalation's interval - the condition is date-based (no
+  // minute-level resolution needed), so this can run far less often than the
+  // offline-alert tick while still catching every device within a day of it
+  // crossing the threshold. Lowered via env only for tests.
+  warrantyAlertIntervalMs:
+    parseInt(process.env.WARRANTY_ALERT_INTERVAL_MS) || 60 * 60 * 1000,
+  // Ref 52: how many days before devices.warranty_expiry_date the alert fires.
+  warrantyAlertDaysBefore:
+    parseInt(process.env.WARRANTY_ALERT_DAYS_BEFORE) || 30,
   // Absolute base URL for links in outbound email (e.g. the device page a breach
   // alert points to). Unset -> a root-relative path is used instead (still
   // meaningful to a recipient who knows their instance host).

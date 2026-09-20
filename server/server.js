@@ -929,6 +929,10 @@ async function boot() {
   const { startAlertService } = require("./services/alerts");
   startAlertService(io);
 
+  // Ref 52: 30-day-prior warranty-expiry alert emails (warranty_alerts table dedupes per device+expiry-date)
+  const { startWarrantyAlerts } = require("./services/warranty-alert");
+  startWarrantyAlerts();
+
   // Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
   const { startActivationNudge } = require("./services/activationNudge");
   startActivationNudge();

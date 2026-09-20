@@ -1170,6 +1170,23 @@ CREATE TABLE IF NOT EXISTS outage_escalations (
 -- Serves the sweep's "already escalated?" prefilter.
 CREATE INDEX idx_outage_escalations_start ON outage_escalations(outage_start);
 
+-- Ref 52: 30-day-prior warranty-expiry alert anti-spam mechanism (see
+-- services/warranty-alert.js), the SAME claim-before-send pattern as
+-- outage_escalations directly above: a row matching (device_id,
+-- warranty_expiry_date) means "already alerted for THIS expiry date, do
+-- nothing". If a technician later edits the expiry date (e.g. warranty
+-- extended), that is a genuinely new date and therefore a fresh alert is
+-- correct - same reasoning outage_escalations applies to a fresh outage_start.
+CREATE TABLE IF NOT EXISTS warranty_alerts (
+    id                    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    device_id             VARCHAR(64) NOT NULL,
+    workspace_id          VARCHAR(64) NOT NULL,
+    warranty_expiry_date  VARCHAR(10) NOT NULL,
+    alerted_at            BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    recipient_email       VARCHAR(500) NOT NULL,
+    UNIQUE KEY uq_warranty_alerts_device_expiry (device_id, warranty_expiry_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ===================== DEVICE REGISTRATION CODES (Ref 30) =====================
 -- Ref 30 Stage 1: advance device registration codes. A workspace_admin (or org /
 -- platform admin) generates a 6-digit code ahead of an install, optionally naming
