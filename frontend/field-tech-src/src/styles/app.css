@@ -344,6 +344,13 @@ body {
   opacity: 0.55;
 }
 
+/* Ref 75: a report data row (device name + value) - visually identical to the
+   tappable .row above, but rendered as a plain div, not a button (nothing to
+   tap in a read-only report list). */
+.row--static {
+  cursor: default;
+}
+
 .row__title {
   font-size: 17px;
   font-weight: 700;
@@ -373,6 +380,67 @@ body {
 .tag--off {
   color: var(--bad);
   background: var(--bad-tint);
+}
+
+/* Ref 75: third tag state for report views (SLA "unknown", uptime mid-range) -
+   the --warn/--warn-tint tokens already exist (used elsewhere for the photo
+   low-accuracy warning), just not yet as a tag variant. */
+.tag--warn {
+  color: var(--warn);
+  background: var(--warn-tint);
+}
+
+/* ---- report views (Ref 75) ---- */
+
+/* Compact summary numbers at the top of a report (SLA compliant/breach/
+   unknown counts, proof-of-play totals). 2-up on a phone - a stat grid, not a
+   desktop-style data table, matching the rest of this app's single-column,
+   large-touch-target layout. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.stat-tile {
+  padding: 12px 14px;
+  background: #f6f8fb;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+}
+
+.stat-tile__value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.stat-tile__label {
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.report-period {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* A .row with a right-aligned tag, used by the per-device report lists
+   (uptime %, SLA status) instead of .row__meta's left-aligned plain text. */
+.row__value {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 10px;
 }
 
 /* visit-type / device-status selector */

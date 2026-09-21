@@ -1,17 +1,21 @@
 import { useState } from "react";
 import { apiPost, setToken, NetworkError, ApiError } from "../lib/api.js";
+import UptimeReport from "./reports/UptimeReport.jsx";
+import SlaReport from "./reports/SlaReport.jsx";
+import ProofOfPlayReport from "./reports/ProofOfPlayReport.jsx";
 
-// Ref 75 Stage A: the management report-viewing flow, parallel to VisitFlow.jsx
-// (same workspace-picker step and switch-workspace call - deliberately NOT
+// Ref 75: the management report-viewing flow, parallel to VisitFlow.jsx (same
+// workspace-picker step and switch-workspace call - deliberately NOT
 // extracted into a shared component, since everything AFTER picking a
-// workspace diverges completely between the two flows). Read-only: unlike
-// VisitFlow there is no write path here at all, matching workspace_viewer's
-// actual permission level.
-//
-// Stage A ships only the workspace picker + a placeholder body so Stage 1 of
-// Ref 75 can be verified end-to-end (login -> correct routing -> workspace
-// selection) before Stage B fills in the three real report views (Uptime,
-// SLA status, Proof-of-play).
+// workspace diverges completely between the two flows). Read-only throughout:
+// unlike VisitFlow there is no write path here at all, matching
+// workspace_viewer's actual permission level.
+const REPORT_TABS = [
+  { key: "uptime", label: "Uptime" },
+  { key: "sla", label: "SLA status" },
+  { key: "pop", label: "Proof-of-play" },
+];
+
 export default function ReportFlow({ me, onLogout, onSessionExpired }) {
   const workspaces = (me?.accessible_workspaces || [])
     .slice()
@@ -19,6 +23,7 @@ export default function ReportFlow({ me, onLogout, onSessionExpired }) {
 
   const [step, setStep] = useState("workspaces"); // "workspaces" | "reports"
   const [activeWs, setActiveWs] = useState(null);
+  const [tab, setTab] = useState("uptime");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -39,6 +44,7 @@ export default function ReportFlow({ me, onLogout, onSessionExpired }) {
       const res = await apiPost("/api/auth/switch-workspace", { workspace_id: ws.id });
       if (res.token) setToken(res.token);
       setActiveWs(ws);
+      setTab("uptime");
       setStep("reports");
     } catch (err) {
       handleErr(err, "Could not open that workspace.");
@@ -88,7 +94,22 @@ export default function ReportFlow({ me, onLogout, onSessionExpired }) {
           <>
             <button className="back" type="button" onClick={restart}>‹ Workspaces</button>
             <p className="step-title">{activeWs.name}</p>
-            <p className="muted">Report views (Uptime, SLA status, Proof-of-play) are coming in Stage 2.</p>
+            <div className="choice-group">
+              {REPORT_TABS.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  className={`choice ${tab === t.key ? "choice--on" : ""}`}
+                  aria-pressed={tab === t.key}
+                  onClick={() => setTab(t.key)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            {tab === "uptime" && <UptimeReport onSessionExpired={onSessionExpired} />}
+            {tab === "sla" && <SlaReport onSessionExpired={onSessionExpired} />}
+            {tab === "pop" && <ProofOfPlayReport onSessionExpired={onSessionExpired} />}
             <button className="button button--secondary" type="button" onClick={onLogout}>Log out</button>
           </>
         )}
