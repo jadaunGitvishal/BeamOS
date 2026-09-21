@@ -8,6 +8,17 @@ const {
 } = require('../lib/workspace-scope');
 const { renderXlsx, renderPdf } = require('../lib/report-export');
 const { getProofOfPlaySummary } = require('../lib/proof-of-play');
+const { publicFieldList, DOMAIN_LABELS } = require('../lib/report-fields');
+
+// Ref 74 Stage 1: the custom-report field catalog. Frontend-safe shape only
+// (id/label/domain/type) - never the internal SQL column expression, which
+// lib/report-fields.js keeps server-side.
+router.get(
+  '/custom/fields',
+  asyncHandler(async (req, res) => {
+    res.json({ domains: DOMAIN_LABELS, fields: publicFieldList() });
+  }),
+);
 
 // Query play logs
 router.get(
