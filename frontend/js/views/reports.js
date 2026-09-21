@@ -2,6 +2,7 @@ import { api } from "../api.js";
 import { showToast } from "../components/toast.js";
 import { esc } from "../utils.js";
 import { t } from "../i18n.js";
+import { openCustomReportBuilderModal } from "../components/custom-report-builder-modal.js";
 
 const API = (url, opts = {}) =>
   fetch("/api" + url, {
@@ -21,18 +22,26 @@ export async function render(container) {
   container.innerHTML = `
     <div class="page-header">
       <div><h1>${t("report.title")} <span class="help-tip" data-tip="${t("report.help_tip")}">?</span></h1><div class="subtitle">${t("report.subtitle")}</div></div>
-      <div class="export-menu-wrap" id="exportMenuWrap">
-        <button type="button" class="btn btn-secondary" id="exportBtn" aria-haspopup="true" aria-expanded="false">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          ${t("report.export_csv")}
-        </button>
-        <div class="export-menu" id="exportMenu" role="menu">
-          <button type="button" class="export-menu-item" data-format="csv" role="menuitem">CSV</button>
-          <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">XLSX</button>
-          <button type="button" class="export-menu-item" data-format="pdf" role="menuitem">PDF</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div class="export-menu-wrap" id="exportMenuWrap">
+          <button type="button" class="btn btn-secondary" id="exportBtn" aria-haspopup="true" aria-expanded="false">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            ${t("report.export_csv")}
+          </button>
+          <div class="export-menu" id="exportMenu" role="menu">
+            <button type="button" class="export-menu-item" data-format="csv" role="menuitem">CSV</button>
+            <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">XLSX</button>
+            <button type="button" class="export-menu-item" data-format="pdf" role="menuitem">PDF</button>
+          </div>
         </div>
+        <button type="button" class="btn btn-secondary" id="customReportBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+          </svg>
+          Export custom reports
+        </button>
       </div>
     </div>
 
@@ -57,6 +66,8 @@ export async function render(container) {
 
   document.getElementById("loadReportBtn").onclick = loadReport;
   loadReport();
+
+  document.getElementById("customReportBtn").onclick = () => openCustomReportBuilderModal();
 
   // document.getElementById('exportBtn').onclick = () => {
   //   const deviceId = document.getElementById('reportDevice').value;
