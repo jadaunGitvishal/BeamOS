@@ -9,6 +9,7 @@ const {
 const { renderXlsx, renderPdf } = require('../lib/report-export');
 const { getProofOfPlaySummary } = require('../lib/proof-of-play');
 const { publicFieldList, DOMAIN_LABELS } = require('../lib/report-fields');
+const { buildCustomReportQuery, ReportQueryError } = require('../lib/report-query-builder');
 
 // Ref 74 Stage 1: the custom-report field catalog. Frontend-safe shape only
 // (id/label/domain/type) - never the internal SQL column expression, which
@@ -17,6 +18,31 @@ router.get(
   '/custom/fields',
   asyncHandler(async (req, res) => {
     res.json({ domains: DOMAIN_LABELS, fields: publicFieldList() });
+  }),
+);
+
+const CUSTOM_PREVIEW_ROW_LIMIT = 20;
+
+// Ref 74 Stage 2: runs a user's { fields, filters, dateRange } selection
+// through the safe query builder and returns a small preview. Same
+// workspace-scoping and field/operator validation as the full export
+// (Stage 3) - this is the exact query export will run, just LIMIT 20.
+router.post(
+  '/custom/preview',
+  asyncHandler(async (req, res) => {
+    let query;
+    try {
+      query = buildCustomReportQuery(req.body, req, { limit: CUSTOM_PREVIEW_ROW_LIMIT });
+    } catch (e) {
+      if (e instanceof ReportQueryError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+    const rows = await db.prepare(query.sql).all(...query.params);
+    res.json({
+      columns: query.headers,
+      fieldIds: query.fieldIds,
+      rows: rows.map((r) => query.fieldIds.map((id) => r[id])),
+    });
   }),
 );
 
