@@ -6,7 +6,7 @@ const {
   getWorkspaceDeviceFilter,
   getWorkspaceDeviceSubquery,
 } = require('../lib/workspace-scope');
-const { renderXlsx, renderPdf } = require('../lib/report-export');
+const { renderCsv, renderXlsx, renderPdf } = require('../lib/report-export');
 const { getProofOfPlaySummary } = require('../lib/proof-of-play');
 const { publicFieldList, DOMAIN_LABELS } = require('../lib/report-fields');
 const { buildCustomReportQuery, ReportQueryError } = require('../lib/report-query-builder');
@@ -43,6 +43,53 @@ router.post(
       fieldIds: query.fieldIds,
       rows: rows.map((r) => query.fieldIds.map((id) => r[id])),
     });
+  }),
+);
+
+// Ref 74 Stage 3: same safety-checked query as preview, uncapped-in-shape but
+// row-capped for real export, run through the SAME renderCsv/renderXlsx/renderPdf
+// the rest of the reporting surface uses (report-export.js) - no format-specific
+// code path of its own.
+const CUSTOM_EXPORT_ROW_CAP = 5000; // matches the cap other list exports use (docs/data-export.md)
+
+router.post(
+  '/custom/export',
+  asyncHandler(async (req, res) => {
+    const { format } = req.body || {};
+    const safeFormat = ['csv', 'xlsx', 'pdf', 'json'].includes(format) ? format : 'csv';
+
+    let query;
+    try {
+      query = buildCustomReportQuery(req.body, req, { limit: CUSTOM_EXPORT_ROW_CAP });
+    } catch (e) {
+      if (e instanceof ReportQueryError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+    const rows = await db.prepare(query.sql).all(...query.params);
+    const dataRows = rows.map((r) => query.fieldIds.map((id) => r[id]));
+
+    if (safeFormat === 'json') {
+      res.json({ columns: query.headers, rows: dataRows });
+      return;
+    }
+    if (safeFormat === 'xlsx') {
+      const buffer = await renderXlsx('Custom Report', query.headers, dataRows);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=custom-report.xlsx');
+      res.send(buffer);
+      return;
+    }
+    if (safeFormat === 'pdf') {
+      const buffer = await renderPdf('Custom Report', query.headers, dataRows);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename=custom-report.pdf');
+      res.send(buffer);
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename=custom-report.csv');
+    res.send(renderCsv(query.headers, dataRows));
   }),
 );
 

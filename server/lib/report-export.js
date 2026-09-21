@@ -2,6 +2,16 @@
 
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
+const { toCsvRow } = require('./csv');
+
+// Ref 74 Stage 3: the CSV shape every export route already produces by hand
+// (UTF-8 BOM + CRLF-joined RFC-4180 rows, per docs/data-export.md), finally
+// factored into one function. headers/rows have the exact same generic
+// string[] / array-of-arrays contract as renderXlsx/renderPdf below.
+function renderCsv(headers, rows) {
+  const lines = [toCsvRow(headers), ...rows.map((row) => toCsvRow(row))];
+  return '﻿' + lines.join('\r\n');
+}
 
 // Fills one worksheet: bold header row, data rows, character-count column autofit.
 function fillSheet(sheet, headers, rows) {
@@ -247,4 +257,4 @@ function renderSectionedPdf(title, sections) {
   });
 }
 
-module.exports = { renderXlsx, renderPdf, renderSectionedXlsx, renderSectionedPdf };
+module.exports = { renderCsv, renderXlsx, renderPdf, renderSectionedXlsx, renderSectionedPdf };
