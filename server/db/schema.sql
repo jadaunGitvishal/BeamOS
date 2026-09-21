@@ -1223,6 +1223,54 @@ CREATE TABLE IF NOT EXISTS registration_codes (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_registration_codes_workspace ON registration_codes(workspace_id, created_at DESC);
 
+-- ===================== SIM INVENTORY (Ref 65) =====================
+-- Stock ledger for PHYSICAL SIM cards, entirely manual (no carrier API - status is
+-- admin/ops-set). Shape mirrors registration_codes above, not devices.warranty_expiry_date
+-- (Ref 52's bolt-a-column-onto-devices approach): a SIM in stock has no device to hang a
+-- column off of, so like registration_codes this is its own entity that starts
+-- unattached and is later bound to one. Same workspace-scoped lifecycle-tracking idea,
+-- different terminal state (registration_codes is consumed once; a SIM cycles through
+-- more states and can come back OUT of assignment - e.g. pulled from a decommissioned
+-- device - which is why assigned_device_id is a plain nullable FK you can clear, not a
+-- one-way "claimed" stamp).
+--
+-- status is a plain VARCHAR, NOT a SQL ENUM - same philosophy as tickets.status/priority
+-- and device_events.event_type elsewhere in this schema: the route validates against a
+-- known set (routes/sim-inventory.js SIM_STATUSES) that can grow without a migration.
+-- Expected values: 'in_stock' (freshly added, not yet assigned) | 'assigned' (bound to
+-- assigned_device_id, not necessarily active yet - e.g. shipped but not installed) |
+-- 'active' (assigned AND confirmed in service) | 'retired' (permanently withdrawn -
+-- lost, damaged, or decommissioned; assigned_device_id is cleared when a row moves here
+-- or back to in_stock, same as leaving 'assigned'/'active').
+--
+-- Relationship to devices.sim_iccid/sim_provider/sim_network_status (Ref 31/44, ~line
+-- 252): those columns are the SIM the DEVICE currently reports installed (app-observed,
+-- refreshed on register) - a completely separate source of truth from this table (the
+-- ADMIN's stock ledger of every SIM the org owns, installed or not). Nothing
+-- reconciles the two yet: an admin could mark a sim_inventory row 'assigned' to a
+-- device whose own sim_iccid doesn't match it, and neither side would notice or
+-- complain. A later Ref could join sim_inventory.iccid = devices.sim_iccid to flag
+-- that drift; out of scope here.
+CREATE TABLE IF NOT EXISTS sim_inventory (
+    id                  VARCHAR(64) PRIMARY KEY,
+    workspace_id        VARCHAR(64) NOT NULL,
+    iccid               VARCHAR(64) NOT NULL UNIQUE,
+    serial_number       VARCHAR(128),
+    carrier             VARCHAR(100),
+    status              VARCHAR(20) NOT NULL DEFAULT 'in_stock',
+    assigned_device_id  VARCHAR(64),
+    notes               TEXT,
+    created_by          VARCHAR(64),
+    created_at          BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at          BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    status_changed_at   BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (assigned_device_id) REFERENCES devices(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_sim_inventory_workspace ON sim_inventory(workspace_id, status, created_at DESC);
+CREATE INDEX idx_sim_inventory_device ON sim_inventory(assigned_device_id);
+
 -- ===================== TICKETS (Phase 4 Stage A + B) =====================
 -- Operational tickets against a workspace (and optionally a specific device).
 -- Stage A is manual: a workspace_editor+ opens one by hand. Stage B adds

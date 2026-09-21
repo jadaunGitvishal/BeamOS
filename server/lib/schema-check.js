@@ -24,6 +24,7 @@ const REQUIRED_TABLES = [
   'activity_log_chain', // Ref 17: single-row anchor for the audit-log hash chain
   'device_network_usage', // Ref 44: daily SIM/network data-usage aggregates
   'entra_service_principals', // Ref 9: Entra ID Service Principal client_id -> workspace+scope
+  'sim_inventory', // Ref 65: physical SIM stock ledger (in_stock/assigned/active/retired)
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
