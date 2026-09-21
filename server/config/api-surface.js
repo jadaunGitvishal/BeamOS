@@ -57,6 +57,10 @@ const JWT_ONLY_ROUTERS = [
   { path: '/api/organizations', mod: './routes/organizations' },
   { path: '/api/admin',       mod: './routes/admin' },
   { path: '/api/tokens',      mod: './routes/tokens',       tenancy: true },
+  // Ref 65: physical SIM stock ledger. A sibling of /api/workspaces, not one
+  // of the /api/dashboard/* group below (that group is read-only reporting;
+  // this one writes), so it gets its own top-level path.
+  { path: '/api/sim-inventory', mod: './routes/sim-inventory', tenancy: true },
   // Merged in from the standalone BeamOS-Dashboard app (read-only reporting:
   // Overview / Devices / Content delivery / Issues). Mounted under its own
   // /api/dashboard/* prefix rather than reusing /api/devices or /api/reports
