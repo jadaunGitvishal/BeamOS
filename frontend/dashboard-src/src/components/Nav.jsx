@@ -19,6 +19,7 @@ const NAV_GROUPS = [
     items: [
       { path: "/regions", label: "Regions", icon: "regions", countKey: null },
       { path: "/devices", label: "Screens", icon: "screens", countKey: "devices" },
+      { path: "/sim-inventory", label: "SIM inventory", icon: "sim", countKey: null },
       { path: "/reconciliation", label: "Reconciliation", icon: "reconciliation", countKey: null },
       { path: "/pending-installations", label: "Pending installs", icon: "pending", countKey: null },
       { path: "/issues", label: "Issues", icon: "issues", countKey: "issues" },
@@ -35,6 +36,7 @@ const ICON_PARTS = {
   operations: 3,
   regions: 3,
   screens: 3,
+  sim: 3,
   reconciliation: 3,
   pending: 3,
   content: 3,

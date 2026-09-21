@@ -16,6 +16,7 @@ import OperationsView from "./views/OperationsView";
 import CampaignsView from "./views/CampaignsView";
 import ReconciliationView from "./views/ReconciliationView";
 import PendingInstallationsView from "./views/PendingInstallationsView";
+import SimInventoryView from "./views/SimInventoryView";
 
 export default function App() {
   return (
@@ -53,6 +54,7 @@ function SessionGate() {
         <Route path="campaigns" element={<CampaignsView />} />
         <Route path="reconciliation" element={<ReconciliationView />} />
         <Route path="pending-installations" element={<PendingInstallationsView />} />
+        <Route path="sim-inventory" element={<SimInventoryView />} />
         <Route path="issues" element={<IssuesView />} />
         <Route path="*" element={<OverviewView />} />
       </Route>
