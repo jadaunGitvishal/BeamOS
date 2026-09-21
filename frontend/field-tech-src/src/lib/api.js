@@ -12,6 +12,16 @@
 
 const TOKEN_KEY = "ft_token";
 const USER_KEY = "ft_user";
+// Ref 75: which LoginScreen form was used to sign in - "technician" (phone+OTP,
+// the original/default) or "management" (email+password, reusing the dashboard
+// login). This is NOT a role read off the JWT: workspace_admin/workspace_viewer
+// are per-workspace rows (workspace_members.role), not a flat token field, so
+// there is no single "role" value to branch on. The login CHANNEL is the real,
+// stable signal instead - it matches how these accounts actually differ
+// (users.phone vs users.password_hash) and survives a page reload the same way
+// the token does. Missing (pre-Ref-75 stored session) defaults to "technician"
+// in getStoredMode() below, so an already-signed-in field tech sees zero change.
+const MODE_KEY = "ft_mode";
 
 export function getToken() {
   try {
@@ -30,10 +40,21 @@ export function getStoredUser() {
   }
 }
 
-export function setSession(token, user) {
+// "technician" | "management". Defaults to "technician" so a session stored
+// before Ref 75 (no ft_mode key yet) keeps behaving exactly as before.
+export function getStoredMode() {
+  try {
+    return localStorage.getItem(MODE_KEY) || "technician";
+  } catch {
+    return "technician";
+  }
+}
+
+export function setSession(token, user, mode = "technician") {
   try {
     localStorage.setItem(TOKEN_KEY, token);
     if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+    localStorage.setItem(MODE_KEY, mode);
   } catch {
     /* private-mode / storage disabled - the app still works for this session */
   }
@@ -53,6 +74,7 @@ export function clearSession() {
   try {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    localStorage.removeItem(MODE_KEY);
   } catch {
     /* ignore */
   }
