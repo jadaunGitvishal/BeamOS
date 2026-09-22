@@ -93,39 +93,60 @@ router.post(
   }),
 );
 
+// Ref 73: page-size ceiling shared by /plays and /export - a BI tool paging
+// through a large historical range gets capped requests either way, matching
+// the cap other list exports use elsewhere (docs/data-export.md).
+const PROOF_OF_PLAY_PAGE_CAP = 5000;
+
 // Query play logs
 router.get(
   "/plays",
   asyncHandler(async (req, res) => {
-    const { device_id, content_id, start, end, limit: lim } = req.query;
+    const { device_id, content_id, start, end, limit: lim, offset: off } = req.query;
     const scope = getWorkspaceDeviceFilter(req);
-    let sql = `SELECT pl.*, d.name as device_name
-    FROM play_logs pl
-    JOIN devices d ON pl.device_id = d.id
-    WHERE 1=1${scope.sql}`;
-    const params = [...scope.params];
+    let whereSql = `WHERE 1=1${scope.sql}`;
+    const whereParams = [...scope.params];
 
     if (device_id) {
-      sql += " AND pl.device_id = ?";
-      params.push(device_id);
+      whereSql += " AND pl.device_id = ?";
+      whereParams.push(device_id);
     }
     if (content_id) {
-      sql += " AND pl.content_id = ?";
-      params.push(content_id);
+      whereSql += " AND pl.content_id = ?";
+      whereParams.push(content_id);
     }
     if (start) {
-      sql += " AND pl.started_at >= ?";
-      params.push(Math.floor(new Date(start).getTime() / 1000));
+      whereSql += " AND pl.started_at >= ?";
+      whereParams.push(Math.floor(new Date(start).getTime() / 1000));
     }
     if (end) {
-      sql += " AND pl.started_at <= ?";
-      params.push(Math.floor(new Date(end).getTime() / 1000));
+      whereSql += " AND pl.started_at <= ?";
+      whereParams.push(Math.floor(new Date(end).getTime() / 1000));
     }
 
-    sql += " ORDER BY pl.started_at DESC LIMIT ?";
-    params.push(parseInt(lim) || 500);
+    // Ref 73: limit's default (500) and behavior when omitted are unchanged;
+    // offset is new (defaults to 0, also unchanged behavior). Both are now
+    // capped so a caller can't request an unbounded page.
+    const limit = Math.min(parseInt(lim) || 500, PROOF_OF_PLAY_PAGE_CAP);
+    const offset = Math.max(parseInt(off) || 0, 0);
 
-    res.json(await db.prepare(sql).all(...params));
+    const total = (
+      await db
+        .prepare(`SELECT COUNT(*) AS n FROM play_logs pl JOIN devices d ON pl.device_id = d.id ${whereSql}`)
+        .get(...whereParams)
+    ).n;
+
+    const rows = await db
+      .prepare(
+        `SELECT pl.*, d.name as device_name FROM play_logs pl JOIN devices d ON pl.device_id = d.id ${whereSql} ORDER BY pl.started_at DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...whereParams, limit, offset);
+
+    // X-Total-Count lets a paging caller know when it has everything, without
+    // changing the documented response body (still a bare array - see
+    // docs/openapi.yaml's /reports/plays).
+    res.setHeader("X-Total-Count", String(total));
+    res.json(rows);
   }),
 );
 
@@ -165,22 +186,46 @@ router.get(
 router.get(
   "/export",
   asyncHandler(async (req, res) => {
-    const { device_id, start, end } = req.query;
+    const { device_id, start, end, limit: lim, offset: off } = req.query;
     const startEpoch = start ? Math.floor(new Date(start).getTime() / 1000) : 0;
     const endEpoch = end
       ? Math.floor(new Date(end + "T23:59:59").getTime() / 1000)
       : Math.floor(Date.now() / 1000);
 
     const scope = getWorkspaceDeviceFilter(req);
-    let sql = `SELECT pl.*, d.name as device_name FROM play_logs pl JOIN devices d ON pl.device_id = d.id WHERE pl.started_at >= ? AND pl.started_at <= ?${scope.sql}`;
-    const params = [startEpoch, endEpoch, ...scope.params];
+    let whereSql = `WHERE pl.started_at >= ? AND pl.started_at <= ?${scope.sql}`;
+    const whereParams = [startEpoch, endEpoch, ...scope.params];
     if (device_id) {
-      sql += " AND pl.device_id = ?";
-      params.push(device_id);
+      whereSql += " AND pl.device_id = ?";
+      whereParams.push(device_id);
     }
-    sql += " ORDER BY pl.started_at ASC";
+
+    // Ref 73: pagination is OPT-IN via limit/offset. Omitting BOTH (as the
+    // desktop Reports page's CSV/XLSX/PDF download always does -
+    // frontend/js/views/reports.js never sends either) preserves the exact
+    // pre-existing behavior: every row in the date range, unbounded. A caller
+    // that sends either one (e.g. a BI tool paging JSON) gets a capped page.
+    const paginated = lim !== undefined || off !== undefined;
+    const limit = paginated ? Math.min(parseInt(lim) || PROOF_OF_PLAY_PAGE_CAP, PROOF_OF_PLAY_PAGE_CAP) : null;
+    const offset = paginated ? Math.max(parseInt(off) || 0, 0) : 0;
+
+    const total = (
+      await db
+        .prepare(`SELECT COUNT(*) AS n FROM play_logs pl JOIN devices d ON pl.device_id = d.id ${whereSql}`)
+        .get(...whereParams)
+    ).n;
+
+    let sql = `SELECT pl.*, d.name as device_name FROM play_logs pl JOIN devices d ON pl.device_id = d.id ${whereSql} ORDER BY pl.started_at ASC`;
+    const params = [...whereParams];
+    if (paginated) {
+      sql += " LIMIT ? OFFSET ?";
+      params.push(limit, offset);
+    }
 
     const rows = await db.prepare(sql).all(...params);
+    // Same additive header as /plays - present regardless of format, since
+    // headers are independent of the CSV/XLSX/PDF/JSON body.
+    res.setHeader("X-Total-Count", String(total));
 
     const format = ["csv", "xlsx", "pdf", "json"].includes(req.query.format)
       ? req.query.format
@@ -194,7 +239,10 @@ router.get(
     });
 
     if (format === "json") {
-      res.json({ columns: headers, rows: dataRows });
+      // total/limit/offset are additive fields alongside the existing
+      // columns/rows contract (docs/data-export.md) - an existing consumer
+      // reading only .columns/.rows is unaffected.
+      res.json({ columns: headers, rows: dataRows, total, limit, offset });
       return;
     }
 

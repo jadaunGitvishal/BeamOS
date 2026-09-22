@@ -205,6 +205,12 @@ app.use(
   cors({
     origin: corsOriginCheck,
     credentials: true,
+    // Ref 73: X-Total-Count (GET /api/reports/plays and /export's pagination
+    // total) is a custom response header - browsers hide it from JS `fetch()`
+    // reads unless explicitly exposed. Native HTTP clients (Power BI, Tableau,
+    // curl) already see every header regardless; this only matters for a
+    // browser-based caller.
+    exposedHeaders: ["X-Total-Count"],
   }),
 );
 // Stripe webhook needs raw body (before express.json parses it)
