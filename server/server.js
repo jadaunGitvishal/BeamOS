@@ -925,6 +925,10 @@ async function boot() {
   const { startOutageEscalations } = require("./services/outage-escalation");
   startOutageEscalations();
 
+  // Ref 58: ticket response-time SLA escalation emails (ticket breached -> alert workspace admins once, ever)
+  const { startTicketEscalations } = require("./services/ticket-escalation");
+  startTicketEscalations();
+
   // Start alert service
   const { startAlertService } = require("./services/alerts");
   startAlertService(io);

@@ -386,6 +386,13 @@ module.exports = {
   // Lowered via env only for tests.
   outageEscalationIntervalMs:
     parseInt(process.env.OUTAGE_ESCALATION_INTERVAL_MS) || 15 * 60 * 1000,
+  // Ref 58: ticket response-time SLA escalation emails (services/ticket-escalation.js).
+  // Sweeps OPEN/IN_PROGRESS tickets for response_status='breached' (lib/ticket-sla.js)
+  // and emails the workspace_admin(s) once per ticket, ever (ticket_escalations table
+  // dedupes on ticket_id). Same cadence as outage-escalation - lowered via env only
+  // for tests.
+  ticketEscalationIntervalMs:
+    parseInt(process.env.TICKET_ESCALATION_INTERVAL_MS) || 15 * 60 * 1000,
   // Ref 52: warranty-expiry alert sweep (services/warranty-alert.js). Same
   // shape as outage-escalation's interval - the condition is date-based (no
   // minute-level resolution needed), so this can run far less often than the
