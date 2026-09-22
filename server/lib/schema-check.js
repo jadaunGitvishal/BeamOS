@@ -25,6 +25,7 @@ const REQUIRED_TABLES = [
   'device_network_usage', // Ref 44: daily SIM/network data-usage aggregates
   'entra_service_principals', // Ref 9: Entra ID Service Principal client_id -> workspace+scope
   'sim_inventory', // Ref 65: physical SIM stock ledger (in_stock/assigned/active/retired)
+  'ticket_escalations', // Ref 58: ticket response-time SLA breach escalation dedup
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
@@ -64,6 +65,12 @@ const REQUIRED_COLUMNS = [
   // it can be added regardless of existing rows.
   ['tickets', 'auto_source', "ALTER TABLE tickets ADD COLUMN auto_source VARCHAR(50) NULL"],
   ['tickets', 'source_outage_start', "ALTER TABLE tickets ADD COLUMN source_outage_start BIGINT NULL, ADD UNIQUE KEY uq_tickets_source_outage (device_id, source_outage_start)"],
+  // Ref 58: proactive/reactive/emergency ticket category label. Both the
+  // create route and sla-breach-ticket.js's auto-create INSERT always list
+  // this column now, so an un-migrated DB would fail every ticket write until
+  // repaired. Defaults to 'reactive' (a human reported it) for any existing
+  // row, which is the honest read for tickets created before this column existed.
+  ['tickets', 'ticket_category', "ALTER TABLE tickets ADD COLUMN ticket_category VARCHAR(50) NOT NULL DEFAULT 'reactive'"],
   // Step 5 Stage A: per-outage root-cause hint. The recorder
   // (services/outage-history.js) writes it on every new row; NULL means the row
   // predates this column. Nullable, no default.

@@ -50,6 +50,7 @@ db.exec(`
     owner_category TEXT NOT NULL DEFAULT 'unassigned',
     status TEXT NOT NULL DEFAULT 'open',
     priority TEXT NOT NULL DEFAULT 'medium',
+    ticket_category TEXT NOT NULL DEFAULT 'reactive',
     created_by TEXT,
     auto_source TEXT,
     source_outage_start INTEGER,
@@ -171,6 +172,7 @@ test('workspace_editor can create a ticket; defaults + activity_log row', async 
   assert.equal(t.status, 'open');
   assert.equal(t.priority, 'medium');
   assert.equal(t.owner_category, 'unassigned');
+  assert.equal(t.ticket_category, 'reactive', 'Ref 58: manual tickets default to reactive');
   assert.equal(t.device_id, null);
   assert.equal(t.created_by, 'u-editor');
   assert.equal(t.created_by_email, 'editor@t.test');
@@ -197,6 +199,7 @@ test('create validation: missing title, bad enum values, unknown + cross-workspa
   assert.equal((await call('POST', tix('ws-a'), T.editor, { title: '   ' })).status, 400);
   assert.equal((await call('POST', tix('ws-a'), T.editor, { title: 'x', priority: 'urgent' })).status, 400);
   assert.equal((await call('POST', tix('ws-a'), T.editor, { title: 'x', owner_category: 'nobody' })).status, 400);
+  assert.equal((await call('POST', tix('ws-a'), T.editor, { title: 'x', ticket_category: 'urgent' })).status, 400);
   assert.equal((await call('POST', tix('ws-a'), T.editor, { title: 'x', device_id: 'dev-missing' })).status, 404);
   // device belongs to ws-b, not ws-a
   assert.equal((await call('POST', tix('ws-a'), T.editor, { title: 'x', device_id: 'dev-b1' })).status, 400);
@@ -314,6 +317,46 @@ test('GET list: filters by status / priority / owner_category, newest first', as
   assert.deepEqual(platform.map((t) => t.title).sort(), ['one', 'three']);
 
   assert.equal((await call('GET', `${tix('ws-f')}?status=bogus`, T.orgOwner)).status, 400);
+});
+
+// ===================== Ref 58 — ticket_category (proactive/reactive/emergency) =====================
+
+test('create can explicitly set ticket_category to emergency', async () => {
+  const r = await call('POST', tix('ws-a'), T.editor, { title: 'fire alarm tripped', ticket_category: 'emergency' });
+  assert.equal(r.status, 201);
+  const t = await r.json();
+  assert.equal(t.ticket_category, 'emergency');
+});
+
+test('PATCH can escalate an existing ticket to emergency and back', async () => {
+  const t = await (await call('POST', tix('ws-a'), T.editor, { title: 'category patch me' })).json();
+  assert.equal(t.ticket_category, 'reactive');
+  const url = `${tix('ws-a')}/${t.id}`;
+
+  let u = await (await call('PATCH', url, T.editor, { ticket_category: 'emergency' })).json();
+  assert.equal(u.ticket_category, 'emergency');
+
+  u = await (await call('PATCH', url, T.editor, { ticket_category: 'reactive' })).json();
+  assert.equal(u.ticket_category, 'reactive');
+
+  assert.equal((await call('PATCH', url, T.editor, { ticket_category: 'bogus' })).status, 400);
+});
+
+test('GET list: filters by ticket_category', async () => {
+  db.prepare("INSERT INTO workspaces (id,organization_id,name) VALUES ('ws-cat','org-a','WS Cat')").run();
+  db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-cat','u-editor','workspace_editor')").run();
+  const mk = (body) => call('POST', tix('ws-cat'), T.editor, body);
+  await mk({ title: 'r1' });
+  await mk({ title: 'e1', ticket_category: 'emergency' });
+  await mk({ title: 'p1', ticket_category: 'proactive' });
+
+  const emergency = await (await call('GET', `${tix('ws-cat')}?ticket_category=emergency`, T.editor)).json();
+  assert.deepEqual(emergency.map((t) => t.title), ['e1']);
+
+  const reactive = await (await call('GET', `${tix('ws-cat')}?ticket_category=reactive`, T.editor)).json();
+  assert.deepEqual(reactive.map((t) => t.title), ['r1']);
+
+  assert.equal((await call('GET', `${tix('ws-cat')}?ticket_category=bogus`, T.editor)).status, 400);
 });
 
 // ===================== Phase 4 Stage C — response-time SLA =====================

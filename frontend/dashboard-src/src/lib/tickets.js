@@ -5,6 +5,12 @@
 export const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 export const PRIORITY_COLOR = { high: "var(--bad)", medium: "var(--warn)", low: "var(--ink3)" };
 
+// Ref 58: proactive (system found it first) / reactive (a human filed it,
+// the default) / emergency (manual override, independent of source or
+// priority). Separate axis from priority - a badge, not a sort key.
+export const CATEGORY_LABEL = { proactive: "Proactive", reactive: "Reactive", emergency: "Emergency" };
+export const CATEGORY_COLOR = { proactive: "var(--ink3)", reactive: "var(--ink3)", emergency: "var(--bad)" };
+
 export const RESPONSE_STATUS = {
   breached: { label: "Breached", color: "var(--bad)" },
   due_today: { label: "Due today", color: "var(--warn)" },

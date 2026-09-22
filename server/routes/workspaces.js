@@ -630,6 +630,13 @@ router.patch(
 const TICKET_OWNER_CATEGORIES = ["customer_it", "store_staff", "platform", "hardware", "unassigned"];
 const TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"];
 const TICKET_PRIORITIES = ["low", "medium", "high"];
+// Ref 58: 'reactive' (default - a human filed it) | 'proactive' (the system
+// found it first - sla-breach-ticket.js always sets this on auto-create) |
+// 'emergency' (a manual override any creator/editor can set on ANY ticket,
+// independent of auto_source - a proactive ticket can still be escalated to
+// emergency by a human). Independent of priority, which drives the
+// response-time SLA clock (lib/ticket-sla.js).
+const TICKET_CATEGORIES = ["reactive", "proactive", "emergency"];
 const TICKET_TITLE_MAX = 255;
 const TICKET_DESC_MAX = 10000;
 // Entering one of these stamps resolved_at; leaving it (back to open/in_progress) clears it.
@@ -656,6 +663,8 @@ function ticketRow(t, nowSec = Math.floor(Date.now() / 1000)) {
     owner_category: t.owner_category,
     status: t.status,
     priority: t.priority,
+    // Ref 58: proactive / reactive / emergency label, independent of priority.
+    ticket_category: t.ticket_category,
     created_by: t.created_by,
     created_by_email: t.created_by_email ?? null,
     // Phase 4 Stage B: auto_source is null for hand-made tickets, 'sla_breach'
@@ -728,6 +737,13 @@ router.post(
     if (!TICKET_PRIORITIES.includes(priority)) {
       return res.status(400).json({ error: `priority must be one of: ${TICKET_PRIORITIES.join(", ")}` });
     }
+    // Ref 58: manual tickets default to 'reactive' (a human filed it); the
+    // creator may explicitly set 'emergency' (or 'proactive') at create time.
+    const ticketCategory =
+      req.body?.ticket_category === undefined ? "reactive" : String(req.body.ticket_category);
+    if (!TICKET_CATEGORIES.includes(ticketCategory)) {
+      return res.status(400).json({ error: `ticket_category must be one of: ${TICKET_CATEGORIES.join(", ")}` });
+    }
 
     let deviceId = req.body?.device_id;
     if (deviceId === undefined || deviceId === null || deviceId === "") {
@@ -744,15 +760,15 @@ router.post(
     const id = crypto.randomUUID();
     await db
       .prepare(
-        `INSERT INTO tickets (id, workspace_id, device_id, title, description, owner_category, status, priority, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+        `INSERT INTO tickets (id, workspace_id, device_id, title, description, owner_category, status, priority, ticket_category, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
       )
-      .run(id, ws.id, deviceId, title, description, ownerCategory, priority, req.user.id);
+      .run(id, ws.id, deviceId, title, description, ownerCategory, priority, ticketCategory, req.user.id);
 
     logActivity(
       req.user.id,
       "ticket_created",
-      `workspace: ${ws.name} (${ws.id}), ticket: ${title}, priority: ${priority}, owner: ${ownerCategory}` +
+      `workspace: ${ws.name} (${ws.id}), ticket: ${title}, priority: ${priority}, owner: ${ownerCategory}, category: ${ticketCategory}` +
         (deviceId ? `, device: ${deviceId}` : ""),
       deviceId,
       getClientIp(req),
@@ -793,6 +809,13 @@ router.get(
     if (req.query.owner_category !== undefined) {
       filters.push("t.owner_category = ?");
       params.push(String(req.query.owner_category));
+    }
+    if (req.query.ticket_category !== undefined) {
+      if (!TICKET_CATEGORIES.includes(req.query.ticket_category)) {
+        return res.status(400).json({ error: `ticket_category filter must be one of: ${TICKET_CATEGORIES.join(", ")}` });
+      }
+      filters.push("t.ticket_category = ?");
+      params.push(req.query.ticket_category);
     }
 
     const rows = await db
@@ -857,9 +880,11 @@ router.patch(
       .get(req.params.ticketId, ws.id);
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-    const sawKey = ["status", "owner_category", "priority"].some((k) => req.body?.[k] !== undefined);
+    const sawKey = ["status", "owner_category", "priority", "ticket_category"].some(
+      (k) => req.body?.[k] !== undefined,
+    );
     if (!sawKey) {
-      return res.status(400).json({ error: "Send at least one of: status, owner_category, priority" });
+      return res.status(400).json({ error: "Send at least one of: status, owner_category, priority, ticket_category" });
     }
 
     const updates = [];
@@ -901,6 +926,20 @@ router.patch(
         updates.push("priority = ?");
         values.push(p);
         changed.push(`priority: ${ticket.priority} -> ${p}`);
+      }
+    }
+    // Ref 58: a human can override ANY ticket's category, regardless of how it
+    // was created - e.g. escalating a proactive (auto-created) ticket to
+    // emergency.
+    if (req.body?.ticket_category !== undefined) {
+      const tc = String(req.body.ticket_category);
+      if (!TICKET_CATEGORIES.includes(tc)) {
+        return res.status(400).json({ error: `ticket_category must be one of: ${TICKET_CATEGORIES.join(", ")}` });
+      }
+      if (tc !== ticket.ticket_category) {
+        updates.push("ticket_category = ?");
+        values.push(tc);
+        changed.push(`category: ${ticket.ticket_category} -> ${tc}`);
       }
     }
 

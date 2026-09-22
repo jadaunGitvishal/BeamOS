@@ -45,6 +45,7 @@ db.exec(`
     id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, device_id TEXT,
     title TEXT NOT NULL, description TEXT, owner_category TEXT NOT NULL DEFAULT 'unassigned',
     status TEXT NOT NULL DEFAULT 'open', priority TEXT NOT NULL DEFAULT 'medium',
+    ticket_category TEXT NOT NULL DEFAULT 'reactive',
     created_by TEXT, auto_source TEXT, source_outage_start INTEGER,
     created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, resolved_at INTEGER,
     UNIQUE (device_id, source_outage_start)
@@ -95,6 +96,7 @@ test('first tick: one ticket for the breach, correct auto-generated fields', asy
   assert.equal(t.status, 'open');
   assert.equal(t.priority, 'high');
   assert.equal(t.owner_category, 'unassigned');
+  assert.equal(t.ticket_category, 'proactive', 'Ref 58: auto-created tickets are always proactive');
   assert.equal(t.created_by, null, 'system-generated: created_by is NULL');
   assert.equal(t.auto_source, 'sla_breach');
   assert.equal(t.source_outage_start, NOW - 9 * H);

@@ -83,10 +83,14 @@ async function autoCreateBreachTickets(dbh, outages, { nowSec, thresholdSec, sin
     ).map((r) => `${r.device_id} ${r.source_outage_start}`),
   );
 
+  // ticket_category is always 'proactive' here - the system found this before
+  // anyone complained. Ref 58: a human can still override it to 'emergency'
+  // later via the PATCH route; the sweep never touches ticket_category again
+  // once set.
   const insert = dbh.prepare(
     `INSERT INTO tickets
-       (id, workspace_id, device_id, title, description, owner_category, status, priority, created_by, auto_source, source_outage_start)
-     VALUES (?, ?, ?, ?, ?, 'unassigned', 'open', 'high', NULL, ?, ?)`,
+       (id, workspace_id, device_id, title, description, owner_category, status, priority, ticket_category, created_by, auto_source, source_outage_start)
+     VALUES (?, ?, ?, ?, ?, 'unassigned', 'open', 'high', 'proactive', NULL, ?, ?)`,
   );
 
   for (const o of breaches) {

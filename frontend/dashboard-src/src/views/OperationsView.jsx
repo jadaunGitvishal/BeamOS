@@ -5,7 +5,14 @@ import { useClock } from "../hooks/useClock";
 import { useToast } from "../hooks/useToast";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, formatDuration } from "../lib/format";
-import { PRIORITY_COLOR, RESPONSE_STATUS, CAUSE_LABELS, rankOpenTickets } from "../lib/tickets";
+import {
+  PRIORITY_COLOR,
+  RESPONSE_STATUS,
+  CAUSE_LABELS,
+  CATEGORY_LABEL,
+  CATEGORY_COLOR,
+  rankOpenTickets,
+} from "../lib/tickets";
 import StatTile from "../components/StatTile";
 
 // Phase 4 Stage D — the Operations page. Pulls the ticket list (Stage A) and the
@@ -22,6 +29,7 @@ const OWNER_LABELS = {
   unassigned: "Unassigned",
 };
 const OWNER_OPTIONS = ["unassigned", "customer_it", "store_staff", "platform", "hardware"];
+const CATEGORY_OPTIONS = ["reactive", "proactive", "emergency"];
 const STATUS_OPTIONS = ["open", "in_progress", "resolved", "closed"];
 const STATUS_LABELS = { open: "Open", in_progress: "In progress", resolved: "Resolved", closed: "Closed" };
 const ownerLabel = (c) => OWNER_LABELS[c] || c;
@@ -61,7 +69,7 @@ export default function OperationsView() {
     me?.current_workspace_role === "workspace_editor";
 
   const [editing, setEditing] = useState(null); // ticket id whose inline editor is open
-  const [draft, setDraft] = useState({ status: "", owner_category: "" });
+  const [draft, setDraft] = useState({ status: "", owner_category: "", ticket_category: "" });
   const [saving, setSaving] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -130,12 +138,13 @@ export default function OperationsView() {
 
   function startEdit(t) {
     setEditing(t.id);
-    setDraft({ status: t.status, owner_category: t.owner_category });
+    setDraft({ status: t.status, owner_category: t.owner_category, ticket_category: t.ticket_category });
   }
   async function save(t) {
     const body = {};
     if (draft.status !== t.status) body.status = draft.status;
     if (draft.owner_category !== t.owner_category) body.owner_category = draft.owner_category;
+    if (draft.ticket_category !== t.ticket_category) body.ticket_category = draft.ticket_category;
     if (!Object.keys(body).length) {
       setEditing(null);
       return;
@@ -239,6 +248,7 @@ export default function OperationsView() {
                   <th>Ticket</th>
                   <th>Owner</th>
                   <th>Priority</th>
+                  <th>Category</th>
                   <th>Response</th>
                   <th className="r">Open for</th>
                   {canWrite ? <th className="r">Action</th> : null}
@@ -271,6 +281,9 @@ export default function OperationsView() {
                         <td style={{ color: PRIORITY_COLOR[t.priority], fontWeight: 500, textTransform: "capitalize" }}>
                           {t.priority}
                         </td>
+                        <td style={{ color: CATEGORY_COLOR[t.ticket_category] || "var(--ink3)", fontWeight: t.ticket_category === "emergency" ? 600 : 400 }}>
+                          {CATEGORY_LABEL[t.ticket_category] || t.ticket_category}
+                        </td>
                         <td style={{ color: rs ? rs.color : "var(--ink3)", fontWeight: 500 }}>
                           {rs ? rs.label : "—"}
                         </td>
@@ -285,7 +298,7 @@ export default function OperationsView() {
                       </tr>
                       {isEditing ? (
                         <tr>
-                          <td colSpan={canWrite ? 6 : 5} style={{ background: "var(--line-soft)" }}>
+                          <td colSpan={canWrite ? 7 : 6} style={{ background: "var(--line-soft)" }}>
                             <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                               <label style={{ fontSize: 12, color: "var(--ink2)" }}>
                                 Status{" "}
@@ -309,6 +322,19 @@ export default function OperationsView() {
                                   {OWNER_OPTIONS.map((o) => (
                                     <option key={o} value={o}>
                                       {ownerLabel(o)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label style={{ fontSize: 12, color: "var(--ink2)" }}>
+                                Category{" "}
+                                <select
+                                  value={draft.ticket_category}
+                                  onChange={(e) => setDraft((d) => ({ ...d, ticket_category: e.target.value }))}
+                                >
+                                  {CATEGORY_OPTIONS.map((c) => (
+                                    <option key={c} value={c}>
+                                      {CATEGORY_LABEL[c] || c}
                                     </option>
                                   ))}
                                 </select>

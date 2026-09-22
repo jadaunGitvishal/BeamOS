@@ -8,7 +8,7 @@ import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, cCol, periodWindow, periodLabel, isoDateOnly, formatDuration } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
-import { PRIORITY_COLOR, RESPONSE_STATUS, causeHint, rankOpenTickets } from "../lib/tickets";
+import { PRIORITY_COLOR, RESPONSE_STATUS, CATEGORY_LABEL, CATEGORY_COLOR, causeHint, rankOpenTickets } from "../lib/tickets";
 import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
 import { deliveryColor } from "../lib/campaigns";
 import StatTile from "../components/StatTile";
@@ -427,6 +427,11 @@ export default function OverviewView() {
                       </div>
                       <div className="paq-meta">
                         <span style={{ color: PRIORITY_COLOR[t.priority], textTransform: "capitalize" }}>{t.priority}</span>
+                        {t.ticket_category && t.ticket_category !== "reactive" ? (
+                          <span style={{ color: CATEGORY_COLOR[t.ticket_category] || "var(--ink3)" }}>
+                            {CATEGORY_LABEL[t.ticket_category] || t.ticket_category}
+                          </span>
+                        ) : null}
                         {rs ? <span style={{ color: rs.color }}>{rs.label}</span> : null}
                       </div>
                     </div>

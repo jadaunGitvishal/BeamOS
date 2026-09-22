@@ -1170,6 +1170,24 @@ CREATE TABLE IF NOT EXISTS outage_escalations (
 -- Serves the sweep's "already escalated?" prefilter.
 CREATE INDEX idx_outage_escalations_start ON outage_escalations(outage_start);
 
+-- Ref 58: ticket response-time SLA escalation anti-spam mechanism (see
+-- services/ticket-escalation.js), the SAME claim-before-send pattern as
+-- outage_escalations directly above, but keyed on ticket_id ALONE (not a
+-- per-incident tuple): a ticket is escalated at most ONCE, ever - unlike an
+-- outage, a ticket has no natural "new incident" moment to key a second
+-- escalation off (reopening/reassigning it doesn't reset its SLA clock,
+-- which runs from created_at - lib/ticket-sla.js). recipient_email is the
+-- comma-joined list of workspace_admins actually mailed (informational; the
+-- unique key is the real guard).
+CREATE TABLE IF NOT EXISTS ticket_escalations (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ticket_id        VARCHAR(64) NOT NULL,
+    workspace_id     VARCHAR(64) NOT NULL,
+    alerted_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    recipient_email  VARCHAR(500) NOT NULL,
+    UNIQUE KEY uq_ticket_escalations_ticket (ticket_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Ref 52: 30-day-prior warranty-expiry alert anti-spam mechanism (see
 -- services/warranty-alert.js), the SAME claim-before-send pattern as
 -- outage_escalations directly above: a row matching (device_id,
@@ -1302,6 +1320,16 @@ CREATE INDEX idx_sim_inventory_device ON sim_inventory(assigned_device_id);
 --                        outage_escalations uses. Manual tickets leave
 --                        source_outage_start NULL and MySQL does not collide
 --                        NULLs, so any number of them coexist.
+--
+-- ticket_category (Ref 58): 'proactive' | 'reactive' | 'emergency', plain
+-- VARCHAR not ENUM - same philosophy as owner_category. Default 'reactive'
+-- (a human reported it). sla-breach-ticket.js's auto-create path always sets
+-- 'proactive' (the system found it before anyone complained) regardless of
+-- auto_source's own default. 'emergency' is a manual override any
+-- creator/editor can set on ANY ticket, auto-created or not - it is not tied
+-- to auto_source, so a proactive ticket can still be escalated to emergency
+-- by a human. Independent of priority: priority drives the response-time SLA
+-- clock (lib/ticket-sla.js), ticket_category is a separate label.
 CREATE TABLE IF NOT EXISTS tickets (
     id                  VARCHAR(64) PRIMARY KEY,
     workspace_id        VARCHAR(64) NOT NULL,
@@ -1311,6 +1339,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     owner_category      VARCHAR(50) NOT NULL DEFAULT 'unassigned',
     status              VARCHAR(50) NOT NULL DEFAULT 'open',
     priority            VARCHAR(50) NOT NULL DEFAULT 'medium',
+    ticket_category     VARCHAR(50) NOT NULL DEFAULT 'reactive',
     created_by          VARCHAR(64),
     auto_source         VARCHAR(50),
     source_outage_start BIGINT,
