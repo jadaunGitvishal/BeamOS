@@ -55,6 +55,17 @@ tags:
     description: Interactive kiosk pages and their render output.
   - name: pip
     description: Picture-in-picture / overlay push (image or web on top of the running playlist).
+  - name: sla
+    description: >-
+      Workspace-scoped SLA/uptime/reconciliation reporting (Ref 73: opened to the token
+      door read-only, for BI-tool consumption alongside the reports/devices surface above).
+  - name: tickets
+    description: >-
+      Read-only operational tickets (Ref 73). Ticket creation and every mutation stay on
+      the dashboard session (POST/PATCH /api/workspaces/{id}/tickets, JWT-only) — this
+      surface is GET-only by construction, for reporting/BI consumption.
+  - name: sim-inventory
+    description: Physical SIM stock ledger (in_stock / assigned / active / retired).
 
 security:
   - ApiToken: []
@@ -1547,16 +1558,28 @@ paths:
     get:
       tags: [reports]
       summary: Query play logs
-      description: 'Requires scope: read.'
+      description: |
+        Requires scope: read.
+
+        Ref 73: `limit` defaults to 500 (unchanged) and is capped at 5000; `offset`
+        defaults to 0. The response header `X-Total-Count` carries the full matching
+        row count (independent of the page returned), so a paging caller knows when
+        it has everything.
       x-required-scope: read
       parameters:
         - { name: device_id, in: query, schema: { type: string } }
         - { name: content_id, in: query, schema: { type: string } }
         - { name: start, in: query, schema: { type: string } }
         - { name: end, in: query, schema: { type: string } }
-        - { name: limit, in: query, schema: { type: integer } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
       responses:
-        '200': { description: Array of play-log rows. }
+        '200':
+          description: Array of play-log rows.
+          headers:
+            X-Total-Count:
+              schema: { type: integer }
+              description: Full matching row count, independent of the returned page.
   /reports/summary:
     get:
       tags: [reports]
@@ -1574,19 +1597,44 @@ paths:
   /reports/export:
     get:
       tags: [reports]
-      summary: Export proof-of-play as CSV
-      description: 'Requires scope: read.'
+      summary: Export proof-of-play (csv/xlsx/pdf/json)
+      description: |
+        Requires scope: read. `format` accepts csv (default), xlsx, pdf, json - see
+        docs/data-export.md for the shared column/row convention.
+
+        Ref 73: pagination is OPT-IN via `limit`/`offset`. Omitting BOTH returns every
+        row in the date range, unbounded — the pre-existing, unchanged behavior the
+        dashboard's own CSV/XLSX/PDF download relies on. Supplying either one caps the
+        page at 5000 rows. `X-Total-Count` (header, every format) carries the full
+        matching count; `format=json` additionally echoes `total`/`limit`/`offset` in
+        the body (`limit` is `null` when pagination was not requested).
       x-required-scope: read
       parameters:
         - { name: device_id, in: query, schema: { type: string } }
         - { name: start, in: query, schema: { type: string } }
         - { name: end, in: query, schema: { type: string } }
+        - { name: format, in: query, schema: { type: string, enum: [csv, xlsx, pdf, json] } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
       responses:
         '200':
-          description: CSV file.
+          description: CSV file by default; xlsx/pdf/json with ?format=.
+          headers:
+            X-Total-Count:
+              schema: { type: integer }
+              description: Full matching row count, independent of the returned page.
           content:
             text/csv:
               schema: { type: string }
+            application/json:
+              schema:
+                type: object
+                properties:
+                  columns: { type: array, items: { type: string } }
+                  rows: { type: array, items: { type: array } }
+                  total: { type: integer }
+                  limit: { type: integer, nullable: true }
+                  offset: { type: integer }
   /reports/uptime:
     get:
       tags: [reports]
@@ -1808,3 +1856,144 @@ paths:
         - $ref: '#/components/parameters/Offset'
       responses:
         '200': { description: Array of activity entries. }
+
+  # ------------------------------------------------------------------- sla
+  # Ref 73: routes/dashboard-reports.js is entirely GET, so the whole router
+  # moved to the token door (config/api-surface.js) - not just the two named
+  # below. availability/uptime/reconciliation/pending-installations are real
+  # and reachable too; only sla-overview/sla-trend are documented in depth
+  # here since those are what this Ref named, but see docs/data-export.md's
+  # BI guide for the full list with example requests.
+  /dashboard/reports/sla-overview:
+    get:
+      tags: [sla]
+      summary: SLA compliance overview (uptime %, MTTR, live breaches) per device
+      description: |
+        Requires scope: read. Workspace-scoped (the token's bound workspace).
+        SLA targets (uptime %, escalation threshold) are platform-wide, not
+        per-workspace. `start`/`end` bound the uptime %/MTTR window; live
+        breaches are always evaluated as of now.
+      x-required-scope: read
+      parameters:
+        - { name: start, in: query, schema: { type: string }, description: 'YYYY-MM-DD, defaults to 30 days ago.' }
+        - { name: end, in: query, schema: { type: string }, description: 'YYYY-MM-DD, defaults to today.' }
+      responses:
+        '200':
+          description: '{ target, period, devices: [...], summary: { devices_total, devices_compliant, devices_breach, devices_unknown, live_breaches } }.'
+  /dashboard/reports/sla-trend:
+    get:
+      tags: [sla]
+      summary: Daily average fleet uptime % trend
+      description: 'Requires scope: read. Workspace-scoped.'
+      x-required-scope: read
+      parameters:
+        - { name: days, in: query, schema: { type: integer }, description: '1-365, default 30.' }
+      responses:
+        '200': { description: 'Array of { day, avg_uptime_pct }, oldest first.' }
+  /dashboard/reports/availability:
+    get:
+      tags: [sla]
+      summary: Per-device uptime % (device_usage_daily rollup)
+      description: 'Requires scope: read. Workspace-scoped.'
+      x-required-scope: read
+      parameters:
+        - { name: start, in: query, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+      responses:
+        '200': { description: Array of per-device availability rows. }
+  /dashboard/reports/uptime:
+    get:
+      tags: [sla]
+      summary: Per-device uptime % (heartbeat-count estimate)
+      description: |
+        Requires scope: read. Workspace-scoped. A second, independently-computed
+        uptime estimate from the same telemetry heartbeat data /reports/uptime
+        uses - kept distinct rather than unified (see the route's own comment).
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, schema: { type: string } }
+        - { name: start, in: query, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+      responses:
+        '200': { description: Array of per-device uptime rows. }
+  /dashboard/reports/reconciliation:
+    get:
+      tags: [sla]
+      summary: Live device reconciliation (ghost / stale devices)
+      description: 'Requires scope: read. Workspace-scoped.'
+      x-required-scope: read
+      responses:
+        '200': { description: 'Reconciliation status + counts, computed live.' }
+  /dashboard/reports/pending-installations:
+    get:
+      tags: [sla]
+      summary: Registration codes generated but never activated (or activated-then-abandoned)
+      description: 'Requires scope: read. Workspace-scoped.'
+      x-required-scope: read
+      responses:
+        '200': { description: 'Pending-installation status, counts, and code lists.' }
+
+  # --------------------------------------------------------------- tickets
+  # Ref 73: read-only by construction (routes/tickets-readonly.js). Creating
+  # or updating a ticket stays on the JWT-only dashboard session
+  # (POST/PATCH /api/workspaces/{id}/tickets) - not part of this contract.
+  /tickets:
+    get:
+      tags: [tickets]
+      summary: List operational tickets in the token's bound workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, in_progress, resolved, closed] } }
+        - { name: priority, in: query, schema: { type: string, enum: [low, medium, high] } }
+        - { name: owner_category, in: query, schema: { type: string } }
+        - { name: ticket_category, in: query, schema: { type: string, enum: [reactive, proactive, emergency] } }
+      responses:
+        '200': { description: Array of ticket rows, newest first. }
+  /tickets/sla-summary:
+    get:
+      tags: [tickets]
+      summary: Response-time SLA rollup (Breached / Due today / Within SLA) for open tickets
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200': { description: '{ workspace_id, targets, counts, total_open }.' }
+  /tickets/{ticketId}:
+    get:
+      tags: [tickets]
+      summary: Get a single ticket
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: ticketId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Ticket object. }
+        '404': { description: Not found, or the ticket belongs to a different workspace. }
+
+  # ---------------------------------------------------------- sim-inventory
+  # Ref 73: only the GET routes are documented here (the read-only BI surface
+  # this Ref opened). POST/create and PATCH/status-lifecycle also exist on
+  # this router and ARE token-reachable, but only with write/full scope AND
+  # the token owner holding workspace_admin - see routes/sim-inventory.js.
+  /sim-inventory:
+    get:
+      tags: [sim-inventory]
+      summary: List SIM cards in the token's bound workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [in_stock, assigned, active, retired] } }
+        - { name: carrier, in: query, schema: { type: string } }
+      responses:
+        '200': { description: Array of SIM inventory rows. }
+  /sim-inventory/{id}:
+    get:
+      tags: [sim-inventory]
+      summary: Get a single SIM inventory record
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: SIM inventory object. }
+        '404': { description: Not found, or belongs to a different workspace. }

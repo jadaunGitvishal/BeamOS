@@ -64,8 +64,15 @@ Authenticate the same way as any other API call — a session JWT in the
 endpoints under token-reachable routers (`content`, `widgets`, `kiosk`,
 `layouts`, `playlists`, `schedules`, `walls`, `activity`, `reports` — see
 [`server/config/api-surface.js`](../server/config/api-surface.js)); the
-`dashboard/*` and `members` exports are JWT-only. No other parameter is
-required; `format` defaults to CSV.
+`dashboard/*` and `members` exports listed in the table above are JWT-only.
+No other parameter is required; `format` defaults to CSV.
+
+Ref 73 additionally opened the *separate* `dashboard/reports` router
+(SLA/uptime/reconciliation — not part of the 13-export table above, it has
+no `?format=`) to the token door, and added a NEW read-only ticket surface
+(`/api/tickets`) and SIM inventory (`/api/sim-inventory`). Those are
+documented in [docs/bi-integration.md](bi-integration.md), which also covers
+connecting Power BI/Tableau to this whole token-reachable surface end to end.
 
 ### Example — JSON
 
@@ -196,10 +203,17 @@ by a follow-up count. Nothing above is production data.
 - **Row caps.** The workspace-list exports carry a safety ceiling
   (`EXPORT_ROW_CAP` — 5 000 for widgets / kiosk / layouts / playlists /
   schedules / video-walls, 10 000 for content; `activity` also caps at 10 000).
-  These are not pagination — an export past the cap is silently truncated.
-  Realistic workspace sizes are far below either, but a very large tenant should
-  be aware. The `members` and `dashboard/*` exports have no cap (rosters and
-  per-content rollups are inherently small).
+  These are NOT pagination — an export past the cap is silently truncated, with
+  no way to fetch the rest. Realistic workspace sizes are far below either, but
+  a very large tenant should be aware. The `members` and `dashboard/*` exports
+  have no cap (rosters and per-content rollups are inherently small).
+  **`GET /api/reports/plays` and `/export` are the one exception** (Ref 73):
+  they have REAL `limit`/`offset` pagination plus an `X-Total-Count` response
+  header, so a large proof-of-play pull can be paged in full rather than
+  silently cut off — see [docs/bi-integration.md](bi-integration.md).
+  Omitting both params on `/export` still returns the full unbounded range for
+  the date filter (unchanged from before Ref 73), so the dashboard's own
+  CSV/XLSX/PDF download is unaffected.
 - **No streaming.** Every format is built fully in memory before the response is
   sent. Fine for thousands of rows; not designed for hundreds of thousands.
 - **Nested data is summarised, not exploded.** Layout zones become a count;
