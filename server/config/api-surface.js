@@ -27,6 +27,17 @@
 //   tenancy:      JWT-only router also runs resolveTenancy (acts on the caller's active
 //                 workspace). Routers without it target a workspace by URL/body param
 //                 and are gated per-handler (e.g. canAdminWorkspace).
+//
+// Granularity note (Ref 73): an entry moves its WHOLE router's module to the
+// token door - there's no per-route split at this layer. That's fine for a
+// router that's entirely GET (dashboard-reports.js) or whose writes are
+// already gated by both requireWorkspaceAdmin and tokenScopeGate's write/full
+// requirement (sim-inventory.js). It is NOT fine for a router mixing a narrow
+// read surface with broad privileged operations (routes/workspaces.js: org/
+// workspace admin, members, campaigns, regions, AND tickets) - moving that
+// whole file would hand a write-scope token far more than intended. For that
+// case the fix is a NEW, purpose-built, GET-only router (tickets-readonly.js)
+// that reuses the original's query/shape via a shared lib, not a wider door.
 
 const PUBLIC_ROUTERS = [
   { path: '/api/devices',     mod: './routes/devices' },
@@ -43,6 +54,27 @@ const PUBLIC_ROUTERS = [
   { path: '/api/activity',    mod: './routes/activity' },
   { path: '/api/kiosk',       mod: './routes/kiosk', renderBypass: true },
   { path: '/api/pip',         mod: './routes/pip' },
+  // Ref 73 (Power BI / Tableau / external-reader access): three read-only
+  // additions, each deliberately narrow rather than a whole privileged
+  // router moved wholesale:
+  //   - /api/dashboard/reports (routes/dashboard-reports.js) is ENTIRELY
+  //     GET - sla-overview/sla-trend/uptime/availability/reconciliation/
+  //     pending-installations, no writes exist in the file - so moving the
+  //     whole router is exactly as narrow as moving one route would be.
+  //   - /api/sim-inventory (routes/sim-inventory.js) DOES have POST/PATCH,
+  //     but they're already gated by requireWorkspaceAdmin AND now also by
+  //     tokenScopeGate (write/full scope) - a bare 'read' token cannot reach
+  //     them, matching this Ref's "never opened to a bare read token" bar.
+  //   - /api/tickets (routes/tickets-readonly.js) is a NEW, purpose-built
+  //     GET-only router - NOT the existing /api/workspaces ticket routes,
+  //     which stay JWT-only. /api/workspaces itself is far too broad a
+  //     surface (org/workspace admin, members, campaigns, regions...) to
+  //     ever go on the token door - see MUST_BE_PRIVATE in test/api.test.js.
+  //     tickets-readonly.js reuses the exact same query/shape as the JWT
+  //     routes (lib/ticket-query.js) so the two can't drift.
+  { path: '/api/dashboard/reports', mod: './routes/dashboard-reports' },
+  { path: '/api/sim-inventory',     mod: './routes/sim-inventory' },
+  { path: '/api/tickets',           mod: './routes/tickets-readonly' },
 ];
 
 const JWT_ONLY_ROUTERS = [
@@ -57,10 +89,6 @@ const JWT_ONLY_ROUTERS = [
   { path: '/api/organizations', mod: './routes/organizations' },
   { path: '/api/admin',       mod: './routes/admin' },
   { path: '/api/tokens',      mod: './routes/tokens',       tenancy: true },
-  // Ref 65: physical SIM stock ledger. A sibling of /api/workspaces, not one
-  // of the /api/dashboard/* group below (that group is read-only reporting;
-  // this one writes), so it gets its own top-level path.
-  { path: '/api/sim-inventory', mod: './routes/sim-inventory', tenancy: true },
   // Merged in from the standalone BeamOS-Dashboard app (read-only reporting:
   // Overview / Devices / Content delivery / Issues). Mounted under its own
   // /api/dashboard/* prefix rather than reusing /api/devices or /api/reports
@@ -71,11 +99,12 @@ const JWT_ONLY_ROUTERS = [
   // here; there's no additional role check because none of these routes
   // expose anything a viewer couldn't already piece together from the
   // devices/content/activity surfaces they already have read access to.
+  // (dashboard/reports moved to PUBLIC_ROUTERS - Ref 73 - since it's entirely
+  // GET; the other three stay JWT-only, not asked for by that Ref.)
   { path: '/api/dashboard/overview', mod: './routes/dashboard-overview', tenancy: true },
   { path: '/api/dashboard/content',  mod: './routes/dashboard-content',  tenancy: true },
   { path: '/api/dashboard/issues',   mod: './routes/dashboard-issues',   tenancy: true },
   { path: '/api/dashboard/devices',  mod: './routes/dashboard-devices',  tenancy: true },
-  { path: '/api/dashboard/reports',  mod: './routes/dashboard-reports',  tenancy: true },
 ];
 
 // #73: AGENCY_ROUTERS - capability-restricted ('agency' scope) surface. Mounted with

@@ -169,6 +169,10 @@ test('partition: the public token surface is exactly the reviewed set (snapshot 
     '/api/devices', '/api/content', '/api/folders', '/api/assignments', '/api/layouts',
     '/api/widgets', '/api/schedules', '/api/walls', '/api/reports', '/api/groups',
     '/api/playlists', '/api/activity', '/api/kiosk', '/api/pip',
+    // Ref 73: BI/analytics-tool read access — see config/api-surface.js's
+    // Granularity note for why these three specifically (and not a wider
+    // move of /api/workspaces, which stays private below).
+    '/api/dashboard/reports', '/api/sim-inventory', '/api/tickets',
   ].sort();
   assert.deepEqual(PUBLIC_ROUTERS.map(r => r.path).sort(), EXPECTED_PUBLIC);
 });

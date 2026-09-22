@@ -12,12 +12,17 @@ const { sanitizeCoords } = require("../lib/geo");
 const { isDuplicateKeyError } = require("../lib/outage-format");
 const { reverseGeocode } = require("../lib/reverse-geocode");
 const {
-  ticketResponseStatus,
-  ticketSlaDueAt,
-  ticketSlaTargetHours,
   ticketSlaTargets,
   summariseTicketSla,
 } = require("../lib/ticket-sla");
+const {
+  TICKET_OWNER_CATEGORIES,
+  TICKET_STATUSES,
+  TICKET_PRIORITIES,
+  TICKET_CATEGORIES,
+  TICKET_SELECT,
+  ticketRow,
+} = require("../lib/ticket-query");
 const { campaignStatus, todayStr } = require("../lib/campaign-status");
 const { computeCampaignDelivery } = require("../lib/campaign-delivery");
 const { logActivity, getClientIp } = require("../services/activity");
@@ -624,69 +629,14 @@ router.patch(
 // those same checks (they evaluate against the URL-param workspace, and this
 // router has no resolveTenancy). Every mutation also writes activity_log.
 
-// owner_category is a plain VARCHAR in the schema (see schema.sql tickets note);
-// this is the known set the API validates against today. Adding a value here is
-// a one-line change with no migration.
-const TICKET_OWNER_CATEGORIES = ["customer_it", "store_staff", "platform", "hardware", "unassigned"];
-const TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"];
-const TICKET_PRIORITIES = ["low", "medium", "high"];
-// Ref 58: 'reactive' (default - a human filed it) | 'proactive' (the system
-// found it first - sla-breach-ticket.js always sets this on auto-create) |
-// 'emergency' (a manual override any creator/editor can set on ANY ticket,
-// independent of auto_source - a proactive ticket can still be escalated to
-// emergency by a human). Independent of priority, which drives the
-// response-time SLA clock (lib/ticket-sla.js).
-const TICKET_CATEGORIES = ["reactive", "proactive", "emergency"];
+// owner_category/status/priority/ticket_category validation lists and the
+// TICKET_SELECT/ticketRow read-shaping now live in lib/ticket-query.js -
+// shared with routes/tickets-readonly.js (Ref 73's read-only public API-token
+// surface) so the two never drift into different shapes for the same data.
 const TICKET_TITLE_MAX = 255;
 const TICKET_DESC_MAX = 10000;
 // Entering one of these stamps resolved_at; leaving it (back to open/in_progress) clears it.
 const TICKET_DONE_STATUSES = new Set(["resolved", "closed"]);
-
-const TICKET_SELECT = `
-  SELECT t.*, u.email AS created_by_email, d.name AS device_name,
-         oh.likely_cause AS likely_cause
-  FROM tickets t
-  LEFT JOIN users u ON u.id = t.created_by
-  LEFT JOIN devices d ON d.id = t.device_id
-  LEFT JOIN outage_history oh
-    ON oh.device_id = t.device_id AND oh.started_at = t.source_outage_start
-`;
-
-function ticketRow(t, nowSec = Math.floor(Date.now() / 1000)) {
-  return {
-    id: t.id,
-    workspace_id: t.workspace_id,
-    device_id: t.device_id,
-    device_name: t.device_name ?? null,
-    title: t.title,
-    description: t.description ?? null,
-    owner_category: t.owner_category,
-    status: t.status,
-    priority: t.priority,
-    // Ref 58: proactive / reactive / emergency label, independent of priority.
-    ticket_category: t.ticket_category,
-    created_by: t.created_by,
-    created_by_email: t.created_by_email ?? null,
-    // Phase 4 Stage B: auto_source is null for hand-made tickets, 'sla_breach'
-    // for one the SLA monitor opened (created_by is null for those too).
-    auto_source: t.auto_source ?? null,
-    source_outage_start: t.source_outage_start ?? null,
-    // Step 5 Stage B: for an SLA-breach ticket, the root-cause hint recorded on
-    // the outage it was opened for (Step 5A). null for manual tickets (no
-    // outage) or when the outage row predates Step 5A; may be 'unknown'.
-    likely_cause: t.likely_cause ?? null,
-    created_at: t.created_at,
-    updated_at: t.updated_at,
-    resolved_at: t.resolved_at ?? null,
-    // Phase 4 Stage C: response-time SLA, computed on read. response_status is
-    // null for resolved/closed tickets (not "due" anything). sla_due_at /
-    // sla_target_hours are facts about the ticket's priority + age, populated
-    // regardless of status.
-    response_status: ticketResponseStatus(t, nowSec),
-    sla_due_at: ticketSlaDueAt(t),
-    sla_target_hours: ticketSlaTargetHours(t.priority),
-  };
-}
 
 // 404 unknown workspace, 403 unless caller is workspace_editor+ (or org/platform).
 // Stamps req.workspaceId for audit attribution (no resolveTenancy on this

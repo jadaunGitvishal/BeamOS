@@ -8,12 +8,14 @@ const { logActivity, getClientIp } = require("../services/activity");
 
 // Ref 65 — SIM inventory: a stock ledger for physical SIM cards, entirely
 // manual (no carrier API integration; status is admin/ops-set). Mounted at
-// /api/sim-inventory with tenancy:true (config/api-surface.js) — a sibling of
-// /api/workspaces, NOT one of the /api/dashboard/* routers, since those are
-// documented read-only reporting (see api-surface.js's comment on that
-// group) and this one writes. req.workspaceId comes from resolveTenancy, so
-// every route below is implicitly scoped to the caller's active workspace,
-// the same mechanism dashboard-devices.js's GET routes use.
+// /api/sim-inventory (config/api-surface.js). req.workspaceId comes from
+// resolveTenancy, so every route below is implicitly scoped to the caller's
+// active workspace, the same mechanism dashboard-devices.js's GET routes use.
+//
+// Ref 73: this router is on the PUBLIC (token-reachable) door. Its GETs need
+// only 'read' scope; POST/PATCH below are already gated by requireWorkspaceAdmin
+// AND now additionally by tokenScopeGate (write/full scope) - a bare 'read'
+// token cannot reach them.
 //
 // Read = any workspace member (tenancy alone gates it, same rationale as
 // dashboard-devices.js: nothing here exposes more than a viewer could already
