@@ -5,6 +5,9 @@ const { db } = require("../db/database");
 const { asyncHandler } = require("../lib/async-handler");
 const { requireWorkspaceAdmin } = require("../lib/permissions");
 const { logActivity, getClientIp } = require("../services/activity");
+// SIM_SELECT / simRow live in lib/sim-query.js so Ref 28's data-platform export
+// reuses this exact read shape (same split as lib/ticket-query.js).
+const { SIM_SELECT, simRow } = require("../lib/sim-query");
 
 // Ref 65 — SIM inventory: a stock ledger for physical SIM cards, entirely
 // manual (no carrier API integration; status is admin/ops-set). Mounted at
@@ -36,32 +39,6 @@ const ICCID_MAX = 64;
 const SERIAL_MAX = 128;
 const CARRIER_MAX = 100;
 const NOTES_MAX = 10000;
-
-const SIM_SELECT = `
-  SELECT s.*, d.name AS assigned_device_name, u.email AS created_by_email
-  FROM sim_inventory s
-  LEFT JOIN devices d ON d.id = s.assigned_device_id
-  LEFT JOIN users u ON u.id = s.created_by
-`;
-
-function simRow(s) {
-  return {
-    id: s.id,
-    workspace_id: s.workspace_id,
-    iccid: s.iccid,
-    serial_number: s.serial_number ?? null,
-    carrier: s.carrier ?? null,
-    status: s.status,
-    assigned_device_id: s.assigned_device_id ?? null,
-    assigned_device_name: s.assigned_device_name ?? null,
-    notes: s.notes ?? null,
-    created_by: s.created_by ?? null,
-    created_by_email: s.created_by_email ?? null,
-    created_at: s.created_at,
-    updated_at: s.updated_at,
-    status_changed_at: s.status_changed_at,
-  };
-}
 
 // Resolves + validates a device_id against the caller's active workspace.
 // Returns the device row, or null after sending the error response.

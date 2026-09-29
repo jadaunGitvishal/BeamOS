@@ -137,6 +137,23 @@ module.exports = {
   // ago out of the report; well short of the expiry so there is real time left to act.
   pendingInstallationGraceDays:
     parseInt(process.env.PENDING_INSTALLATION_GRACE_DAYS) || 3,
+  // Ref 28 (Extensibility & integrations - a separate item from the Android
+  // offline-resilience Ref 28): data-platform export (services/data-platform-export.js).
+  // Lands gzipped NDJSON per workspace per domain in an S3-compatible bucket for
+  // Snowflake / Databricks / dbt / Atlan. OFF unless explicitly "true" - most
+  // self-hosted instances have no data platform to feed. `endpoint` is only for
+  // non-AWS stores (MinIO, Cloudflare R2, ...); leave the access key pair unset on
+  // AWS to use the SDK's default credential chain (instance role, etc.).
+  dataPlatformExport: {
+    enabled: process.env.DATA_PLATFORM_EXPORT_ENABLED === 'true',
+    bucket: process.env.DATA_PLATFORM_S3_BUCKET || '',
+    prefix: process.env.DATA_PLATFORM_S3_PREFIX || 'beamos/',
+    region: process.env.DATA_PLATFORM_S3_REGION || 'us-east-1',
+    endpoint: process.env.DATA_PLATFORM_S3_ENDPOINT || '',
+    accessKeyId: process.env.DATA_PLATFORM_S3_ACCESS_KEY_ID || '',
+    secretAccessKey: process.env.DATA_PLATFORM_S3_SECRET_ACCESS_KEY || '',
+    intervalMin: parseInt(process.env.DATA_PLATFORM_EXPORT_INTERVAL_MIN) || 60,
+  },
   // SSL: drop your Cloudflare Origin cert + key in certs/ folder
   // or set env vars SSL_CERT and SSL_KEY to custom paths
   sslCert: process.env.SSL_CERT || path.join(certsDir, "cert.pem"),

@@ -923,6 +923,14 @@ async function boot() {
   const { startPendingInstallationReport } = require("./services/pending-installation-report");
   startPendingInstallationReport();
 
+  // Ref 28 (Extensibility & integrations; unrelated to the Android offline-resilience
+  // Ref 28): land gzipped NDJSON in an S3-compatible bucket for Snowflake / Databricks /
+  // dbt / Atlan. Opt-in only - the interval never starts unless explicitly enabled.
+  if (config.dataPlatformExport.enabled) {
+    const { startDataPlatformExport } = require("./services/data-platform-export");
+    startDataPlatformExport();
+  }
+
   // Ref 51: long-term outage recorder (feeds SLA MTTR beyond status-log retention)
   const { startOutageHistoryRecorder } = require("./services/outage-history");
   startOutageHistoryRecorder();
