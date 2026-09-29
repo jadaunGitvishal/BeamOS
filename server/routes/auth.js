@@ -31,6 +31,9 @@ const { asyncHandler } = require("../lib/async-handler");
 // field-tech OTP login looks up (lib/field-phone.js is the single source).
 const { normalizePhone } = require("../lib/field-phone");
 const { isDuplicateKeyError } = require("../lib/outage-format");
+// Ref 5: OIDC id_token validation for the tenant-restricted Microsoft login - the
+// same jose/JWKS trust anchors Ref 9's Service Principal auth already uses.
+const { verifyEntraIdToken } = require("../middleware/entraToken");
 
 // Phase 2.1: find or create the user's default org+workspace. Returns the
 // workspace_id to embed in the JWT. Idempotent: if the user already has
@@ -583,21 +586,72 @@ async function verifyGoogleToken(credential) {
 
 // ==================== Microsoft OAuth ====================
 
+// Ref 5: two identity paths, selected by config.entraTenantId (the same single
+// global tenant Ref 9 already trusts - see config.js):
+//   - UNSET: the original flow, byte-for-byte - the client's Graph access token is
+//     used to fetch /me. No tenant restriction, no MFA check (a "common"-authority
+//     login accepts any Microsoft account, exactly as before Ref 5).
+//   - SET: the client must send the OIDC id_token MSAL's loginPopup already returns.
+//     It is verified locally (signature against the tenant JWKS, exact issuer, tid,
+//     aud === microsoftClientId, RS256 - middleware/entraToken.js
+//     verifyEntraIdToken) and identity comes from its verified claims - no Graph
+//     round-trip. An access_token alone is refused: it can't be validated here
+//     (Graph access tokens are audience-bound to Graph, not to us), which is the
+//     whole gap this Ref closes.
+// Everything after identity resolution (find/create user, provider-link rules,
+// org bootstrap, session JWT, signup emails) is shared and unchanged.
 router.post("/microsoft", async (req, res) => {
-  const { access_token } = req.body;
-  if (!access_token)
+  const { access_token, id_token } = req.body;
+  const tenantRestricted = !!config.entraTenantId;
+  if (tenantRestricted) {
+    if (!id_token)
+      return res.status(400).json({
+        error:
+          "This server only accepts Microsoft sign-in from its configured organization tenant and requires an OpenID Connect id_token (an access_token alone is not accepted). Reload the page and sign in again.",
+      });
+  } else if (!access_token)
     return res.status(400).json({ error: "Microsoft access token required" });
 
   try {
-    // Use the access token to get user profile from Microsoft Graph
-    const profile = await getMicrosoftProfile(access_token);
-    if (!profile || (!profile.mail && !profile.userPrincipalName)) {
-      return res.status(401).json({ error: "Could not get Microsoft profile" });
-    }
+    let email, name, microsoftId;
+    if (tenantRestricted) {
+      let identity;
+      try {
+        identity = await verifyEntraIdToken(id_token);
+      } catch (err) {
+        // Ref 17: a rejected SSO attempt (wrong tenant, forged, MFA missing) is an
+        // authentication failure worth auditing. No verified email exists yet.
+        logFailedLogin("(microsoft sso)", getClientIp(req), `id_token rejected: ${err.message}`);
+        return res.status(401).json({
+          error:
+            err.code === "ENTRA_MFA_REQUIRED"
+              ? err.message
+              : "Microsoft sign-in rejected: " + err.message,
+        });
+      }
+      // Prefer whichever verified address an existing account already uses (the
+      // pre-Ref-5 flow keyed accounts on Graph's mail || userPrincipalName, which
+      // correspond to the `email` / `preferred_username` claims respectively).
+      email = identity.emails[0];
+      for (const candidate of identity.emails) {
+        if (await db.prepare("SELECT id FROM users WHERE email = ?").get(candidate)) {
+          email = candidate;
+          break;
+        }
+      }
+      name = identity.name;
+      microsoftId = identity.oid; // == Graph user `id`, what provider_id always held
+    } else {
+      // Use the access token to get user profile from Microsoft Graph
+      const profile = await getMicrosoftProfile(access_token);
+      if (!profile || (!profile.mail && !profile.userPrincipalName)) {
+        return res.status(401).json({ error: "Could not get Microsoft profile" });
+      }
 
-    const email = (profile.mail || profile.userPrincipalName).toLowerCase();
-    const name = profile.displayName || "";
-    const microsoftId = profile.id;
+      email = (profile.mail || profile.userPrincipalName).toLowerCase();
+      name = profile.displayName || "";
+      microsoftId = profile.id;
+    }
 
     // Find or create user
     let user = await db.prepare("SELECT * FROM users WHERE email = ?").get(email);
@@ -1089,7 +1143,11 @@ router.get("/config", asyncHandler(async (req, res) => {
     googleClientId: config.googleClientId,
     microsoftEnabled: !!config.microsoftClientId,
     microsoftClientId: config.microsoftClientId,
-    microsoftTenantId: config.microsoftTenantId,
+    // Ref 5: when the login is tenant-restricted, point the frontend's MSAL
+    // authority at that tenant too, so users from other tenants are stopped at
+    // Microsoft's own sign-in page rather than only by our server-side check.
+    // Unset -> unchanged (MICROSOFT_TENANT_ID, default "common").
+    microsoftTenantId: config.entraTenantId || config.microsoftTenantId,
     localEnabled: true,
     needsSetup: userCount === 0,
     registration_enabled: !config.disableRegistration || userCount === 0,

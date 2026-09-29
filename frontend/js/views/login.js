@@ -404,7 +404,12 @@ function setupHandlers(config, isSetup) {
             const res = await fetch("/api/auth/microsoft", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ access_token: loginResponse.accessToken }),
+              // Ref 5: id_token is required by the server when it's restricted
+              // to one Entra tenant (ENTRA_TENANT_ID); ignored otherwise.
+              body: JSON.stringify({
+                access_token: loginResponse.accessToken,
+                id_token: loginResponse.idToken,
+              }),
             });
             const data = await res.json();
             if (res.ok) onAuthSuccess(data);

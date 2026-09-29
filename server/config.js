@@ -204,6 +204,16 @@ module.exports = {
   // against an unset tenant/audience).
   entraTenantId: process.env.ENTRA_TENANT_ID || "",
   entraApiClientId: process.env.ENTRA_API_CLIENT_ID || "",
+  // Ref 5: entraTenantId ALSO gates the human "Sign in with Microsoft" login
+  // (routes/auth.js POST /microsoft). Set -> that login requires a real OIDC
+  // id_token signed by THIS tenant with aud === microsoftClientId (validated by
+  // middleware/entraToken.js verifyEntraIdToken). Empty -> the pre-Ref-5
+  // access-token + Graph /me flow runs completely unchanged (no tenant restriction).
+  // entraRequireMfa additionally requires the id_token's `amr` claim to contain
+  // "mfa" (only meaningful when entraTenantId is set). Default off.
+  entraRequireMfa: ["true", "1"].includes(
+    String(process.env.ENTRA_REQUIRE_MFA || "").toLowerCase(),
+  ),
   // Self-hosted mode: if true, first user gets enterprise plan and no billing
   // selfHosted: process.env.SELF_HOSTED === "true",
   selfHosted: true, // Permanently hardcoded for BeamOS - not dependent on env var

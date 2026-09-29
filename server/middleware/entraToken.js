@@ -138,6 +138,101 @@ async function verifyEntraAccessToken(raw, overrides = {}) {
   return { clientId, payload };
 }
 
+// Ref 5: the SAME trust anchors (getJwks() / entraIssuer() - the configured tenant's
+// JWKS and exact v2.0 issuer) applied to a DIFFERENT token: a human user's OIDC
+// id_token from "Sign in with Microsoft" (routes/auth.js POST /microsoft), instead of
+// a Service Principal's app-only access token. Differences from
+// verifyEntraAccessToken above, and why:
+//   - audience is config.microsoftClientId (the SPA login app registration the
+//     frontend's MSAL popup uses), not entraApiClientId. Per Microsoft's ID token
+//     claims reference, an id_token's `aud` is always the signing-in app's client ID.
+//   - idtyp === 'app' is REJECTED here (the inverse of the check above): an app-only
+//     token minted for the same client ID must never pass as a user sign-in.
+//   - `tid` is re-checked against the configured tenant even though the exact-issuer
+//     check already implies it - defense in depth, and the claim Microsoft's docs
+//     name as THE tenant-restriction signal ("use the GUID portion ... to restrict
+//     the set of tenants that can sign in").
+//   - `oid` (immutable per-tenant user object ID, == Graph's user `id`, which is what
+//     the pre-Ref-5 access-token flow already stored in users.provider_id) is required.
+//
+// MFA (config.entraRequireMfa): checks `amr` includes "mfa". Why `amr` and not `acr`:
+// Microsoft's ID token claims reference (learn.microsoft.com/entra/identity-platform/
+// id-token-claims-reference) documents NO `acr` claim for v2.0 id_tokens at all, and
+// the optional claims reference (.../optional-claims-reference, "v2.0-specific
+// optional claims set") lists `amr` as a v2.0 optional claim - "always included in
+// v1.0 tokens, but not included in v2.0 tokens unless requested" - with the
+// documented rule "The multipleauthn and mfa values are emitted only when the user
+// has completed MFA" (e.g. Authenticator push -> rsa, ngcmfa, mfa; SMS -> sms, mfa;
+// password alone -> pwd). So the app registration MUST add `amr` as an ID-token
+// optional claim for this check to ever pass; a token with NO amr claim at all is
+// failed closed with an error that says exactly that (a misconfiguration), distinct
+// from an amr that is present but lacks "mfa" (the user genuinely skipped MFA).
+// NOTE: tested only against self-signed tokens shaped per those docs - no real
+// tenant was available; see docs/sso-scim-integration.md.
+//
+// `overrides` exists for the same reason, and with the same production guarantee, as
+// verifyEntraAccessToken's (see test/microsoft-sso.test.js).
+async function verifyEntraIdToken(raw, overrides = {}) {
+  const jwks = overrides.jwks || getJwks();
+  const tenantId = overrides.tenantId || config.entraTenantId;
+  const issuer = overrides.issuer || entraIssuer();
+  const audience = overrides.audience || config.microsoftClientId;
+  const requireMfa = overrides.requireMfa !== undefined ? overrides.requireMfa : config.entraRequireMfa;
+  if (!audience) {
+    // Never call jwtVerify with an undefined audience - jose would then skip the
+    // audience check entirely, accepting an id_token minted for ANY app in the tenant.
+    throw new Error('MICROSOFT_CLIENT_ID is not configured; cannot validate the id_token audience');
+  }
+  const { payload } = await jwtVerify(raw, jwks, {
+    issuer,
+    audience,
+    algorithms: ['RS256'],
+    clockTolerance: 30,
+  });
+
+  if (payload.tid !== tenantId) {
+    throw new Error('token was not issued for the configured Entra tenant');
+  }
+  if (payload.idtyp === 'app') {
+    throw new Error('token is an app-only token, not a user sign-in');
+  }
+  if (!payload.oid) {
+    throw new Error('token carries no oid (user object ID) claim');
+  }
+  // `email` is present only if the app registration requests it (optional claim /
+  // email scope); `preferred_username` (UPN for work accounts) is present with the
+  // `profile` scope MSAL always requests. Both are returned, email first - the
+  // caller matches whichever one an existing account already uses.
+  const emails = [...new Set(
+    [payload.email, payload.preferred_username]
+      .filter((v) => typeof v === 'string' && v.includes('@'))
+      .map((v) => v.toLowerCase()),
+  )];
+  if (!emails.length) {
+    throw new Error('token carries no email or preferred_username claim');
+  }
+
+  if (requireMfa) {
+    if (!Array.isArray(payload.amr)) {
+      const err = new Error(
+        'Multi-factor authentication is required, but the Microsoft sign-in token carries no "amr" claim. ' +
+        'An administrator must add "amr" as an ID-token optional claim on the app registration.',
+      );
+      err.code = 'ENTRA_MFA_REQUIRED';
+      throw err;
+    }
+    if (!payload.amr.includes('mfa')) {
+      const err = new Error(
+        'Multi-factor authentication is required. Sign in again and complete MFA with your Microsoft account.',
+      );
+      err.code = 'ENTRA_MFA_REQUIRED';
+      throw err;
+    }
+  }
+
+  return { oid: payload.oid, emails, name: typeof payload.name === 'string' ? payload.name : '', payload };
+}
+
 // Throttle last_used_at writes exactly like apiToken.js's touchLastUsed.
 const lastUsedThrottle = new Map();
 async function touchLastUsed(id) {
@@ -194,5 +289,6 @@ module.exports = {
   looksLikeEntraToken,
   entraTokenAuth,
   verifyEntraAccessToken, // exported for direct unit-testing (see test/entra-token.test.js)
+  verifyEntraIdToken, // Ref 5: SSO login id_token validation (routes/auth.js POST /microsoft)
   entraConfigured,
 };
