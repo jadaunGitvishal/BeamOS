@@ -42,7 +42,7 @@ db.exec(`
   CREATE TABLE users (
     id TEXT PRIMARY KEY, email TEXT, name TEXT, role TEXT DEFAULT 'user',
     auth_provider TEXT DEFAULT 'local', avatar_url TEXT, plan_id TEXT DEFAULT 'free',
-    email_alerts INTEGER DEFAULT 1, must_change_password INTEGER DEFAULT 0
+    email_alerts INTEGER DEFAULT 1, must_change_password INTEGER DEFAULT 0, deactivated_at INTEGER
   );
   CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT, name TEXT);
   CREATE TABLE workspace_members (

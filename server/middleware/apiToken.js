@@ -55,10 +55,17 @@ const apiTokenAuth = asyncHandler(async function apiTokenAuth(req, res, next) {
   if (!row || row.revoked_at) {
     return res.status(401).json({ error: 'Invalid or revoked API token' });
   }
-  const user = await db.prepare(
-    'SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?'
-  ).get(row.user_id);
-  if (!user) return res.status(401).json({ error: 'Token owner not found' });
+  const { deactivated_at, ...user } = await db.prepare(
+    'SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password, deactivated_at FROM users WHERE id = ?'
+  ).get(row.user_id) || {};
+  if (!user.id) return res.status(401).json({ error: 'Token owner not found' });
+  // Ref 5/8: a token is NOT an independent workspace-level credential here - it acts
+  // AS its owner (req.user = owner below; resolveTenancy derives the workspace role
+  // from the OWNER's membership), and this handler already gates on owner state
+  // (must_change_password, next). So an offboarded (deactivated) owner's st_ token
+  // must die with their sessions, or "deactivate in the IdP" would leave every API
+  // token they ever minted working. Mirrors "Token owner not found" for a deleted owner.
+  if (deactivated_at) return res.status(401).json({ error: 'Token owner account is deactivated' });
   if (user.must_change_password) {
     return res.status(403).json({ error: 'Token owner must change their password before using the API' });
   }

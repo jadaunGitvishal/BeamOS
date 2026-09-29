@@ -37,7 +37,10 @@ db.exec(`
   CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT);
   CREATE TABLE play_logs (id INTEGER PRIMARY KEY, started_at INTEGER);
   CREATE TABLE device_usage_daily (day TEXT);
+  CREATE TABLE users (id TEXT PRIMARY KEY, deactivated_at INTEGER);
 `);
+// Ref 5/8: the /dashboard handshake now checks users.deactivated_at.
+db.prepare('INSERT INTO users (id) VALUES (?)').run('u-1');
 db.prepare('INSERT INTO devices (id, workspace_id) VALUES (?, ?)').run('dev-1', 'ws-1');
 db.prepare('INSERT INTO workspaces (id, name) VALUES (?, ?)').run('ws-1', 'WS One');
 const dbModulePath = require.resolve('../db/database');

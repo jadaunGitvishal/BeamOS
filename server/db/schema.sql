@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS users (
     trial_plan      VARCHAR(50) DEFAULT 'pro',
     last_login      BIGINT,
     must_change_password TINYINT(1) NOT NULL DEFAULT 0,
+    -- Ref 5/8: account deactivation (NULL = active). Checked on EVERY request by
+    -- middleware/auth.js requireAuth (and every other path that trusts a user's
+    -- identity), so setting it revokes existing sessions instantly, not at next
+    -- login. Written by SCIM (routes/scim.js) via lib/user-deactivation.js.
+    deactivated_at  BIGINT,
     welcome_email_sent_at    BIGINT,
     activation_nudge_sent_at BIGINT,
     created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),

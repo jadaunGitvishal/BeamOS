@@ -71,8 +71,15 @@ const requireAuth = asyncHandler(async function requireAuth(req, res, next) {
   // accepts it. If this check is removed, password-alone yields a working session and
   // TOTP is bypassed. (Covered by the mfa_pending bite-test.)
   if (decoded.mfa_pending) return res.status(401).json({ error: 'mfa_required' });
-  const user = await db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?').get(decoded.id);
-  if (!user) return res.status(401).json({ error: 'User not found' });
+  const { deactivated_at, ...user } = await db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password, deactivated_at FROM users WHERE id = ?').get(decoded.id) || {};
+  if (!user.id) return res.status(401).json({ error: 'User not found' });
+  // Ref 5/8: deactivation is checked HERE, on every request, against the row just
+  // read - not baked into the JWT - so a deactivated user's still-unexpired session
+  // dies on its very next request (the RFP's "IdP revokes -> access ends"
+  // requirement), not at its 7-day expiry or next login. Same place and style as
+  // the must_change_password gate below. deactivated_at is stripped from req.user
+  // so its shape is unchanged for every downstream handler.
+  if (deactivated_at) return res.status(401).json({ error: 'account_deactivated' });
   req.user = user;
   // Tenancy middleware reads this on the resolver step.
   req.jwtWorkspaceId = decoded.current_workspace_id || null;
@@ -89,6 +96,12 @@ const requireAuth = asyncHandler(async function requireAuth(req, res, next) {
   next();
 });
 
+// Ref 5/8: shared message for LOGIN routes refusing a deactivated account (password,
+// TOTP verify, Google, Microsoft, field-tech OTP). Only ever returned AFTER the
+// caller has proven possession of a valid credential, so it's not an account-
+// enumeration oracle. Session requests get the terse 'account_deactivated' above.
+const ACCOUNT_DEACTIVATED_MESSAGE = 'This account has been deactivated. Contact your administrator.';
+
 // Optional auth - sets req.user if token present, continues either way
 const optionalAuth = asyncHandler(async function optionalAuth(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -97,9 +110,15 @@ const optionalAuth = asyncHandler(async function optionalAuth(req, res, next) {
       const token = authHeader.split(' ')[1];
       const decoded = verifyToken(token);
       if (decoded.mfa_pending) return next(); // #100: pre-TOTP token is not a session
-      req.user = decoded.recovery
-        ? recoveryUser(decoded)
-        : await db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id FROM users WHERE id = ?').get(decoded.id);
+      let user;
+      if (decoded.recovery) user = recoveryUser(decoded);
+      else {
+        const { deactivated_at, ...row } = await db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, deactivated_at FROM users WHERE id = ?').get(decoded.id) || {};
+        // Ref 5/8: a deactivated user's token is treated as no token at all.
+        if (!row.id || deactivated_at) return next();
+        user = row;
+      }
+      req.user = user;
       req.jwtWorkspaceId = decoded.current_workspace_id || null;
     } catch (err) {
       // Token invalid, continue without user
@@ -165,4 +184,4 @@ function requireSuperAdmin(req, res, next) {
 // Preferred alias for new code.
 const requirePlatformAdmin = requireSuperAdmin;
 
-module.exports = { generateToken, generateMfaPendingToken, verifyToken, requireAuth, optionalAuth, requireAdmin, requireSuperAdmin, requirePlatformAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES, PLATFORM_STAFF, ELEVATED_ROLES };
+module.exports = { ACCOUNT_DEACTIVATED_MESSAGE, generateToken, generateMfaPendingToken, verifyToken, requireAuth, optionalAuth, requireAdmin, requireSuperAdmin, requirePlatformAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES, PLATFORM_STAFF, ELEVATED_ROLES };

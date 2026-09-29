@@ -33,8 +33,12 @@ async function requesterCanAccessContent(req, content) {
       algorithms: ['HS256'],
     });
     if (!decoded || !decoded.id) return false;
-    if (decoded.role === 'platform_admin') return true;
     const { db } = require('../db/database');
+    // Ref 5/8: this JWT check bypasses requireAuth, so apply the same per-request
+    // deactivation rule (a deactivated user's token unlocks nothing here).
+    const u = await db.prepare('SELECT deactivated_at FROM users WHERE id = ?').get(decoded.id);
+    if (!u || u.deactivated_at) return false;
+    if (decoded.role === 'platform_admin') return true;
     return !!(await db
       .prepare(
         'SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?',

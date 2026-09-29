@@ -268,10 +268,19 @@ const entraTokenAuth = asyncHandler(async function entraTokenAuth(req, res, next
   // api_tokens already uses (acts as its owning user_id), so workspace-role
   // resolution (resolveTenancy, keyed on req.user.id + req.jwtWorkspaceId) works
   // completely unmodified. Platform powers stripped exactly like a token.
-  const user = await db.prepare(
-    'SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?',
-  ).get(row.created_by);
-  if (!user) return res.status(401).json({ error: 'Service Principal registrant not found' });
+  const { deactivated_at, ...user } = await db.prepare(
+    'SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password, deactivated_at FROM users WHERE id = ?',
+  ).get(row.created_by) || {};
+  if (!user.id) return res.status(401).json({ error: 'Service Principal registrant not found' });
+  // Ref 5/8: the SP's credential lives in Entra, but its AUTHORITY here is borrowed
+  // from created_by - req.user becomes that admin and resolveTenancy grants their
+  // workspace role. A deactivated registrant would otherwise keep lending a live
+  // workspace role to an external caller, so this fails closed exactly like a
+  // DELETED registrant already does (the line above). Operational consequence
+  // (documented in docs/sso-scim-integration.md): offboarding the admin who
+  // registered an SP stops that integration until it is re-registered under an
+  // active admin (POST /api/admin/entra-service-principals).
+  if (deactivated_at) return res.status(401).json({ error: 'Service Principal registrant account is deactivated' });
 
   req.user = { ...user, role: 'user' };
   delete req.headers['x-workspace-id'];

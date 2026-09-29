@@ -18,7 +18,7 @@ db.exec(`
   CREATE TABLE users (
     id TEXT PRIMARY KEY, email TEXT, name TEXT, role TEXT DEFAULT 'user',
     auth_provider TEXT, avatar_url TEXT, plan_id TEXT, email_alerts INTEGER,
-    must_change_password INTEGER NOT NULL DEFAULT 0
+    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
   );
   CREATE TABLE api_tokens (
     id TEXT PRIMARY KEY, token_hash TEXT, prefix TEXT, name TEXT, user_id TEXT,

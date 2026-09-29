@@ -41,7 +41,7 @@ db.exec(`
     subscription_status TEXT DEFAULT 'active',
     subscription_ends INTEGER,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')), deactivated_at INTEGER
   );
   CREATE TABLE workspaces (
     id TEXT PRIMARY KEY,

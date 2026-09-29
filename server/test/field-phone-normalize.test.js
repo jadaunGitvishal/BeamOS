@@ -65,7 +65,7 @@ db.exec(`
     password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
     role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
     must_change_password INTEGER NOT NULL DEFAULT 0, phone TEXT UNIQUE, last_login INTEGER,
-    updated_at INTEGER DEFAULT 0
+    updated_at INTEGER DEFAULT 0, deactivated_at INTEGER
   );
   CREATE TABLE workspace_members (
     id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT, user_id TEXT, role TEXT, joined_at INTEGER DEFAULT 0

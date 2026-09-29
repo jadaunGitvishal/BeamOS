@@ -27,7 +27,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../db/database');
-const { generateToken } = require('../middleware/auth');
+const { generateToken, ACCOUNT_DEACTIVATED_MESSAGE } = require('../middleware/auth');
 const { asyncHandler } = require('../lib/async-handler');
 // Single source of truth for phone canonicalization — the SAME function the
 // phone-write path (routes/auth.js PUT /me) uses before storing, so a number
@@ -44,7 +44,7 @@ const DUMMY_OTP_CODE = '000999';
 
 async function findUserByPhone(phone) {
   return db
-    .prepare('SELECT id, email, name, role, phone FROM users WHERE phone = ?')
+    .prepare('SELECT id, email, name, role, phone, deactivated_at FROM users WHERE phone = ?')
     .get(phone);
 }
 
@@ -87,6 +87,12 @@ router.post('/verify-otp', asyncHandler(async (req, res) => {
       null,
     ).catch(() => {});
     return res.status(401).json({ error: 'Invalid or expired code' });
+  }
+  // Ref 5/8: a deactivated technician can't obtain a session (checked after the
+  // code, so it isn't a phone-enumeration oracle). Their EXISTING field-tech JWT is
+  // an ordinary session token and already dies in requireAuth.
+  if (user.deactivated_at) {
+    return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
   }
 
   // Reuse the existing session mechanism. Embed the user's first workspace (if

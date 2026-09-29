@@ -24,7 +24,7 @@ db.exec(`
     password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
     role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
     must_change_password INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')), deactivated_at INTEGER
   );
   CREATE TABLE organizations (
     id TEXT PRIMARY KEY, name TEXT NOT NULL,

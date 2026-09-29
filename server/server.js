@@ -566,9 +566,13 @@ app.get(
       const decoded = verifyToken(token);
       const { db } = require("./db/database");
       user = await db
-        .prepare("SELECT id, role FROM users WHERE id = ?")
+        .prepare("SELECT id, role, deactivated_at FROM users WHERE id = ?")
         .get(decoded.id);
       if (!user) return res.status(401).json({ error: "User not found" });
+      // Ref 5/8: this route verifies the JWT itself (bypassing requireAuth), so it
+      // must apply the same per-request deactivation check.
+      if (user.deactivated_at)
+        return res.status(401).json({ error: "account_deactivated" });
     } catch {
       return res.status(401).json({ error: "Invalid or expired token" });
     }

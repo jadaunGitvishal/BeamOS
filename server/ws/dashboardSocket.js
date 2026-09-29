@@ -35,17 +35,29 @@ module.exports = function setupDashboardSocket(io) {
   const dashboardNs = io.of('/dashboard');
   const deviceNs = io.of('/device');
 
-  dashboardNs.use((socket, next) => {
+  dashboardNs.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('Authentication required'));
+    let decoded;
     try {
-      const decoded = verifyToken(token);
-      socket.userId = decoded.id;
-      socket.userRole = decoded.role;
-      next();
+      decoded = verifyToken(token);
     } catch {
-      next(new Error('Invalid token'));
+      return next(new Error('Invalid token'));
     }
+    // Ref 5/8: refuse a deactivated user's socket at handshake. An ALREADY-connected
+    // socket is closed at deactivation time instead (lib/user-deactivation.js ->
+    // disconnectUserSockets), since this middleware only runs once per connection.
+    if (!decoded.recovery) {
+      try {
+        const u = await db.prepare('SELECT deactivated_at FROM users WHERE id = ?').get(decoded.id);
+        if (!u || u.deactivated_at) return next(new Error('Invalid token'));
+      } catch {
+        return next(new Error('Authentication unavailable'));
+      }
+    }
+    socket.userId = decoded.id;
+    socket.userRole = decoded.role;
+    next();
   });
 
   dashboardNs.on('connection', async (socket) => {

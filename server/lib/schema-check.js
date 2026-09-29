@@ -38,6 +38,11 @@ const REQUIRED_COLUMNS = [
   // on the ALTER (MySQL never collides NULLs, so it applies regardless of rows).
   ['users', 'phone', "ALTER TABLE users ADD COLUMN phone VARCHAR(32) NULL, ADD UNIQUE KEY uniq_users_phone (phone)"],
   ['users', 'plan_id', "ALTER TABLE users ADD COLUMN plan_id VARCHAR(64) DEFAULT 'free'"],
+  // Ref 5/8: user deactivation. requireAuth SELECTs this on every request (same
+  // gate-on-every-request position as must_change_password above), so an
+  // un-migrated DB would 500 every authed request. Nullable, no default - NULL =
+  // active, so every pre-existing account stays active after the repair.
+  ['users', 'deactivated_at', "ALTER TABLE users ADD COLUMN deactivated_at BIGINT NULL"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
   // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)
   // always lists these columns now, so an un-migrated DB would fail every telemetry

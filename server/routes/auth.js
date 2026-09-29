@@ -15,6 +15,7 @@ const {
   isPlatformRole,
   isPlatformStaff,
   PLATFORM_ROLES,
+  ACCOUNT_DEACTIVATED_MESSAGE,
 } = require("../middleware/auth");
 const { resolveTenancy } = require("../lib/tenancy");
 const { logActivity, getClientIp } = require("../services/activity");
@@ -228,6 +229,12 @@ router.post("/login", asyncHandler(async (req, res) => {
   if (!bcrypt.compareSync(password, user.password_hash)) {
     logFailedLogin(email, getClientIp(req), "Wrong password");
     return res.status(401).json({ error: "Invalid email or password" });
+  }
+  // Ref 5/8: refuse a deactivated account - only AFTER the password checked out, so
+  // this distinct message is never an account-enumeration oracle.
+  if (user.deactivated_at) {
+    logFailedLogin(email, getClientIp(req), "Account deactivated");
+    return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
   }
 
   // #100: password OK. If TOTP is enabled, DON'T issue a session yet - return an
@@ -448,6 +455,9 @@ router.post("/totp/verify", asyncHandler(async (req, res) => {
   const user = await db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id);
   if (!user || !user.totp_enabled)
     return res.status(401).json({ error: "invalid mfa token" });
+  // Ref 5/8: deactivated between the password step and this one.
+  if (user.deactivated_at)
+    return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
 
   // TOTP first (with intra-window replay block via totp_last_step), then a recovery code.
   const step = totp.verifyCode(
@@ -495,6 +505,12 @@ router.post("/google", async (req, res) => {
       .prepare("SELECT * FROM users WHERE email = ?")
       .get(email.toLowerCase());
     const isNewUser = !user;
+    // Ref 5/8: a verified IdP identity still can't sign in to a deactivated account -
+    // checked before the provider-link UPDATE below so a refused login mutates nothing.
+    if (user && user.deactivated_at) {
+      logFailedLogin(user.email, getClientIp(req), "Account deactivated");
+      return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
+    }
 
     if (!user) {
       if (!await canRegister()) {
@@ -656,6 +672,12 @@ router.post("/microsoft", async (req, res) => {
     // Find or create user
     let user = await db.prepare("SELECT * FROM users WHERE email = ?").get(email);
     const isNewUser = !user;
+    // Ref 5/8: a verified IdP identity still can't sign in to a deactivated account -
+    // checked before the provider-link UPDATE below so a refused login mutates nothing.
+    if (user && user.deactivated_at) {
+      logFailedLogin(user.email, getClientIp(req), "Account deactivated");
+      return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
+    }
 
     if (!user) {
       if (!await canRegister()) {
