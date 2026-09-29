@@ -129,6 +129,27 @@ Only the first two rows touch BeamOS. Everything after that is standard
 platform-side configuration. BeamOS doesn't create Snowflake or Databricks
 objects, and it holds no warehouse credentials.
 
+### Checking and testing the export
+
+Two endpoints in [`server/routes/workspaces.js`](../server/routes/workspaces.js)
+let an admin check the export without reading server logs. They require a
+dashboard session (JWT) and workspace-admin rights (`canAdminWorkspace`: the
+workspace's `workspace_admin`, its org owner/admin, or a platform admin).
+They are **not** reachable with an `st_` API token, because `/api/workspaces`
+is a JWT-only router.
+
+- `GET /api/workspaces/{id}/data-platform-export/status` returns `enabled`,
+  `interval_min`, the S3 location for this workspace, each domain's
+  `exported_through` watermark (epoch + ISO), and `last_error`
+  (`{ at, domain, message }`, cleared by the next clean run).
+- `POST /api/workspaces/{id}/data-platform-export/run-now` runs one sweep
+  immediately for **this workspace only**. It returns the objects written and
+  the updated status, so you can check that your Snowflake stage or
+  Databricks location sees the files without waiting for the interval.
+  It returns `409` when the feature is off or a sweep of this workspace is
+  already running, and `502` with the error when the S3 write failed. Each
+  manual run is recorded in the activity log (`data_platform_export_run`).
+
 ## 3. Schema
 
 Every row is a flat JSON object. Timestamps are **Unix epoch seconds**

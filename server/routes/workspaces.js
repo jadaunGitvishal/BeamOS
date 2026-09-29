@@ -30,6 +30,7 @@ const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
+const { runDataPlatformExport, getExportStatus } = require("../services/data-platform-export");
 
 function formatTimestamp(epochSeconds) {
   if (epochSeconds === null || epochSeconds === undefined) return "";
@@ -1815,6 +1816,66 @@ router.get(
     }
     if (!fs.existsSync(safePath)) return res.status(404).json({ error: "Photo file missing" });
     res.sendFile(safePath);
+  }),
+);
+
+// --- Ref 28: data-platform export - admin visibility ----------------------
+// (The "Extensibility & integrations" Ref 28 - unrelated to the earlier Android
+// offline-resilience Ref 28 work.) Operational surface for the S3 landing-zone
+// connector (services/data-platform-export.js, docs/data-platform-integration.md).
+// Admin-only via loadWorkspace(req, res, true) - canAdminWorkspace, the same gate
+// as this router's invites/members routes. This router is JWT_ONLY
+// (config/api-surface.js), so an st_ API token can't reach either route: this is
+// operational/admin surface, not BI data.
+
+// GET /:id/data-platform-export/status - per-domain watermarks, enabled flag,
+// last error. Readable even when the feature is off (reports enabled: false).
+router.get(
+  "/:id/data-platform-export/status",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, true);
+    if (!ws) return;
+    res.json(await getExportStatus(db, ws.id));
+  }),
+);
+
+// POST /:id/data-platform-export/run-now - one immediate sweep for THIS workspace
+// only, so an admin can verify the S3 / Snowflake / Databricks setup without
+// waiting for the interval. 409 when the feature is off or a sweep of this
+// workspace is already in flight; 502 when the S3 write (or the run) failed.
+router.post(
+  "/:id/data-platform-export/run-now",
+  asyncHandler(async (req, res) => {
+    const ws = await loadWorkspace(req, res, true);
+    if (!ws) return;
+    if (!config.dataPlatformExport.enabled) {
+      return res.status(409).json({
+        error: "Data-platform export is not enabled on this instance (DATA_PLATFORM_EXPORT_ENABLED)",
+      });
+    }
+
+    const run = await runDataPlatformExport(db, null, { workspaceIds: [ws.id] });
+    if (!run.ran) return res.status(502).json({ error: run.error });
+    const result = run.results[0];
+    if (result.skipped) {
+      return res.status(409).json({ error: "An export for this workspace is already running" });
+    }
+
+    logActivity(
+      req.user.id,
+      "data_platform_export_run",
+      `workspace: ${ws.name} (${ws.id}), objects: ${result.written.length}` +
+        (result.error ? `, error: ${result.error}` : ""),
+      null,
+      getClientIp(req),
+      ws.id,
+    );
+
+    const status = await getExportStatus(db, ws.id);
+    if (result.error) {
+      return res.status(502).json({ error: result.error, written: result.written, status });
+    }
+    res.json({ ...result, status });
   }),
 );
 
