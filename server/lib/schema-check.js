@@ -26,6 +26,7 @@ const REQUIRED_TABLES = [
   'entra_service_principals', // Ref 9: Entra ID Service Principal client_id -> workspace+scope
   'sim_inventory', // Ref 65: physical SIM stock ledger (in_stock/assigned/active/retired)
   'ticket_escalations', // Ref 58: ticket response-time SLA breach escalation dedup
+  'scim_tokens', // Ref 8: SCIM provisioning bearer secrets (hashed)
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
@@ -43,6 +44,10 @@ const REQUIRED_COLUMNS = [
   // un-migrated DB would 500 every authed request. Nullable, no default - NULL =
   // active, so every pre-existing account stays active after the repair.
   ['users', 'deactivated_at', "ALTER TABLE users ADD COLUMN deactivated_at BIGINT NULL"],
+  // Ref 8: SCIM round-trip identifiers. routes/scim.js SELECTs/writes both on
+  // every SCIM call. Nullable - NULL for any account SCIM never touched.
+  ['users', 'scim_external_id', "ALTER TABLE users ADD COLUMN scim_external_id VARCHAR(255) NULL"],
+  ['users', 'scim_user_name', "ALTER TABLE users ADD COLUMN scim_user_name VARCHAR(255) NULL"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
   // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)
   // always lists these columns now, so an un-migrated DB would fail every telemetry

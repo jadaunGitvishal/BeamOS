@@ -103,6 +103,13 @@ CREATE TABLE IF NOT EXISTS users (
     -- identity), so setting it revokes existing sessions instantly, not at next
     -- login. Written by SCIM (routes/scim.js) via lib/user-deactivation.js.
     deactivated_at  BIGINT,
+    -- Ref 8 (SCIM): the IdP's own identifiers, stored VERBATIM so they round-trip
+    -- exactly as sent (Microsoft's SCIM guidance: "Values sent should be stored in
+    -- the same format they were sent"). email stays the lowercased login key;
+    -- scim_user_name keeps the IdP's original casing of userName. Both NULL for
+    -- accounts SCIM has never touched.
+    scim_external_id VARCHAR(255),
+    scim_user_name  VARCHAR(255),
     welcome_email_sent_at    BIGINT,
     activation_nudge_sent_at BIGINT,
     created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
@@ -1020,6 +1027,32 @@ CREATE TABLE IF NOT EXISTS entra_service_principals (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_entra_sp_client ON entra_service_principals(client_id);
 CREATE INDEX idx_entra_sp_workspace ON entra_service_principals(workspace_id);
+
+-- ===================== SCIM PROVISIONING TOKENS (Ref 8) =====================
+-- Static bearer secrets for the SCIM 2.0 endpoint (/scim/v2, routes/scim.js) that
+-- Entra ID's provisioning service calls. Same hashing discipline as api_tokens:
+-- SHA-256 hex of the full secret (middleware/apiToken.js hashToken), plaintext
+-- shown once at creation, never stored. Deliberately NOT workspace-scoped: SCIM
+-- provisions accounts at the directory level. Bound to ONE organization instead -
+-- one Entra provisioning app <-> one BeamOS org - which is both where created
+-- users get their organization_members row and the blast radius of the token
+-- (it can only see / modify members of that org). A SCIM token does NOT act as
+-- its creator (no req.user at all), so created_by is audit-only and nullable
+-- (SET NULL on user deletion, rather than blocking lib/user-deletion.js).
+CREATE TABLE IF NOT EXISTS scim_tokens (
+    id              VARCHAR(64) PRIMARY KEY,
+    token_hash      VARCHAR(64) NOT NULL UNIQUE,   -- SHA-256 hex of the full token
+    prefix          VARCHAR(50) NOT NULL,          -- e.g. 'scim_a1b2c3d4' (display only)
+    name            VARCHAR(255) NOT NULL,         -- admin-given label
+    organization_id VARCHAR(64) NOT NULL,
+    created_by      VARCHAR(64),
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    last_used_at    BIGINT,
+    revoked_at      BIGINT,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_scim_tokens_hash ON scim_tokens(token_hash);
 
 -- ===================== APP SETTINGS =====================
 -- #146: minimal global key/value settings for admin-toggleable runtime flags (none

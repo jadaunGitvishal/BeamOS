@@ -214,6 +214,14 @@ module.exports = {
   entraRequireMfa: ["true", "1"].includes(
     String(process.env.ENTRA_REQUIRE_MFA || "").toLowerCase(),
   ),
+  // Ref 8: organization_members.role given to a user CREATED (or adopted) by SCIM
+  // provisioning (routes/scim.js). Must be one of the org role vocabulary
+  // (routes/organizations.js ORG_ROLES: org_owner / org_admin / field_technician);
+  // an invalid value falls back to the default with a boot-time warning. Default is
+  // the least-privileged real org role: field_technician resolves to viewer-level
+  // access in the org's workspaces (lib/tenancy.js) plus field-visit logging -
+  // org_admin would hand every provisioned employee admin over the whole org.
+  scimDefaultOrgRole: process.env.SCIM_DEFAULT_ORG_ROLE || "field_technician",
   // Self-hosted mode: if true, first user gets enterprise plan and no billing
   // selfHosted: process.env.SELF_HOSTED === "true",
   selfHosted: true, // Permanently hardcoded for BeamOS - not dependent on env var

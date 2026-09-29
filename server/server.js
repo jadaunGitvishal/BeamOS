@@ -221,6 +221,23 @@ app.post(
   stripeRouter,
 );
 
+// Ref 8: SCIM 2.0 inbound provisioning (Entra ID's provisioning service -> BeamOS
+// user lifecycle). Deliberately NOT listed in config/api-surface.js: that file's
+// PUBLIC_ROUTERS / JWT_ONLY_ROUTERS partition exists to decide which *workspace API*
+// routers a scoped st_ token (or an Entra SP token resolving to the same
+// req.viaToken/req.tokenScope shape) may reach vs. which stay JWT-session-only - it is
+// "the firewall-rule-as-code" for callers acting AS a user inside a workspace. SCIM
+// callers are neither: the IdP authenticates with its own static bearer secret
+// (middleware/scimAuth.js, table scim_tokens), acts as no user, and is bound to an
+// organization's directory, not a workspace. So this is a separate front door with its
+// own auth - the same category of decision as Ref 9's Entra SP auth being its own
+// middleware rather than a new token scope. Neither bearerAuth nor requireAuth can
+// reach /scim/v2 (no router under that prefix accepts them) and a scim_ secret is
+// rejected by every /api router (not st_, not a JWT). Mounted HERE, before the global
+// express.json() below, because Entra sends Content-Type: application/scim+json and
+// the router must own body parsing to return RFC 7644-shaped errors for bad JSON.
+app.use("/scim/v2", require("./routes/scim"));
+
 // 12mb so AI-designed signs with embedded generated images (base64 data URLs)
 // can be published. #41 follow-up: upload generated images to the content store
 // and reference by URL instead of embedding, to keep widget configs small.

@@ -806,4 +806,61 @@ router.delete("/entra-service-principals/:id", requirePlatformAdmin, asyncHandle
   res.json({ success: true });
 }));
 
+// ===================== SCIM PROVISIONING TOKENS (Ref 8) =====================
+// Platform-admin-only, same tier and shape as the Entra SP registrations above:
+// letting an external IdP create/deactivate accounts in an organization is an
+// administrative trust decision. API-only for now (no dashboard UI) - see
+// docs/sso-scim-integration.md for the curl flow. The secret is returned ONCE by
+// POST and only its SHA-256 hash is stored (middleware/scimAuth.js).
+const { generateScimToken, displayPrefix: scimDisplayPrefix } = require("../middleware/scimAuth");
+const { hashToken: hashSecret } = require("../middleware/apiToken");
+
+const SCIM_TOKEN_SELECT = `
+  SELECT t.id, t.prefix, t.name, t.organization_id, o.name AS organization_name,
+    t.created_by, u.email AS created_by_email, t.created_at, t.last_used_at, t.revoked_at
+  FROM scim_tokens t
+  LEFT JOIN organizations o ON o.id = t.organization_id
+  LEFT JOIN users u ON u.id = t.created_by
+`;
+
+// GET /api/admin/scim-tokens - list (never includes the secret or its hash).
+router.get("/scim-tokens", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  res.json(await db.prepare(`${SCIM_TOKEN_SELECT} ORDER BY t.created_at DESC`).all());
+}));
+
+// POST /api/admin/scim-tokens - body { name, organization_id }. Returns the row plus
+// `token` (plaintext, shown once) and the `scim_base_url` to paste into Entra.
+router.post("/scim-tokens", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  if (!name) return res.status(400).json({ error: "name is required" });
+  if (name.length > 255) return res.status(400).json({ error: "name must be 255 characters or fewer" });
+  const orgId = String(req.body?.organization_id || "").trim();
+  const org = orgId ? await db.prepare("SELECT id FROM organizations WHERE id = ?").get(orgId) : null;
+  if (!org) return res.status(400).json({ error: "organization_id must reference an existing organization" });
+
+  const secret = generateScimToken();
+  const id = uuidv4();
+  await db.prepare(
+    `INSERT INTO scim_tokens (id, token_hash, prefix, name, organization_id, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
+  ).run(id, hashSecret(secret), scimDisplayPrefix(secret), name, org.id, req.user.id);
+  logActivity(req.user.id, "admin_create_scim_token", `name: ${name}, organization: ${org.id}`, null, getClientIp(req), null);
+
+  const row = await db.prepare(`${SCIM_TOKEN_SELECT} WHERE t.id = ?`).get(id);
+  const origin = config.publicBaseUrl || `${req.protocol}://${req.get("host")}`;
+  res.status(201).json({ ...row, token: secret, scim_base_url: `${origin}/scim/v2` });
+}));
+
+// DELETE /api/admin/scim-tokens/:id - soft revoke (audit record kept); scimAuth
+// checks revoked_at on every request, so it takes effect immediately.
+router.delete("/scim-tokens/:id", requirePlatformAdmin, asyncHandler(async (req, res) => {
+  const row = await db.prepare("SELECT id, name, revoked_at FROM scim_tokens WHERE id = ?").get(req.params.id);
+  if (!row) return res.status(404).json({ error: "SCIM token not found" });
+  if (!row.revoked_at) {
+    await db.prepare("UPDATE scim_tokens SET revoked_at = UNIX_TIMESTAMP() WHERE id = ?").run(row.id);
+    logActivity(req.user.id, "admin_revoke_scim_token", `name: ${row.name}`, null, getClientIp(req), null);
+  }
+  res.json({ success: true });
+}));
+
 module.exports = router;
