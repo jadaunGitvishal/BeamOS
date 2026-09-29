@@ -74,6 +74,11 @@ no `?format=`) to the token door, and added a NEW read-only ticket surface
 documented in [docs/bi-integration.md](bi-integration.md), which also covers
 connecting Power BI/Tableau to this whole token-reachable surface end to end.
 
+To land this kind of data in a warehouse or lakehouse automatically, with no
+polling, see [docs/data-platform-integration.md](data-platform-integration.md)
+(Ref 28). It is a scheduled push of gzipped NDJSON to an S3-compatible bucket
+that Snowflake, Databricks, dbt and Atlan read from.
+
 ### Example — JSON
 
 ```

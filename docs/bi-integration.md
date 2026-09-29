@@ -17,6 +17,12 @@ opened a few previously JWT-only read endpoints onto that same token door
 (SLA, tickets, SIM inventory) and added pagination to the one endpoint that
 needed it (proof-of-play).
 
+For a **data platform** (Snowflake, Databricks, dbt, Atlan) instead of a BI
+tool that pulls over HTTP, see
+[docs/data-platform-integration.md](data-platform-integration.md). Ref 28's
+connector pushes the same device/uptime/SLA/proof-of-play/ticket/SIM data to
+an S3-compatible landing zone as gzipped NDJSON on a schedule.
+
 ## 1. Create a read-scoped API token
 
 Any workspace member can mint their own token from the dashboard
