@@ -217,7 +217,10 @@ them exists:
 - **Microsoft SSO login** (`POST /api/auth/microsoft` in
   [`server/routes/auth.js`](../server/routes/auth.js)) — real, built, and
   working. A user authenticates via Microsoft/Entra, and BeamOS verifies
-  their identity through Microsoft Graph. On first login it creates a
+  their identity through Microsoft Graph (or, with `ENTRA_TENANT_ID` set,
+  by validating their OIDC `id_token` against that one tenant, optionally
+  requiring MFA — Ref 5, [docs/sso-scim-integration.md](sso-scim-integration.md)).
+  On first login it creates a
   BeamOS account with the default `user` role and drops them into a default
   organization/workspace (`ensureDefaultOrgForUser`) — from there, a human
   admin assigns their real workspace/org role by hand, the same as any
@@ -245,6 +248,18 @@ Note: this gap is about *human* sign-in. [`docs/entra-auth.md`](entra-auth.md)
 Principal (machine-to-machine, OAuth 2.0 client-credentials) API
 authentication for non-human callers — which does **not** close this gap
 and isn't intended to.
+
+**SCIM provisioning (Ref 8) does not close it either.**
+[`docs/sso-scim-integration.md`](sso-scim-integration.md) adds a SCIM 2.0
+endpoint through which Entra ID creates, updates and **deactivates**
+BeamOS *accounts* — but it provisions accounts, not roles. Every
+provisioned user receives the same single, configured organization role
+(`SCIM_DEFAULT_ORG_ROLE`, default `field_technician`); Entra security
+groups are not read (`/scim/v2/Groups` returns 501) and nothing maps a
+group to a role. Assigning real org/workspace roles is still the manual
+admin step described above. What Ref 8 *does* add on the RBAC side is
+revocation: a user deactivated from Entra loses every session, API token
+and login path on their next request.
 
 ## Secondary finding: billing actions were not role-gated (now fixed)
 

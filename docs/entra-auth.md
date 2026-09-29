@@ -5,17 +5,24 @@ Ref 9. Written the same way as [docs/rbac.md](rbac.md) (Ref 5): what's
 actually built and proven, cited against real code and real test runs, with
 honest gaps called out rather than glossed over.
 
-This is a **third**, distinct Microsoft-integration surface in this
-codebase — worth naming precisely so it isn't confused with the other two:
+This is one of **four** distinct Microsoft-integration surfaces in this
+codebase — worth naming precisely so they aren't confused with each other:
 
 | Surface | What it does | Entra app registration used |
 |---|---|---|
-| Microsoft SSO login (`POST /api/auth/microsoft`, [`server/routes/auth.js`](../server/routes/auth.js)) | A **human** signs in with their Microsoft account | The login app registration (pre-existing, unrelated to this doc) |
+| Microsoft SSO login (`POST /api/auth/microsoft`, [`server/routes/auth.js`](../server/routes/auth.js)) — Ref 5, see [docs/sso-scim-integration.md](sso-scim-integration.md) | A **human** signs in with their Microsoft account. With `ENTRA_TENANT_ID` set, their OIDC `id_token` is validated against that tenant (optionally requiring MFA) using the same `jose`/JWKS trust anchors as this doc | The login app registration (`MICROSOFT_CLIENT_ID`) |
+| SCIM 2.0 provisioning (`/scim/v2`, [`server/routes/scim.js`](../server/routes/scim.js)) — Ref 8, see [docs/sso-scim-integration.md](sso-scim-integration.md) | Entra's **provisioning service** creates, updates and deactivates BeamOS accounts; deactivation revokes existing sessions on their next request | A **non-gallery enterprise app** — Microsoft doesn't enable provisioning on app registrations, so it can't be the login one |
 | Graph email sending ([`server/services/email.js`](../server/services/email.js)) | BeamOS acts as a **client**, acquiring its own token via `@azure/msal-node`'s client-credentials flow to call Microsoft Graph and send mail | `GRAPH_TENANT_ID`/`GRAPH_CLIENT_ID`/`GRAPH_CLIENT_SECRET` — a separate registration |
 | **This doc: Entra Service Principal API auth** | An **external application** (a daemon, an ERP integration, a script — no human involved) authenticates itself to BeamOS's own API using its own Entra-issued access token | A **new, separate** registration — see [Setup](#setup-the-entra-id-app-registration) below |
 
-None of these three share an app registration, and this doc's feature does
-not touch or depend on either of the other two. It also does **not** close
+None of these four share an app registration. `ENTRA_TENANT_ID` is the one
+setting shared between this doc's feature and the SSO login (both trust the
+same single tenant). One more interaction with Ref 5/8: a Service Principal
+acts **as** the admin who registered it (`created_by`), so if that admin is
+deactivated (e.g. by SCIM), the registration is refused with 401 — exactly
+as it already was if they were deleted — until an active admin
+re-registers it ([details](sso-scim-integration.md#part-2--deactivation-instant-per-request-revocation)).
+This doc's feature also does **not** close
 the ["no Azure AD / Entra ID group-to-role mapping" gap](rbac.md#known-gap-no-azure-ad--entra-id-group-to-role-mapping)
 documented in `docs/rbac.md` — that's about mapping a *human's* Entra group
 memberships to a BeamOS role, which remains unbuilt. This is unrelated:
