@@ -1,8 +1,9 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useApi } from "../hooks/useApi";
 import { usePeriod } from "../hooks/usePeriod";
 import { useBreadcrumb } from "../hooks/useBreadcrumb";
+import { useToast } from "../hooks/useToast";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, periodWindow, periodLabel, isoDateOnly, fmtCoords, fmtDate, osmUrl, timeAgo } from "../lib/format";
 import { isWeakSignal } from "../lib/risk";
@@ -16,6 +17,57 @@ import StatusHeatmap from "../components/StatusHeatmap";
 import FieldVisits from "../components/FieldVisits";
 import TelemetryHistory from "../components/TelemetryHistory";
 import NetworkUsageHistory from "../components/NetworkUsageHistory";
+
+// Ref 50: remote Screen off / Screen on via POST /api/devices/:id/command (REST, so
+// the dashboard needs no Socket.IO client). The server write-gates it (viewers get
+// 403) and, if the device is offline, holds the command in a short-lived queue.
+const COMMAND_LABELS = { screen_off: "Screen off", screen_on: "Screen on" };
+
+async function sendDeviceCommand(deviceId, type) {
+  const resp = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/command`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${localStorage.getItem("token")}`,
+    },
+    body: JSON.stringify({ type }),
+  });
+  if (resp.status === 401) throw new UnauthenticatedError();
+  const json = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(json.error || `POST -> ${resp.status}`);
+  return json;
+}
+
+function ScreenControls({ d }) {
+  const { toast } = useToast();
+  const [sending, setSending] = useState(null);
+
+  async function send(type) {
+    const label = COMMAND_LABELS[type];
+    setSending(type);
+    try {
+      const r = await sendDeviceCommand(d.id, type);
+      if (r.delivered) toast(`${label} sent to ${d.name}`);
+      else if (r.queued)
+        toast(`${d.name} is offline — ${label} queued; it applies only if the device reconnects within ${r.queue_ttl_seconds}s`);
+      else toast(`${d.name} is offline — ${label} was not delivered`);
+    } catch (err) {
+      toast(`${label} failed: ${err.message || "could not reach the server"}`);
+    } finally {
+      setSending(null);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      {Object.entries(COMMAND_LABELS).map(([type, label]) => (
+        <button key={type} className="btn" disabled={sending !== null} onClick={() => send(type)}>
+          {sending === type ? "Sending…" : label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 // Ref 31: render one captured hardware field. The device deliberately sends an
 // honest marker string ("unavailable (requires Device Owner)", "no SIM hardware",
@@ -183,7 +235,10 @@ export default function DeviceDetailView() {
             Device ID <span className="mono">{d.id}</span>
           </p>
         </div>
-        <StatusTag status={d.status} />
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <ScreenControls d={d} />
+          <StatusTag status={d.status} />
+        </div>
       </div>
 
       {d.screenshot_path ? (
