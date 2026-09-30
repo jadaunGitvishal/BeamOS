@@ -77,11 +77,14 @@ app.set("trust proxy", trustedProxies);
 const hasSsl = fs.existsSync(config.sslCert) && fs.existsSync(config.sslKey);
 let server;
 
+// Ref 2 Stage 1: buildSslOptions pins minVersion TLSv1.2 explicitly (lib/tls-policy.js).
+// Plain HTTP (no certs) stays supported for self-hosted HTTP-only LANs.
+const { buildSslOptions, hstsWhenSecure } = require("./lib/tls-policy");
 if (hasSsl) {
-  const sslOptions = {
+  const sslOptions = buildSslOptions({
     cert: fs.readFileSync(config.sslCert),
     key: fs.readFileSync(config.sslKey),
-  };
+  });
   server = https.createServer(sslOptions, app);
 } else {
   server = http.createServer(app);
@@ -140,7 +143,7 @@ const dashboardCsp = helmet.contentSecurityPolicy({
     formAction: ["'self'"],
     // Don't force HTTPS — self-hosted deployments may run on HTTP-only LANs.
     // Public production traffic is upgraded by Cloudflare / the reverse proxy and
-    // protected by the HSTS header set above.
+    // protected by the HSTS header set below (hstsWhenSecure, lib/tls-policy.js).
     upgradeInsecureRequests: null,
   },
 });
@@ -149,9 +152,12 @@ app.use(
   helmet({
     contentSecurityPolicy: false, // we apply our own below, scoped to non-render paths
     crossOriginEmbedderPolicy: false, // allow loading external widget content
-    hsts: { maxAge: 31536000, includeSubDomains: true },
+    hsts: false, // Ref 2 Stage 1: applied below, only on requests that arrived over TLS
   }),
 );
+// HSTS (same max-age/includeSubDomains as before) only when req.secure: the https
+// server (hasSsl) or TLS terminated by a trusted proxy (X-Forwarded-Proto: https).
+app.use(hstsWhenSecure());
 
 // Apply CSP everywhere except routes that legitimately need inline scripts:
 // - widget/kiosk renders (public, fetched by devices, intentionally inline)
