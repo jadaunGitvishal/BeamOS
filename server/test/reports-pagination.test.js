@@ -31,7 +31,7 @@ db.exec(`
     role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
     must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
   );
-  CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL);
+  CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL, max_token_lifetime_days INTEGER);
   CREATE TABLE organization_members (
     id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
   );

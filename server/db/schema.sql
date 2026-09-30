@@ -149,6 +149,10 @@ CREATE TABLE IF NOT EXISTS organizations (
     default_brand_name      VARCHAR(255),
     default_logo_url        VARCHAR(500),
     default_primary_color   VARCHAR(20),
+    -- Ref 34: admin cap on how long an st_ API token / scim_ token of this org
+    -- stays valid, in days, checked against the token's AGE at auth time (so it
+    -- is retroactive - see lib/token-lifetime.js). NULL = no cap (default).
+    max_token_lifetime_days INT NULL,
     created_at              BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     updated_at              BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     FOREIGN KEY (owner_user_id) REFERENCES users(id),

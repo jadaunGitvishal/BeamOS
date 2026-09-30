@@ -45,6 +45,7 @@ db.exec(`
     email_alerts INTEGER DEFAULT 1, must_change_password INTEGER DEFAULT 0, deactivated_at INTEGER
   );
   CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT, name TEXT);
+  CREATE TABLE organizations (id TEXT PRIMARY KEY, max_token_lifetime_days INTEGER); -- Ref 34: apiTokenAuth joins it
   CREATE TABLE workspace_members (
     id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT, user_id TEXT, role TEXT,
     joined_at INTEGER DEFAULT 0

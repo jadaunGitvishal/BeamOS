@@ -48,6 +48,10 @@ const REQUIRED_COLUMNS = [
   // every SCIM call. Nullable - NULL for any account SCIM never touched.
   ['users', 'scim_external_id', "ALTER TABLE users ADD COLUMN scim_external_id VARCHAR(255) NULL"],
   ['users', 'scim_user_name', "ALTER TABLE users ADD COLUMN scim_user_name VARCHAR(255) NULL"],
+  // Ref 34: max programmatic-credential lifetime. apiTokenAuth and scimAuth both
+  // SELECT it on every token request, so an un-migrated DB would 500 every API /
+  // SCIM call. Nullable, no default - NULL = no cap, i.e. today's behaviour.
+  ['organizations', 'max_token_lifetime_days', "ALTER TABLE organizations ADD COLUMN max_token_lifetime_days INT NULL"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
   // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)
   // always lists these columns now, so an un-migrated DB would fail every telemetry

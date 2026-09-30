@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { db } = require('../db/database');
 const { requireAuth, isPlatformRole } = require('./auth');
 const { asyncHandler } = require('../lib/async-handler');
+const { isBeyondLifetime } = require('../lib/token-lifetime'); // Ref 34
 // Ref 9: Entra ID Service Principal auth - a third front door alongside st_ tokens
 // and JWT sessions. No circular require (entraToken.js doesn't import this file).
 const { looksLikeEntraToken, entraTokenAuth } = require('./entraToken');
@@ -51,9 +52,22 @@ const apiTokenAuth = asyncHandler(async function apiTokenAuth(req, res, next) {
   if (!raw.startsWith(TOKEN_PREFIX)) {
     return res.status(401).json({ error: 'Invalid API token' });
   }
-  const row = await db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(hashToken(raw));
+  // Ref 34: the owning org's max_token_lifetime_days rides along (workspace ->
+  // organization). LEFT JOINs so a lookup never fails on the join itself.
+  const row = await db.prepare(`
+    SELECT t.*, o.max_token_lifetime_days
+    FROM api_tokens t
+    LEFT JOIN workspaces w ON w.id = t.workspace_id
+    LEFT JOIN organizations o ON o.id = w.organization_id
+    WHERE t.token_hash = ?
+  `).get(hashToken(raw));
   if (!row || row.revoked_at) {
     return res.status(401).json({ error: 'Invalid or revoked API token' });
+  }
+  // Ref 34: older than the org's cap -> refused exactly like a revoked token (same
+  // 401 + { error } shape). Age-based, so a newly lowered cap applies instantly.
+  if (isBeyondLifetime(row.created_at, row.max_token_lifetime_days)) {
+    return res.status(401).json({ error: 'Invalid or expired API token' });
   }
   const { deactivated_at, ...user } = await db.prepare(
     'SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password, deactivated_at FROM users WHERE id = ?'

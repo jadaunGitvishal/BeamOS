@@ -4,7 +4,8 @@
 // the static "Secret Token" an admin pastes into the Entra ID provisioning app.
 // Validated exactly the way apiTokenAuth validates api_tokens: SHA-256 the
 // presented secret (the SAME hashToken from middleware/apiToken.js, not a second
-// implementation), look the hash up, refuse missing/revoked, throttle last_used_at.
+// implementation), look the hash up, refuse missing/revoked, refuse a token older
+// than its org's max_token_lifetime_days (Ref 34), throttle last_used_at.
 //
 // Deliberate difference from apiTokenAuth / entraTokenAuth: a SCIM token does NOT
 // act as a user. There is no req.user afterwards - the caller is the IdP's
@@ -19,6 +20,7 @@ const crypto = require('crypto');
 const { db } = require('../db/database');
 const { asyncHandler } = require('../lib/async-handler');
 const { hashToken } = require('./apiToken');
+const { isBeyondLifetime } = require('../lib/token-lifetime'); // Ref 34
 
 const SCIM_TOKEN_PREFIX = 'scim_';
 
@@ -57,9 +59,19 @@ const scimAuth = asyncHandler(async function scimAuth(req, res, next) {
   if (!raw.startsWith(SCIM_TOKEN_PREFIX)) {
     return scimError(res, 401, 'A valid SCIM bearer token is required');
   }
-  const row = await db.prepare('SELECT * FROM scim_tokens WHERE token_hash = ?').get(hashToken(raw));
+  // Ref 34: the bound org's max_token_lifetime_days (scim_tokens.organization_id).
+  const row = await db.prepare(`
+    SELECT t.*, o.max_token_lifetime_days
+    FROM scim_tokens t
+    LEFT JOIN organizations o ON o.id = t.organization_id
+    WHERE t.token_hash = ?
+  `).get(hashToken(raw));
   if (!row || row.revoked_at) {
     return scimError(res, 401, 'Invalid or revoked SCIM bearer token');
+  }
+  // Ref 34: older than the org's cap -> same 401 SCIM error as a revoked token.
+  if (isBeyondLifetime(row.created_at, row.max_token_lifetime_days)) {
+    return scimError(res, 401, 'Invalid or expired SCIM bearer token');
   }
   req.scim = { tokenId: row.id, organizationId: row.organization_id, name: row.name };
   touchLastUsed(row.id).catch(() => {});

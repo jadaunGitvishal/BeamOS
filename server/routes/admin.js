@@ -814,10 +814,18 @@ router.delete("/entra-service-principals/:id", requirePlatformAdmin, asyncHandle
 // POST and only its SHA-256 hash is stored (middleware/scimAuth.js).
 const { generateScimToken, displayPrefix: scimDisplayPrefix } = require("../middleware/scimAuth");
 const { hashToken: hashSecret } = require("../middleware/apiToken");
+const { withLifetime } = require("../lib/token-lifetime");
+
+// Ref 34: expires_at / expired computed from the bound org's max_token_lifetime_days
+// (the same pair scimAuth enforces); the raw cap column itself isn't echoed per row.
+function scimTokenView({ max_token_lifetime_days: cap, ...row }) {
+  return withLifetime(row, cap);
+}
 
 const SCIM_TOKEN_SELECT = `
   SELECT t.id, t.prefix, t.name, t.organization_id, o.name AS organization_name,
-    t.created_by, u.email AS created_by_email, t.created_at, t.last_used_at, t.revoked_at
+    t.created_by, u.email AS created_by_email, t.created_at, t.last_used_at, t.revoked_at,
+    o.max_token_lifetime_days
   FROM scim_tokens t
   LEFT JOIN organizations o ON o.id = t.organization_id
   LEFT JOIN users u ON u.id = t.created_by
@@ -825,7 +833,7 @@ const SCIM_TOKEN_SELECT = `
 
 // GET /api/admin/scim-tokens - list (never includes the secret or its hash).
 router.get("/scim-tokens", requirePlatformAdmin, asyncHandler(async (req, res) => {
-  res.json(await db.prepare(`${SCIM_TOKEN_SELECT} ORDER BY t.created_at DESC`).all());
+  res.json((await db.prepare(`${SCIM_TOKEN_SELECT} ORDER BY t.created_at DESC`).all()).map(scimTokenView));
 }));
 
 // POST /api/admin/scim-tokens - body { name, organization_id }. Returns the row plus
@@ -848,7 +856,7 @@ router.post("/scim-tokens", requirePlatformAdmin, asyncHandler(async (req, res) 
 
   const row = await db.prepare(`${SCIM_TOKEN_SELECT} WHERE t.id = ?`).get(id);
   const origin = config.publicBaseUrl || `${req.protocol}://${req.get("host")}`;
-  res.status(201).json({ ...row, token: secret, scim_base_url: `${origin}/scim/v2` });
+  res.status(201).json({ ...scimTokenView(row), token: secret, scim_base_url: `${origin}/scim/v2` });
 }));
 
 // DELETE /api/admin/scim-tokens/:id - soft revoke (audit record kept); scimAuth

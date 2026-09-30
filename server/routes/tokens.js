@@ -10,6 +10,14 @@ const { accessContext } = require('../lib/tenancy');
 const { isZonedPlaylist } = require('../lib/agency-targets'); // #73: full-screen-only guardrail
 const { isPlatformRole } = require('../middleware/auth');       // #146: billing:read mint gate
 const { asyncHandler } = require('../lib/async-handler');
+const { withLifetime, lifetimeExpiresAt } = require('../lib/token-lifetime'); // Ref 34
+
+// Ref 34: the active workspace's org cap (NULL = uncapped). apiTokenAuth reads the
+// same column at auth time, so the expires_at shown here is exactly what it enforces.
+async function orgLifetimeCap(workspace) {
+  const org = await db.prepare('SELECT max_token_lifetime_days FROM organizations WHERE id = ?').get(workspace.organization_id);
+  return org ? org.max_token_lifetime_days : null;
+}
 
 // #73: 'agency' is OFF the read/write/full ladder (not in apiToken.js SCOPE_RANK), so a
 // tokenScopeGate-mounted router rejects it; it reaches only the AGENCY_ROUTER via agencyGate.
@@ -19,12 +27,15 @@ const { asyncHandler } = require('../lib/async-handler');
 const SCOPES = ['read', 'write', 'full', 'agency', 'billing:read'];
 
 // List the caller's tokens in the active workspace. Never returns the secret/hash.
+// Ref 34: each row also carries expires_at (created_at + the org's
+// max_token_lifetime_days, or null if uncapped) and expired (age has reached it).
 router.get('/', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No active workspace' });
-  const rows = await db.prepare(`
+  const cap = await orgLifetimeCap(req.workspace);
+  const rows = (await db.prepare(`
     SELECT id, prefix, name, scope, auto_publish, workspace_id, created_at, last_used_at, revoked_at
     FROM api_tokens WHERE user_id = ? AND workspace_id = ? ORDER BY created_at DESC
-  `).all(req.user.id, req.workspaceId);
+  `).all(req.user.id, req.workspaceId)).map((r) => withLifetime(r, cap));
   // #73: attach designated playlists for agency tokens so the admin sees the binding persist.
   const targetsStmt = db.prepare('SELECT p.id, p.name FROM api_token_targets t JOIN playlists p ON p.id = t.playlist_id WHERE t.token_id = ? ORDER BY p.name');
   for (const r of rows) {
@@ -90,8 +101,11 @@ router.post('/', asyncHandler(async (req, res) => {
       for (const pid of targetIds) await ins.run(id, pid);
     }
   })();
-  // `token` is returned only here, never again.
-  res.status(201).json({ id, token: secret, prefix: displayPrefix(secret), name, scope, workspace_id: req.workspaceId, target_playlist_ids: targetIds, auto_publish: !!autoPublish });
+  // `token` is returned only here, never again. Ref 34: expires_at is informational -
+  // it's recomputed from the CURRENT org cap on every request, so it moves if the cap does.
+  const createdAt = (await db.prepare('SELECT created_at FROM api_tokens WHERE id = ?').get(id)).created_at;
+  const expiresAt = lifetimeExpiresAt(createdAt, await orgLifetimeCap(req.workspace));
+  res.status(201).json({ id, token: secret, prefix: displayPrefix(secret), name, scope, workspace_id: req.workspaceId, target_playlist_ids: targetIds, auto_publish: !!autoPublish, expires_at: expiresAt });
 }));
 
 // Revoke one of the caller's own tokens (soft delete - takes effect on the next request).
