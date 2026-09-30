@@ -13,6 +13,9 @@ services:
     environment:
       SELF_HOSTED: "true"            # first registered user becomes admin, no billing
       # JWT_SECRET: "set-a-long-random-string"   # else one is generated under /data/certs
+      # DATA_ENCRYPTION_KEY: "<openssl rand -base64 32>"  # AES-256 key for encrypted DB fields
+      #   (TOTP/AI keys); source it from your KMS/secret store. Unset = derived from JWT_SECRET.
+      #   Changing it makes existing encrypted fields unreadable - see docs/encryption.md.
       # DISABLE_HOMEPAGE: "true"     # redirect / to the app instead of the landing page
     volumes:
       - st-data:/data               # db, uploads, and the jwt secret persist here

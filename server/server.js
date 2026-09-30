@@ -1161,6 +1161,10 @@ async function boot() {
     `);
   });
 
+  // Ref 2 Stage 2: which key secretbox encrypts DB fields with (a label, never key material).
+  console.log(`  Data encryption key source: ${require("./lib/secretbox").KEY_SOURCE}
+`);
+
   // If SSL is enabled, also start an HTTP server that redirects to HTTPS
   if (hasSsl) {
     const redirectApp = express();

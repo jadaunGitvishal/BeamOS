@@ -174,6 +174,10 @@ module.exports = {
       return secret;
     })(),
   jwtExpiry: "7d",
+  // Ref 2 Stage 2: optional externally-supplied AES-256 key for lib/secretbox.js
+  // (64 hex chars or base64 of 32 bytes), e.g. fetched from a KMS/HSM into the env
+  // at container start. Unset = the existing jwtSecret-derived key (no change).
+  dataEncryptionKey: process.env.DATA_ENCRYPTION_KEY || null,
   // Google OAuth - set these in env or here
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",
   // Microsoft OAuth - set these in env or here
