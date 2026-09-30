@@ -10,14 +10,16 @@ codebase — worth naming precisely so they aren't confused with each other:
 
 | Surface | What it does | Entra app registration used |
 |---|---|---|
-| Microsoft SSO login (`POST /api/auth/microsoft`, [`server/routes/auth.js`](../server/routes/auth.js)) — Ref 5, see [docs/sso-scim-integration.md](sso-scim-integration.md) | A **human** signs in with their Microsoft account. With `ENTRA_TENANT_ID` set, their OIDC `id_token` is validated against that tenant (optionally requiring MFA) using the same `jose`/JWKS trust anchors as this doc | The login app registration (`MICROSOFT_CLIENT_ID`) |
+| Microsoft SSO login (`POST /api/auth/microsoft`, [`server/routes/auth.js`](../server/routes/auth.js)) — Ref 5, see [docs/sso-scim-integration.md](sso-scim-integration.md) | A **human** signs in with their Microsoft account. With `SSO_TENANT_ID` set, their OIDC `id_token` is validated against that tenant (optionally requiring MFA) using the same `jose`/JWKS trust anchors as this doc | The login app registration (`MICROSOFT_CLIENT_ID`) |
 | SCIM 2.0 provisioning (`/scim/v2`, [`server/routes/scim.js`](../server/routes/scim.js)) — Ref 8, see [docs/sso-scim-integration.md](sso-scim-integration.md) | Entra's **provisioning service** creates, updates and deactivates BeamOS accounts; deactivation revokes existing sessions on their next request | A **non-gallery enterprise app** — Microsoft doesn't enable provisioning on app registrations, so it can't be the login one |
 | Graph email sending ([`server/services/email.js`](../server/services/email.js)) | BeamOS acts as a **client**, acquiring its own token via `@azure/msal-node`'s client-credentials flow to call Microsoft Graph and send mail | `GRAPH_TENANT_ID`/`GRAPH_CLIENT_ID`/`GRAPH_CLIENT_SECRET` — a separate registration |
 | **This doc: Entra Service Principal API auth** | An **external application** (a daemon, an ERP integration, a script — no human involved) authenticates itself to BeamOS's own API using its own Entra-issued access token | A **new, separate** registration — see [Setup](#setup-the-entra-id-app-registration) below |
 
-None of these four share an app registration. `ENTRA_TENANT_ID` is the one
-setting shared between this doc's feature and the SSO login (both trust the
-same single tenant). One more interaction with Ref 5/8: a Service Principal
+None of these four share an app registration, and none share a tenant
+setting. This doc's feature uses `ENTRA_TENANT_ID`; the SSO login uses its own
+`SSO_TENANT_ID`, which never falls back to `ENTRA_TENANT_ID`. Enabling
+Service Principal auth therefore cannot change how humans sign in (see
+[the rationale](sso-scim-integration.md#the-four-microsoft-integration-surfaces)). One more interaction with Ref 5/8: a Service Principal
 acts **as** the admin who registered it (`created_by`), so if that admin is
 deactivated (e.g. by SCIM), the registration is refused with 401 — exactly
 as it already was if they were deleted — until an active admin

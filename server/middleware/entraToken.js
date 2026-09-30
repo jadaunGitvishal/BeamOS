@@ -73,21 +73,26 @@ function entraConfigured() {
 // never sets ENTRA_TENANT_ID never even builds a JWKS client, matching this
 // codebase's existing convention of not doing Azure-integration setup work for
 // unconfigured optional features (services/email.js's lazy msal-node require).
-let _jwks = null;
-let _jwksTenantId = null;
-function getJwks() {
-  // Rebuild if the configured tenant ever changes (test suites reconfigure config
-  // between cases; a long-lived process never does in practice).
-  if (_jwks && _jwksTenantId === config.entraTenantId) return _jwks;
-  _jwksTenantId = config.entraTenantId;
-  _jwks = createRemoteJWKSet(
-    new URL(`https://login.microsoftonline.com/${config.entraTenantId}/discovery/v2.0/keys`),
-  );
-  return _jwks;
+//
+// Keyed per tenant: Ref 9 (this middleware) trusts config.entraTenantId, while
+// Ref 5's SSO login (verifyEntraIdToken below) trusts config.ssoTenantId - two
+// independently-configured settings that MAY name the same tenant, in which case
+// they share one cached key set. Defaults to entraTenantId so every Ref 9 call site
+// is unchanged.
+const _jwksByTenant = new Map();
+function getJwks(tenantId = config.entraTenantId) {
+  let jwks = _jwksByTenant.get(tenantId);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(
+      new URL(`https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`),
+    );
+    _jwksByTenant.set(tenantId, jwks);
+  }
+  return jwks;
 }
 
-function entraIssuer() {
-  return `https://login.microsoftonline.com/${config.entraTenantId}/v2.0`;
+function entraIssuer(tenantId = config.entraTenantId) {
+  return `https://login.microsoftonline.com/${tenantId}/v2.0`;
 }
 
 // The actual verification, split out from the Express middleware below so it can be
@@ -138,9 +143,9 @@ async function verifyEntraAccessToken(raw, overrides = {}) {
   return { clientId, payload };
 }
 
-// Ref 5: the SAME trust anchors (getJwks() / entraIssuer() - the configured tenant's
-// JWKS and exact v2.0 issuer) applied to a DIFFERENT token: a human user's OIDC
-// id_token from "Sign in with Microsoft" (routes/auth.js POST /microsoft), instead of
+// Ref 5: the SAME trust-anchor builders (getJwks() / entraIssuer() - a tenant's
+// JWKS and exact v2.0 issuer), pointed at config.ssoTenantId, applied to a
+// DIFFERENT token: a human user's OIDC id_token from "Sign in with Microsoft" (routes/auth.js POST /microsoft), instead of
 // a Service Principal's app-only access token. Differences from
 // verifyEntraAccessToken above, and why:
 //   - audience is config.microsoftClientId (the SPA login app registration the
@@ -173,9 +178,14 @@ async function verifyEntraAccessToken(raw, overrides = {}) {
 // `overrides` exists for the same reason, and with the same production guarantee, as
 // verifyEntraAccessToken's (see test/microsoft-sso.test.js).
 async function verifyEntraIdToken(raw, overrides = {}) {
-  const jwks = overrides.jwks || getJwks();
-  const tenantId = overrides.tenantId || config.entraTenantId;
-  const issuer = overrides.issuer || entraIssuer();
+  // SSO_TENANT_ID, NOT ENTRA_TENANT_ID - see config.js ssoTenantId for why the two
+  // are configured independently.
+  const tenantId = overrides.tenantId || config.ssoTenantId;
+  if (!tenantId) {
+    throw new Error('SSO_TENANT_ID is not configured; cannot validate the id_token issuer');
+  }
+  const jwks = overrides.jwks || getJwks(tenantId);
+  const issuer = overrides.issuer || entraIssuer(tenantId);
   const audience = overrides.audience || config.microsoftClientId;
   const requireMfa = overrides.requireMfa !== undefined ? overrides.requireMfa : config.entraRequireMfa;
   if (!audience) {

@@ -49,7 +49,7 @@ function idToken(claims) {
   }).setProtectedHeader({ alg: 'RS256', kid: 'scim-it-kid' }).sign(privateKey);
 }
 
-const savedConfig = { entraTenantId: config.entraTenantId, microsoftClientId: config.microsoftClientId, entraRequireMfa: config.entraRequireMfa };
+const savedConfig = { ssoTenantId: config.ssoTenantId, microsoftClientId: config.microsoftClientId, entraRequireMfa: config.entraRequireMfa };
 
 let app, admin, adminOrgId, scimToken, scimTokenId, otherOrg;
 const cleanup = [];
@@ -393,7 +393,7 @@ test('PATCH validation: bad op / empty Operations / non-boolean active -> 400 SC
 
 test('THE END-TO-END REQUIREMENT: Entra provisions -> user signs in via SSO -> Entra PATCHes active "False" -> that session dies on its next request', async () => {
   // Ref 5 tenant-restricted SSO on, so the login below is the real id_token path.
-  config.entraTenantId = TENANT_ID;
+  config.ssoTenantId = TENANT_ID;
   config.microsoftClientId = CLIENT_ID;
   config.entraRequireMfa = false;
 

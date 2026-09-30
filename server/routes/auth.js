@@ -602,8 +602,9 @@ async function verifyGoogleToken(credential) {
 
 // ==================== Microsoft OAuth ====================
 
-// Ref 5: two identity paths, selected by config.entraTenantId (the same single
-// global tenant Ref 9 already trusts - see config.js):
+// Ref 5: two identity paths, selected by config.ssoTenantId (SSO_TENANT_ID - one
+// global tenant per deployment, configured INDEPENDENTLY of Ref 9's ENTRA_TENANT_ID
+// so enabling machine-to-machine API auth can never change human login; see config.js):
 //   - UNSET: the original flow, byte-for-byte - the client's Graph access token is
 //     used to fetch /me. No tenant restriction, no MFA check (a "common"-authority
 //     login accepts any Microsoft account, exactly as before Ref 5).
@@ -618,7 +619,7 @@ async function verifyGoogleToken(credential) {
 // org bootstrap, session JWT, signup emails) is shared and unchanged.
 router.post("/microsoft", async (req, res) => {
   const { access_token, id_token } = req.body;
-  const tenantRestricted = !!config.entraTenantId;
+  const tenantRestricted = !!config.ssoTenantId;
   if (tenantRestricted) {
     if (!id_token)
       return res.status(400).json({
@@ -1169,7 +1170,7 @@ router.get("/config", asyncHandler(async (req, res) => {
     // authority at that tenant too, so users from other tenants are stopped at
     // Microsoft's own sign-in page rather than only by our server-side check.
     // Unset -> unchanged (MICROSOFT_TENANT_ID, default "common").
-    microsoftTenantId: config.entraTenantId || config.microsoftTenantId,
+    microsoftTenantId: config.ssoTenantId || config.microsoftTenantId,
     localEnabled: true,
     needsSetup: userCount === 0,
     registration_enabled: !config.disableRegistration || userCount === 0,

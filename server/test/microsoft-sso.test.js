@@ -204,12 +204,16 @@ https.get = function (options, cb) {
 };
 
 const saved = {
+  ssoTenantId: config.ssoTenantId,
   entraTenantId: config.entraTenantId,
   microsoftClientId: config.microsoftClientId,
   entraRequireMfa: config.entraRequireMfa,
 };
-function configure({ tenant = '', mfa = false } = {}) {
-  config.entraTenantId = tenant;
+// `tenant` -> SSO_TENANT_ID (Ref 5). `ref9Tenant` -> ENTRA_TENANT_ID (Ref 9's
+// Service Principal auth), independently - they must never influence each other.
+function configure({ tenant = '', mfa = false, ref9Tenant = '' } = {}) {
+  config.ssoTenantId = tenant;
+  config.entraTenantId = ref9Tenant;
   config.microsoftClientId = CLIENT_ID;
   config.entraRequireMfa = mfa;
 }
@@ -352,17 +356,73 @@ test('route: tenant UNSET -> Graph profile without mail/UPN still yields the ori
   assert.equal(r.body.error, 'Could not get Microsoft profile');
 });
 
-test('GET /api/auth/config: advertises the restricted tenant to MSAL only when ENTRA_TENANT_ID is set', async () => {
+test('GET /api/auth/config: advertises the restricted tenant to MSAL only when SSO_TENANT_ID is set', async () => {
   configure({ tenant: '' });
   const savedMsTenant = config.microsoftTenantId;
   try {
     config.microsoftTenantId = 'common';
     let cfg = await (await fetch(`${app.base}/api/auth/config`)).json();
     assert.equal(cfg.microsoftTenantId, 'common');
+    // Ref 9's ENTRA_TENANT_ID alone must NOT change the MSAL authority.
+    configure({ ref9Tenant: TENANT_ID });
+    cfg = await (await fetch(`${app.base}/api/auth/config`)).json();
+    assert.equal(cfg.microsoftTenantId, 'common');
     configure({ tenant: TENANT_ID });
     cfg = await (await fetch(`${app.base}/api/auth/config`)).json();
     assert.equal(cfg.microsoftTenantId, TENANT_ID);
   } finally {
     config.microsoftTenantId = savedMsTenant;
+  }
+});
+
+// ===================== SSO_TENANT_ID vs ENTRA_TENANT_ID independence =====================
+// The lockout this split prevents: a deployment that set ENTRA_TENANT_ID purely for
+// Ref 9 (machine-to-machine API auth) must NOT have its human Microsoft login switched
+// to id_token-only / single-tenant mode.
+
+test('route: ENTRA_TENANT_ID set (Ref 9 only), SSO_TENANT_ID unset -> Microsoft login stays in original access_token mode, unaffected', async () => {
+  configure({ ref9Tenant: TENANT_ID, tenant: '' });
+  assert.equal(config.entraTenantId, TENANT_ID);
+  assert.equal(config.ssoTenantId, '');
+
+  // An access_token-only login from ANY tenant (the original behaviour) still works...
+  const email = `ref9only-${randTag()}@othertenant.test`;
+  graphProfile = { id: 'graph-ref9only', mail: email, userPrincipalName: email, displayName: 'Ref9 Only' };
+  const jwksBefore = jwksFetches;
+  const graphBefore = graphCalls;
+  const r = await postMicrosoft({ access_token: 'any-graph-access-token' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(graphCalls, graphBefore + 1, 'identity came from Graph /me, as before');
+  assert.equal(jwksFetches, jwksBefore, 'no id_token validation was attempted');
+  const row = await userByEmail(email);
+  createdUserIds.push(row.id);
+  assert.equal(row.provider_id, 'graph-ref9only');
+
+  // ...and an id_token alone is refused with the ORIGINAL message, exactly as with nothing set.
+  const idOnly = await postMicrosoft({ id_token: await signIdToken() });
+  assert.equal(idOnly.status, 400);
+  assert.equal(idOnly.body.error, 'Microsoft access token required');
+});
+
+test('verifyEntraIdToken: validates against SSO_TENANT_ID, never ENTRA_TENANT_ID; fails closed when SSO_TENANT_ID is unset', async () => {
+  const token = await signIdToken();
+  const savedSso = config.ssoTenantId;
+  const savedRef9 = config.entraTenantId;
+  try {
+    config.entraTenantId = TENANT_ID; // Ref 9's tenant matches the token...
+    config.ssoTenantId = '';          // ...but SSO is not configured
+    await assert.rejects(
+      () => verifyEntraIdToken(token, { jwks: localJwks, audience: CLIENT_ID, requireMfa: false }),
+      /SSO_TENANT_ID is not configured/,
+    );
+    config.ssoTenantId = OTHER_TENANT; // SSO pinned to a different tenant -> token's issuer is wrong
+    await assert.rejects(() => verifyEntraIdToken(token, { jwks: localJwks, audience: CLIENT_ID, requireMfa: false }), /iss/);
+    config.ssoTenantId = TENANT_ID;
+    config.entraTenantId = '';
+    const ok = await verifyEntraIdToken(token, { jwks: localJwks, audience: CLIENT_ID, requireMfa: false });
+    assert.equal(ok.oid, '0a0a0a0a-0000-0000-0000-000000000001');
+  } finally {
+    config.ssoTenantId = savedSso;
+    config.entraTenantId = savedRef9;
   }
 });

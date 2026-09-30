@@ -26,13 +26,20 @@ already lists:
 
 | Surface | Direction | Entra object | Config |
 |---|---|---|---|
-| **SSO login (Ref 5, this doc)** | A human signs in | The login **app registration** (SPA) | `MICROSOFT_CLIENT_ID`, `ENTRA_TENANT_ID`, `ENTRA_REQUIRE_MFA` |
+| **SSO login (Ref 5, this doc)** | A human signs in | The login **app registration** (SPA) | `MICROSOFT_CLIENT_ID`, `SSO_TENANT_ID`, `ENTRA_REQUIRE_MFA` |
 | **SCIM provisioning (Ref 8, this doc)** | Entra pushes user create/update/disable **to** BeamOS | A **non-gallery enterprise app** with Provisioning enabled | `scim_` token (DB), `SCIM_DEFAULT_ORG_ROLE` |
 | Service Principal API auth (Ref 9) | An external app calls BeamOS's API | Its own app registration | `ENTRA_TENANT_ID`, `ENTRA_API_CLIENT_ID` |
 | Graph email | BeamOS calls Graph to send mail | Its own app registration | `GRAPH_*` |
 
-`ENTRA_TENANT_ID` is now shared by Ref 5 and Ref 9. It is still **one global
-tenant per deployment**, matching BeamOS's self-hosted-per-customer model.
+Ref 5 and Ref 9 each have their **own** tenant setting, `SSO_TENANT_ID` and
+`ENTRA_TENANT_ID`, and `SSO_TENANT_ID` never falls back to `ENTRA_TENANT_ID`.
+They may name the same tenant, but each feature is opted into separately. If
+one variable drove both, a deployment that set `ENTRA_TENANT_ID` only for Ref 9's
+API integrations would find its human Microsoft login switched to
+single-tenant, id_token-only mode on upgrade. That would lock out personal and
+other-tenant accounts, and any browser still running the old login page. Each
+setting is still **one global tenant per deployment**, matching BeamOS's
+self-hosted-per-customer model.
 
 ---
 
@@ -41,14 +48,14 @@ tenant per deployment**, matching BeamOS's self-hosted-per-customer model.
 ### Behaviour
 
 [`server/routes/auth.js`](../server/routes/auth.js) `POST /microsoft` now
-has two identity paths, selected by `ENTRA_TENANT_ID`:
+has two identity paths, selected by `SSO_TENANT_ID`:
 
-| `ENTRA_TENANT_ID` | Client must send | How identity is established | Tenant restricted? | MFA check? |
+| `SSO_TENANT_ID` | Client must send | How identity is established | Tenant restricted? | MFA check? |
 |---|---|---|---|---|
-| **unset** (default) | `access_token` | Graph `GET /v1.0/me` with that token. The **pre-Ref-5 flow, byte-for-byte unchanged** | No: any Microsoft account (authority `common`) | No |
+| **unset** (default, **regardless of `ENTRA_TENANT_ID`**) | `access_token` | Graph `GET /v1.0/me` with that token. The **pre-Ref-5 flow, byte-for-byte unchanged** | No: any Microsoft account (authority `common`) | No |
 | **set** | `id_token` | Validated locally with `jose` (no Graph call). See the checks below | Yes: only that tenant | If `ENTRA_REQUIRE_MFA=true` |
 
-With `ENTRA_TENANT_ID` set, a request carrying only `access_token` gets
+With `SSO_TENANT_ID` set, a request carrying only `access_token` gets
 `400 "…requires an OpenID Connect id_token (an access_token alone is not
 accepted)…"`. A Graph access token is audience-bound to Graph, not to
 BeamOS, so it cannot be validated here. That was the gap Ref 5 closes.
@@ -60,15 +67,17 @@ JWT issuance and signup emails.
 ### The checks (`verifyEntraIdToken`, [`server/middleware/entraToken.js`](../server/middleware/entraToken.js))
 
 `verifyEntraIdToken` sits next to Ref 9's `verifyEntraAccessToken` and
-reuses its trust anchors: the same `getJwks()` (`createRemoteJWKSet` on
-`https://login.microsoftonline.com/{ENTRA_TENANT_ID}/discovery/v2.0/keys`)
-and the same `entraIssuer()`.
+reuses its trust-anchor builders, `getJwks()` and `entraIssuer()`, which are
+cached per tenant. For SSO they point at `SSO_TENANT_ID`
+(`https://login.microsoftonline.com/{SSO_TENANT_ID}/discovery/v2.0/keys`). If
+`SSO_TENANT_ID` is empty, validation fails closed instead of building a URL
+for an empty tenant.
 
 | Check | Value | Why |
 |---|---|---|
 | Signature | Tenant JWKS, `algorithms: ['RS256']` | Entra issued it; `jose` also never accepts `alg:"none"` |
-| `iss` | Exactly `https://login.microsoftonline.com/{ENTRA_TENANT_ID}/v2.0` | Pins the tenant |
-| `tid` | `=== ENTRA_TENANT_ID` | Defense in depth. Microsoft's [ID token claims reference](https://learn.microsoft.com/entra/identity-platform/id-token-claims-reference) names `tid`/`iss` as the tenant-restriction signal |
+| `iss` | Exactly `https://login.microsoftonline.com/{SSO_TENANT_ID}/v2.0` | Pins the tenant |
+| `tid` | `=== SSO_TENANT_ID` | Defense in depth. Microsoft's [ID token claims reference](https://learn.microsoft.com/entra/identity-platform/id-token-claims-reference) names `tid`/`iss` as the tenant-restriction signal |
 | `aud` | `=== MICROSOFT_CLIENT_ID` | "In `id_tokens`, the audience is your app's Application ID … The token should be rejected if it fails to match". If `MICROSOFT_CLIENT_ID` is empty the check **fails closed** rather than skipping the audience check |
 | `exp`/`nbf` | 30 s tolerance | Standard |
 | `idtyp` | Must **not** be `app` | An app-only token minted for the same client ID is never a user sign-in |
@@ -107,7 +116,7 @@ through.
 [`frontend/js/views/login.js`](../frontend/js/views/login.js) already used
 MSAL.js `loginPopup`, which returns an `idToken`. It now sends
 `{ access_token, id_token }`. `GET /api/auth/config` reports
-`microsoftTenantId = ENTRA_TENANT_ID` when that is set, so MSAL's authority is
+`microsoftTenantId = SSO_TENANT_ID` when that is set, so MSAL's authority is
 the tenant itself and users from other tenants are stopped at Microsoft's
 sign-in page as well as by the server. When unset, it is unchanged
 (`MICROSOFT_TENANT_ID`, default `common`).
@@ -281,7 +290,7 @@ and no real tenant was available to try it.
    origin (e.g. `https://signage.example.com`), as it already is for the
    current login.
 3. Note the **Application (client) ID** (`MICROSOFT_CLIENT_ID`) and the
-   **Directory (tenant) ID** (`ENTRA_TENANT_ID`).
+   **Directory (tenant) ID** (`SSO_TENANT_ID`).
 4. **Token configuration → Add optional claim → ID:**
    - `email` (recommended): lets the login match accounts keyed on `mail`
      rather than UPN.
@@ -319,7 +328,7 @@ and no real tenant was available to try it.
 ### Environment
 
 ```bash
-ENTRA_TENANT_ID=<Directory (tenant) ID>        # enables Ref 5 tenant restriction (also Ref 9)
+SSO_TENANT_ID=<Directory (tenant) ID>          # enables Ref 5 tenant restriction (independent of Ref 9's ENTRA_TENANT_ID)
 MICROSOFT_CLIENT_ID=<login app's client ID>    # required id_token audience
 ENTRA_REQUIRE_MFA=true                         # optional; requires the amr optional claim
 SCIM_DEFAULT_ORG_ROLE=field_technician         # optional; org role for provisioned users
@@ -327,7 +336,8 @@ PUBLIC_BASE_URL=https://signage.example.com    # optional; used in SCIM meta.loc
 AUTO_CREATE_ORG_ON_SIGNUP=false                # recommended with SCIM, see Known gaps
 ```
 
-All unset leaves behaviour exactly as before Ref 5/8. With `ENTRA_TENANT_ID`
+All unset leaves behaviour exactly as before Ref 5/8. Setting only Ref 9's
+`ENTRA_TENANT_ID` does **not** change login (tested). With `SSO_TENANT_ID`
 unset, the Microsoft login is the old Graph flow, and `/scim/v2` does nothing
 without a minted token.
 
@@ -385,7 +395,7 @@ Content-Type: application/scim+json
 the account, a member of the token's org as `field_technician`.
 
 **2. Ana signs in with Microsoft.** MSAL returns an id_token for tenant
-`ENTRA_TENANT_ID`. `POST /api/auth/microsoft {id_token}` validates it (Part 1),
+`SSO_TENANT_ID`. `POST /api/auth/microsoft {id_token}` validates it (Part 1),
 matches the SCIM account by email, and issues a session JWT. Her
 `GET /api/auth/me` returns `200`.
 
@@ -430,7 +440,7 @@ returned 0).
 
 | Test file | Result | What it covers |
 |---|---|---|
-| [`test/microsoft-sso.test.js`](../server/test/microsoft-sso.test.js) | **23/23** | 13 unit cases on `verifyEntraIdToken`: valid, wrong tenant (`iss`), mismatched `tid`, wrong `aud`, unset client ID fails closed, expired, app-only, missing `oid`/email, `alg:none`, RS256→HS256 confusion, MFA missing `amr` / password-only / `mfa` present / not required. 10 real-HTTP route cases: tenant-restricted login creates an account from verified claims with no Graph call; `email` vs UPN matching; access_token-only → 400; other tenant → 401; wrong aud → 401; MFA 401/200; **tenant unset → original Graph flow unchanged, no JWKS fetch**; original error messages preserved; `/config` authority |
+| [`test/microsoft-sso.test.js`](../server/test/microsoft-sso.test.js) | **25/25** | 14 unit cases on `verifyEntraIdToken`: valid, wrong tenant (`iss`), mismatched `tid`, wrong `aud`, unset client ID fails closed, expired, app-only, missing `oid`/email, `alg:none`, RS256→HS256 confusion, MFA missing `amr` / password-only / `mfa` present / not required, and validation keyed to `SSO_TENANT_ID` (never `ENTRA_TENANT_ID`, failing closed when unset). 11 real-HTTP route cases: tenant-restricted login creates an account from verified claims with no Graph call; `email` vs UPN matching; access_token-only → 400; other tenant → 401; wrong aud → 401; MFA 401/200; **tenant unset → original Graph flow unchanged, no JWKS fetch**; original error messages preserved; **`ENTRA_TENANT_ID` set alone (Ref 9 only) leaves login in the original access_token mode**; `/config` authority |
 | [`test/user-deactivation.test.js`](../server/test/user-deactivation.test.js) | **8/8** | Schema-check repair; **an existing, valid session JWT rejected on the very next request**, and restored on reactivation; idempotent + audited; password login 403 vs generic 401; `st_` token dies; field OTP 403; Microsoft login refused **without** re-linking provider; open socket disconnected + handshake refused |
 | [`test/scim.test.js`](../server/test/scim.test.js) | **25/25** | Token plaintext-once + hash-only; non-admin can't mint; 401 shapes; `scim_` useless on `/api`; revoked token refused; ServiceProviderConfig / ResourceTypes / Schemas shapes; Test Connection empty list; Entra create body; 409; adoption; filters incl. unquoted `externalId`; pagination; **cross-org invisibility**; PATCH default + flag shapes; validation errors; **full loop** (above); PUT; soft DELETE → 404 → re-adopt; malformed JSON / `/Groups` 501 |
 | [`test/scim-unit.test.js`](../server/test/scim-unit.test.js) | **5/5** | Last-admin guard (not reachable on the shared DB), `"False"` parsing, `and`-splitting inside quotes/brackets, filter compilation, PATCH parsing |
@@ -440,6 +450,7 @@ returned 0).
 - Removing `requireAuth`'s deactivation check → the RFP test fails.
 - Removing string-`"False"` parsing → the full-loop test fails.
 - Removing the `revoked_at` check → the revoked-token test fails.
+- Keying the login on `ENTRA_TENANT_ID` again (undoing the split) → 7 SSO tests fail, including the Ref-9-only test.
 
 **Regression:**
 - Stage 2 changes the columns `requireAuth` / `apiTokenAuth` SELECT, so 30
@@ -452,15 +463,20 @@ returned 0).
 - Pre-existing failures are unchanged and not introduced here:
   `admin-users` (10), `user-deletion` (4), `schema-check` (3).
 
-**Live server boots** (`node server.js`, `ENTRA_TENANT_ID` unset):
-- `/api/auth/config`, `/api/auth/microsoft` (`"Microsoft access token
-  required"`) and `/api/auth/login` responses are byte-identical to before.
-- After `ALTER TABLE users DROP COLUMN deactivated_at`, boot logged
-  `[schema-check] repaired users.deactivated_at`.
-- `/scim/v2` on the real mount: SCIM-shaped 401 without a token;
-  ServiceProviderConfig and Test Connection correct with one;
-  `application/scim+json` malformed body → `400 invalidSyntax`; a `scim_`
-  token on `/api/devices` → 401.
+**Live server boots:**
+- With **only Ref 9 configured** (`ENTRA_TENANT_ID` + `ENTRA_API_CLIENT_ID` + `MICROSOFT_CLIENT_ID` set, `SSO_TENANT_ID` unset):
+  `/api/auth/config` reports `microsoftTenantId: "common"`. `POST /microsoft` with `{}` or with only an `id_token` both return
+  `"Microsoft access token required"`, and a (fake) `access_token` goes to real Graph `/me` and returns the original
+  `"Could not get Microsoft profile"`. The pre-Ref-5 login is unaffected.
+- Earlier boots, with no Entra settings at all:
+  - `/api/auth/config`, `/api/auth/microsoft` (`"Microsoft access token
+    required"`) and `/api/auth/login` responses are byte-identical to before.
+  - After `ALTER TABLE users DROP COLUMN deactivated_at`, boot logged
+    `[schema-check] repaired users.deactivated_at`.
+  - `/scim/v2` on the real mount: SCIM-shaped 401 without a token;
+    ServiceProviderConfig and Test Connection correct with one;
+    `application/scim+json` malformed body → `400 invalidSyntax`; a `scim_`
+    token on `/api/devices` → 401.
 
 ## What this does and doesn't prove
 

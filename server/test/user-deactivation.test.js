@@ -147,9 +147,9 @@ test('Microsoft login (tenant-unset Graph path): a deactivated account is refuse
   await app.db.prepare("UPDATE users SET password_hash = NULL, auth_provider = 'google' WHERE id = ?").run(u.id);
   await setUserDeactivated(app.db, u.id, true, { via: 'test' });
 
-  const savedTenant = config.entraTenantId;
+  const savedTenant = config.ssoTenantId;
   const realGet = https.get;
-  config.entraTenantId = '';
+  config.ssoTenantId = '';
   https.get = function (options, cb) {
     if (options && options.hostname === 'graph.microsoft.com') {
       const resp = new PassThrough();
@@ -166,7 +166,7 @@ test('Microsoft login (tenant-unset Graph path): a deactivated account is refuse
     assert.equal(row.auth_provider, 'google', 'provider was not re-linked by a refused login');
   } finally {
     https.get = realGet;
-    config.entraTenantId = savedTenant;
+    config.ssoTenantId = savedTenant;
   }
 });
 

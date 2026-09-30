@@ -204,13 +204,20 @@ module.exports = {
   // against an unset tenant/audience).
   entraTenantId: process.env.ENTRA_TENANT_ID || "",
   entraApiClientId: process.env.ENTRA_API_CLIENT_ID || "",
-  // Ref 5: entraTenantId ALSO gates the human "Sign in with Microsoft" login
+  // Ref 5: ssoTenantId gates the human "Sign in with Microsoft" login
   // (routes/auth.js POST /microsoft). Set -> that login requires a real OIDC
   // id_token signed by THIS tenant with aud === microsoftClientId (validated by
   // middleware/entraToken.js verifyEntraIdToken). Empty -> the pre-Ref-5
   // access-token + Graph /me flow runs completely unchanged (no tenant restriction).
+  // DELIBERATELY SEPARATE from entraTenantId above, with NO fallback to it: if the
+  // SSO restriction keyed off ENTRA_TENANT_ID, any deployment that had already set
+  // it purely for Ref 9's machine-to-machine API auth would have its human login
+  // silently switched to id_token-only / single-tenant mode on upgrade - locking out
+  // personal and other-tenant Microsoft accounts and any not-yet-reloaded browser
+  // still sending only an access_token. Each feature is opted into on its own.
+  ssoTenantId: process.env.SSO_TENANT_ID || "",
   // entraRequireMfa additionally requires the id_token's `amr` claim to contain
-  // "mfa" (only meaningful when entraTenantId is set). Default off.
+  // "mfa" (only meaningful when ssoTenantId is set). Default off.
   entraRequireMfa: ["true", "1"].includes(
     String(process.env.ENTRA_REQUIRE_MFA || "").toLowerCase(),
   ),

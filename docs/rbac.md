@@ -217,7 +217,7 @@ them exists:
 - **Microsoft SSO login** (`POST /api/auth/microsoft` in
   [`server/routes/auth.js`](../server/routes/auth.js)) — real, built, and
   working. A user authenticates via Microsoft/Entra, and BeamOS verifies
-  their identity through Microsoft Graph (or, with `ENTRA_TENANT_ID` set,
+  their identity through Microsoft Graph (or, with `SSO_TENANT_ID` set,
   by validating their OIDC `id_token` against that one tenant, optionally
   requiring MFA — Ref 5, [docs/sso-scim-integration.md](sso-scim-integration.md)).
   On first login it creates a
