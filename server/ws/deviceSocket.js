@@ -1,5 +1,4 @@
 const { v4: uuidv4 } = require('uuid');
-const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { db, pruneTelemetry, pruneScreenshots } = require('../db/database');
@@ -75,22 +74,18 @@ async function emitToDeviceWorkspace(dashboardNs, deviceId, event, payload) {
 // In-memory store for latest screenshot per device (avoids disk writes during streaming)
 let lastScreenshots = {};
 
-// Generate a random device token
-function generateDeviceToken() {
-  return crypto.randomBytes(32).toString('hex');
-}
+// Ref 2 Stage 3: device tokens are stored as a one-way 'sha256:' hash, never the raw
+// token (lib/device-token.js). generateDeviceToken returns the RAW token (sent to the
+// device once); every devices.device_token WRITE stores hashDeviceToken(raw).
+const { generateDeviceToken, hashDeviceToken, verifyDeviceToken } = require('../lib/device-token');
 
-// Validate device_id + device_token pair. Returns true if valid.
+// Validate device_id + device_token pair. Returns true if valid. Constant-time;
+// accepts a hashed row or a legacy plaintext row (pre scripts/hash-device-tokens.js).
 async function validateDeviceToken(deviceId, token) {
   if (!deviceId || !token) return false;
   const row = await db.prepare('SELECT device_token FROM devices WHERE id = ?').get(deviceId);
   if (!row || !row.device_token) return false;
-  // Constant-time comparison to prevent timing attacks
-  try {
-    return crypto.timingSafeEqual(Buffer.from(row.device_token), Buffer.from(token));
-  } catch {
-    return false;
-  }
+  return verifyDeviceToken(row.device_token, token);
 }
 
 function getClientIp(socket) {
@@ -410,7 +405,7 @@ module.exports = function setupDeviceSocket(io) {
                 // Fingerprint matched — this is a reinstalled app reconnecting to its old device.
                 // Issue a fresh token so the app can authenticate going forward.
                 const newToken = generateDeviceToken();
-                await db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(newToken, existing.device_id);
+                await db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(hashDeviceToken(newToken), existing.device_id);
                 console.log(`Fingerprint match: linking reinstalled app to existing device ${existing.device_id} (new token issued)`);
                 authenticated = true;
                 // Cancel any pending offline timer - device is back in the grace window
@@ -532,10 +527,11 @@ module.exports = function setupDeviceSocket(io) {
           await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP(), ip_address = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
             .run(getClientIp(socket), device_id);
 
-          // #143: past the validateDeviceToken gate above the stored token is
-          // guaranteed non-null, so we just echo it back. The old "mint a token for a
-          // null-token device" path is removed — that was the re-provisioning vector.
-          const tokenToSend = device.device_token;
+          // #143: past the validateDeviceToken gate above the token is valid, so we just
+          // echo it back. The old "mint a token for a null-token device" path is removed —
+          // that was the re-provisioning vector. Ref 2 Stage 3: echo the token the device
+          // PRESENTED (identical to what it holds) — the stored value is now a hash.
+          const tokenToSend = device_token;
 
           if (device_info) {
             await db.prepare(`UPDATE devices SET android_version = ?, app_version = ?, screen_width = ?, screen_height = ?, render_width = ?, render_height = ?,
@@ -644,7 +640,7 @@ module.exports = function setupDeviceSocket(io) {
             INSERT INTO devices (id, pairing_code, device_token, status, ip_address, android_version, app_version, screen_width, screen_height, render_width, render_height, last_heartbeat)
             VALUES (?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())
           `).run(
-            id, pairing_code, newToken, getClientIp(socket),
+            id, pairing_code, hashDeviceToken(newToken), getClientIp(socket),
             device_info?.android_version || null,
             device_info?.app_version || null,
             device_info?.screen_width || null,

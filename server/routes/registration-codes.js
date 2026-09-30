@@ -303,10 +303,8 @@ router.get('/registration-codes/:id/qr-device-owner', asyncHandler(async (req, r
 // bespoke socket handling is needed on either side.
 const claimRouter = express.Router();
 
-// Mirrors ws/deviceSocket.js generateDeviceToken().
-function generateDeviceToken() {
-  return crypto.randomBytes(32).toString('hex');
-}
+// Ref 2 Stage 3: shared with ws/deviceSocket.js - raw token to the device, hash at rest.
+const { generateDeviceToken, hashDeviceToken } = require('../lib/device-token');
 
 claimRouter.post('/', asyncHandler(async (req, res) => {
   const code = String((req.body && req.body.code) || '').trim();
@@ -372,7 +370,7 @@ claimRouter.post('/', asyncHandler(async (req, res) => {
         info.android_version || null, info.app_version || null,
         info.screen_width || null, info.screen_height || null,
         info.render_width || null, info.render_height || null,
-        deviceToken, now, now, now,
+        hashDeviceToken(deviceToken), now, now, now,
       ];
       const cols = [...baseCols, ...hw.columns];
       const vals = [...baseVals, ...hw.values];
