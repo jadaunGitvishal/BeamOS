@@ -10,6 +10,7 @@ const { logActivity, getClientIp } = require("../services/activity");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
+const { parseLifetimeDays } = require("../lib/token-lifetime"); // Ref 34
 
 function formatTimestamp(epochSeconds) {
   if (epochSeconds === null || epochSeconds === undefined) return "";
@@ -588,6 +589,66 @@ router.delete(
       null,
     );
     res.json({ success: true, workspaces_unassigned: unassigned });
+  }),
+);
+
+// ===================== TOKEN LIFETIME POLICY (Ref 34) =====================
+// Admin-defined maximum lifetime of programmatic access: one org-level cap,
+// organizations.max_token_lifetime_days (NULL = no cap), that apiTokenAuth and
+// scimAuth check against each st_ / scim_ token's AGE on every request - so a
+// change here is retroactive and immediate (lib/token-lifetime.js has the full
+// rationale and what is deliberately out of scope).
+//
+// Authorization: org-level config, so the same tier as regions -
+// canManageOrgRegions (platform owner-role, or org_owner / org_admin of THIS
+// org; NOT platform_operator, NOT workspace roles) via loadOrgForRegions. That
+// is the same tier lib/permissions.requireOrgAdmin enforces, but requireOrgAdmin
+// itself can't be used on this router: it reads req.orgRole / req.isPlatformAdmin,
+// which resolveTenancy sets for the caller's ACTIVE workspace's org - this router
+// runs without resolveTenancy and targets the org in the URL, so requireOrgAdmin
+// would 403 everyone here (and, if tenancy were added, would authorize against
+// the wrong org).
+function tokenPolicyView(org) {
+  return { organization_id: org.id, max_token_lifetime_days: org.max_token_lifetime_days ?? null };
+}
+
+// GET /:orgId/token-policy
+router.get(
+  "/:orgId/token-policy",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    res.json(tokenPolicyView(org));
+  }),
+);
+
+// PATCH /:orgId/token-policy  { max_token_lifetime_days: 1..3650 | null }
+router.patch(
+  "/:orgId/token-policy",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, "max_token_lifetime_days")) {
+      return res.status(400).json({ error: "max_token_lifetime_days is required (an integer number of days, or null for no cap)" });
+    }
+    const parsed = parseLifetimeDays(req.body.max_token_lifetime_days);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    await db
+      .prepare("UPDATE organizations SET max_token_lifetime_days = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+      .run(parsed.value, org.id);
+    const before = org.max_token_lifetime_days ?? null;
+    if (before !== parsed.value) {
+      logActivity(
+        req.user.id,
+        "org_token_lifetime_changed",
+        `org: ${org.name} (${org.id}), max_token_lifetime_days: ${before ?? "none"} -> ${parsed.value ?? "none"}`,
+        null,
+        getClientIp(req),
+        null,
+      );
+    }
+    res.json(tokenPolicyView({ ...org, max_token_lifetime_days: parsed.value }));
   }),
 );
 

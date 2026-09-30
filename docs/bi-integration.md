@@ -134,16 +134,21 @@ $ curl -si 'https://<host>/api/reports/plays?limit=500&offset=1000&start=2026-01
 
 ## 6. Refresh scheduling considerations
 
-- **Tokens do not expire.** `api_tokens` has no `expires_at`/TTL column — a
-  token is valid indefinitely until someone explicitly revokes it
-  (`DELETE /api/tokens/{id}`, or via the dashboard). There is no separate
-  "Ref 34 token-lifetime" mechanism in this codebase to reference; this is
-  simply the current, deliberate design (revoke-only, no rotation). For a
-  scheduled BI refresh this is actually convenient — no re-authentication
-  flow to build — but it also means a leaked token stays valid until someone
-  notices and revokes it. Treat the token string with the same care as a
-  password, and revoke+reissue it if it's ever exposed (e.g. committed to a
-  repo, pasted into a support ticket).
+- **Tokens do not expire — unless your organization sets a maximum
+  lifetime (Ref 34).** By default (`max_token_lifetime_days` = `null`) a
+  token stays valid until someone revokes it (`DELETE /api/tokens/{id}`, or
+  via the dashboard). An org owner/admin can set a cap in days (see
+  [Maximum token lifetime](#maximum-token-lifetime-ref-34) below). Once a
+  token's **age** (now − `created_at`) reaches the cap, every call returns
+  `401 {"error":"Invalid or expired API token"}`. That is the same status and
+  shape as a revoked token, so a refresh job's existing auth-failure handling
+  covers it. **Plan for rotation** when a cap is set: `GET /api/tokens` shows
+  each token's `expires_at` (epoch seconds, or `null` if uncapped) and
+  `expired`. Mint the replacement and update the BI data source before
+  `expires_at`, or the scheduled refresh starts failing. Whether or not a cap
+  is set, a leaked token works until it is revoked or ages out. Treat the
+  token string like a password and revoke+reissue it if it is ever exposed
+  (e.g. committed to a repo, pasted into a support ticket).
 - **Rate/volume**: no dedicated rate limit sits in front of these specific
   GET routes beyond the platform's general limiter; a refresh cadence in the
   minutes range (not sub-second polling) is the reasonable default.
@@ -158,3 +163,44 @@ $ curl -si 'https://<host>/api/reports/plays?limit=500&offset=1000&start=2026-01
   ISO-8601 UTC strings in the CSV/XLSX/PDF/JSON export shapes
   ([docs/data-export.md](data-export.md)) — normalize once in Power
   Query/Tableau's data-source step, not per report.
+
+### Maximum token lifetime (Ref 34)
+
+An organization owner/admin sets one cap for every `st_` API token in the
+organization's workspaces. The same cap also covers the organization's SCIM
+tokens ([docs/sso-scim-integration.md](sso-scim-integration.md#maximum-scim-token-lifetime-ref-34)).
+
+```bash
+# Read (org_owner / org_admin of the org, or platform admin; session JWT)
+curl -s https://<host>/api/organizations/<org id>/token-policy -H "Authorization: Bearer $JWT"
+# -> {"organization_id":"…","max_token_lifetime_days":null}
+
+# Set a 90-day cap (integer 1–3650), or {"max_token_lifetime_days":null} to remove it
+curl -s -X PATCH https://<host>/api/organizations/<org id>/token-policy \
+  -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d '{"max_token_lifetime_days":90}'
+```
+
+How it behaves:
+
+- **It is retroactive and takes effect immediately.** The cap is not
+  stamped onto tokens when they are minted. `apiTokenAuth` compares each
+  token's age with the org's **current** cap on every request. If you lower
+  the cap, tokens minted before the policy existed stop working on their
+  next call when they are already older than the new cap. No backfill and no
+  per-token action are needed.
+- **Raising or removing the cap re-admits tokens that were refused only
+  because of their age.** Age expiry is a policy, not a revocation. To kill a
+  specific token for good, revoke it.
+- `expires_at` in `GET /api/tokens` (and in the `POST` response) is computed
+  from the current cap on each request, so it changes if the cap changes.
+- **Not covered by the cap:**
+  - **Entra ID Service Principals (Ref 9).** BeamOS stores no secret for
+    them, only the SP's `client_id`. Every call brings its own short-lived
+    access token issued by Entra, and `middleware/entraToken.js` rejects it
+    once its `exp` has passed. Entra already bounds that lifetime. The
+    long-lived credential (the SP's client secret or certificate) lives in
+    Entra, and its expiry is set there.
+  - **Browser sessions** (`jwtExpiry`, 7 days). These are interactive human
+    logins, not programmatic access. They already have their own fixed
+    expiry.

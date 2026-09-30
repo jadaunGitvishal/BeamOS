@@ -174,3 +174,82 @@ test("scim token: the cap is per-organization - another org's cap doesn't touch 
     assert.equal((await useScimToken(tok.token)).status, 200);
   } finally { await setCap(platformAdmin.orgId, null); }
 });
+
+// ------------------------------------------- admin endpoint (token-policy)
+
+const policyPath = (orgId) => `/api/organizations/${orgId}/token-policy`;
+const patchPolicy = (user, orgId, body) => j('PATCH', policyPath(orgId), { token: user.token, body });
+
+// A second registered user added to owner's org / workspace with a given role.
+async function memberOf({ orgRole, workspaceRole, platformRole }) {
+  const u = await registerUser('lifemember');
+  if (orgRole) await app.db.prepare('INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, ?)').run(owner.orgId, u.id, orgRole);
+  if (workspaceRole) await app.db.prepare('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)').run(owner.workspaceId, u.id, workspaceRole);
+  if (platformRole) await app.db.prepare('UPDATE users SET role = ? WHERE id = ?').run(platformRole, u.id);
+  return u;
+}
+
+test('endpoint: org_owner reads the default (null) and sets a cap; the retroactive refusal follows through the real admin API', async () => {
+  const tok = await mintApiToken(owner);
+  await backdate('api_tokens', tok.id, 40);
+  assert.equal((await useApiToken(tok.token)).status, 200);
+
+  const g = await j('GET', policyPath(owner.orgId), { token: owner.token });
+  assert.equal(g.status, 200);
+  assert.deepEqual(g.body, { organization_id: owner.orgId, max_token_lifetime_days: null });
+
+  const p = await patchPolicy(owner, owner.orgId, { max_token_lifetime_days: 30 });
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  assert.deepEqual(p.body, { organization_id: owner.orgId, max_token_lifetime_days: 30 });
+  assert.equal((await useApiToken(tok.token)).status, 401);
+
+  const cleared = await patchPolicy(owner, owner.orgId, { max_token_lifetime_days: null });
+  assert.deepEqual(cleared.body, { organization_id: owner.orgId, max_token_lifetime_days: null });
+  assert.equal((await useApiToken(tok.token)).status, 200);
+
+  const logged = await app.db.prepare("SELECT details FROM activity_log WHERE user_id = ? AND action = 'org_token_lifetime_changed' ORDER BY id").all(owner.id);
+  assert.deepEqual(logged.map((r) => r.details.split(', max_token_lifetime_days: ')[1]), ['none -> 30', '30 -> none']);
+});
+
+test('endpoint: org_admin of the org may set the cap (same tier as regions)', async () => {
+  const admin = await memberOf({ orgRole: 'org_admin' });
+  assert.equal((await patchPolicy(admin, owner.orgId, { max_token_lifetime_days: 60 })).status, 200);
+  assert.equal((await j('GET', policyPath(owner.orgId), { token: admin.token })).body.max_token_lifetime_days, 60);
+});
+
+test('endpoint: platform_admin may set any org\'s cap (owner-tier override, like every other org-admin setting)', async () => {
+  assert.equal((await patchPolicy(platformAdmin, owner.orgId, { max_token_lifetime_days: 7 })).status, 200);
+});
+
+test('endpoint: workspace-level roles, field_technician and platform_operator are refused (read and write)', async () => {
+  const cases = [
+    await memberOf({ workspaceRole: 'workspace_admin' }),
+    await memberOf({ workspaceRole: 'workspace_editor' }),
+    await memberOf({ orgRole: 'field_technician' }),
+    await memberOf({ platformRole: 'platform_operator' }),
+  ];
+  for (const u of cases) {
+    assert.equal((await patchPolicy(u, owner.orgId, { max_token_lifetime_days: 1 })).status, 403);
+    assert.equal((await j('GET', policyPath(owner.orgId), { token: u.token })).status, 403);
+  }
+  const org = await app.db.prepare('SELECT max_token_lifetime_days FROM organizations WHERE id = ?').get(owner.orgId);
+  assert.equal(org.max_token_lifetime_days, null, 'no refused caller changed the cap');
+});
+
+test("endpoint: an org_owner cannot set ANOTHER org's cap", async () => {
+  const r = await patchPolicy(owner, platformAdmin.orgId, { max_token_lifetime_days: 1 });
+  assert.equal(r.status, 403);
+  const org = await app.db.prepare('SELECT max_token_lifetime_days FROM organizations WHERE id = ?').get(platformAdmin.orgId);
+  assert.equal(org.max_token_lifetime_days, null);
+});
+
+test('endpoint: validation - integer days 1..3650 or null; field required; unknown org 404', async () => {
+  for (const bad of [0, -5, 3651, 1.5, '30', true, {}]) {
+    const r = await patchPolicy(owner, owner.orgId, { max_token_lifetime_days: bad });
+    assert.equal(r.status, 400, `value ${JSON.stringify(bad)}`);
+  }
+  assert.equal((await patchPolicy(owner, owner.orgId, {})).status, 400);
+  assert.equal((await patchPolicy(owner, owner.orgId, { max_token_lifetime_days: 1 })).status, 200);
+  assert.equal((await patchPolicy(owner, owner.orgId, { max_token_lifetime_days: 3650 })).status, 200);
+  assert.equal((await patchPolicy(owner, 'no-such-org', { max_token_lifetime_days: 30 })).status, 404);
+});

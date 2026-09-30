@@ -371,6 +371,40 @@ curl -s -X DELETE https://signage.example.com/api/admin/scim-tokens/<id> -H "Aut
 To rotate a token: mint a new one, paste it into Entra, *Test Connection*,
 then revoke the old one.
 
+### Maximum SCIM token lifetime (Ref 34)
+
+SCIM tokens follow the same organization-level cap as `st_` API tokens:
+`organizations.max_token_lifetime_days`. The default is `null`, meaning no
+cap and the existing behaviour. An org owner/admin (or a platform admin) sets
+it with `PATCH /api/organizations/<org id>/token-policy`. See
+[docs/bi-integration.md](bi-integration.md#maximum-token-lifetime-ref-34) for
+the endpoint.
+
+- `scimAuth` compares the token's age (now − `created_at`) with the **bound
+  organization's** current cap (`scim_tokens.organization_id`) on every
+  request. The check is retroactive: when the cap is lowered, a token that
+  is already older than the new cap is refused on its very next request. The
+  refusal is the same `401` SCIM error as a revoked token, with `detail`
+  `"Invalid or expired SCIM bearer token"`. Entra reports it as a
+  provisioning credential failure, and provisioning stops until a new token
+  is pasted in.
+- `GET /api/admin/scim-tokens` (and the mint response) now include
+  `expires_at` (epoch seconds, or `null` when uncapped) and `expired`.
+  Rotate (mint → paste into Entra → *Test Connection* → revoke the old one)
+  before `expires_at`.
+- Raising or removing the cap re-admits a token that was refused only for its
+  age. Use revoke to kill a token permanently.
+- **Minting stays platform-admin only, but the org sets the cap.** An org
+  admin can't mint or see its SCIM tokens (see above), yet it can shorten
+  their lifetime. That is intentional: the cap only restricts access and
+  never widens it.
+- **Not covered:** Entra ID Service Principals (Ref 9). BeamOS stores only
+  their `client_id`, and each call brings a short-lived Entra access token
+  whose `exp` is enforced by `jwtVerify` in `middleware/entraToken.js`. The
+  SP's own client-secret or certificate expiry is set in Entra. Browser SSO
+  sessions (`jwtExpiry`) are interactive logins, not programmatic access, and
+  are also out of scope.
+
 ---
 
 ## Worked example: the full loop
