@@ -9,9 +9,9 @@ const { accessContext } = require('../lib/tenancy');
 // scope. No-op for JWT sessions; for tokens a read/write scope is rejected.
 const { requireScope } = require('../middleware/apiToken');
 const { asyncHandler } = require('../lib/async-handler');
+const { ALLOWED_COMMANDS } = require('../lib/device-commands');
 
 const VALID_COLOR = /^#[0-9A-Fa-f]{6}$/;
-const ALLOWED_COMMANDS = ['screen_on', 'screen_off', 'launch', 'update', 'reboot', 'shutdown'];
 
 // Phase 2.2i: split read/write access checks. Both attach req.group on success.
 async function loadGroupAccessCtx(req, res) {

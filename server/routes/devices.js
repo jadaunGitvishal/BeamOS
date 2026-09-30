@@ -8,6 +8,10 @@ const { accessContext } = require('../lib/tenancy');
 const { stripDeviceSecrets } = require('../lib/device-sanitize');
 const { layoutZones, orphanCountsByDevice } = require('../lib/zone-validate');
 const { asyncHandler } = require('../lib/async-handler');
+const { ALLOWED_COMMANDS } = require('../lib/device-commands');
+const { requireScope } = require('../middleware/apiToken');
+const commandQueue = require('../lib/command-queue');
+const config = require('../config');
 
 // List devices in the caller's current workspace.
 // Phase 2.2a: filter by workspace_id instead of user_id. The caller's current
@@ -254,6 +258,33 @@ router.post('/:id/unblock', asyncHandler(async (req, res) => {
   await db.prepare("UPDATE devices SET blocked = 0, updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(req.params.id);
   console.log(`[blocked] device ${req.params.id} unblocked via dashboard (user ${req.user.id})`);
   res.json({ success: true, id: req.params.id, blocked: false });
+}));
+
+// Ref 50: send a single device:command (screen_off / screen_on / reboot / ...) to ONE
+// device over REST, so the dashboard doesn't need a Socket.IO client. Same write gate as
+// block/unblock (checkDeviceOwnership: viewers and cross-workspace users get 403) and the
+// same 'full' token scope as the group command route. Online device -> emitted now;
+// offline -> held in the short-lived command queue and flushed on its next register,
+// mirroring the dashboard:device-command socket handler. The queue is built for brief
+// flaps (config.commandQueueTtlMs, 30s default), not long outages, so the response
+// carries queue_ttl_seconds and the dashboard tells the operator it may expire.
+router.post('/:id/command', requireScope('full'), asyncHandler(async (req, res) => {
+  const device = await checkDeviceOwnership(req, res);
+  if (!device) return;
+  const { type, payload } = req.body || {};
+  if (!type) return res.status(400).json({ error: 'command type required' });
+  if (!ALLOWED_COMMANDS.includes(type)) return res.status(400).json({ error: 'invalid command type' });
+
+  const deviceNs = req.app.get('io').of('/device');
+  const room = deviceNs.adapter.rooms.get(device.id);
+  if (room && room.size > 0) {
+    deviceNs.to(device.id).emit('device:command', { type, payload: payload || {} });
+    console.log(`Command '${type}' delivered to device ${device.id} (user ${req.user.id})`);
+    return res.json({ success: true, id: device.id, type, delivered: true, queued: false });
+  }
+  const queued = commandQueue.queueCommand(device.id, type, payload || {});
+  console.log(`Command '${type}' for offline device ${device.id} (queued=${queued}, user ${req.user.id})`);
+  res.json({ success: true, id: device.id, type, delivered: false, queued, queue_ttl_seconds: Math.round(config.commandQueueTtlMs / 1000) });
 }));
 
 // Delete device
