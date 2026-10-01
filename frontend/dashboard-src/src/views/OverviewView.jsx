@@ -218,8 +218,7 @@ export default function OverviewView() {
           target={HEALTH_TARGET}
           status={healthStatus}
           detail={healthDetail}
-          color={exceptions > 0 ? "var(--health-warn)" : undefined}
-          detailColor="var(--health-bad)"
+          color={exceptions > 0 ? "var(--warn)" : undefined}
         />
       </div>
 

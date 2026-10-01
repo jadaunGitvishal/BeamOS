@@ -32,10 +32,6 @@
   --line:#E1E7EE; --line-soft:#EDF1F6;
   --ink:#111826; --ink2:#4C5868; --ink3:#6B7688;
   --ok:#0E8A47; --warn:#B45309; --bad:#BE3B31;
-  /* Overview header "Network health" gauge only - the demo's lighter amber/red */
-  --health-warn:#D5852C; --health-bad:#D9534F;
-  /* light-blue tinted panel (Overview header gauge slot, from the demo) */
-  --panel-tint:#E1F0F6;
   /* --accent matches the sidebar's cyan; --cyan is kept as an explicit alias. */
   --accent:#17B9E7;
   --cyan:#17B9E7;
@@ -212,7 +208,7 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .ovbar-period small{display:block;font-size:9px;font-weight:400;letter-spacing:.13em;text-transform:uppercase;color:var(--ink3);margin-bottom:2px}
 .ovbar-live{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);margin-left:auto}
 .ovbar-live .livedot{margin-top:0}
-.ovhead .gauge-plain{background:var(--panel-tint);border-radius:var(--r);padding:14px 22px 14px 16px}
+.ovhead .gauge-plain{background:var(--paper);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
 /* ComplianceGauge variant="plain" (Overview header) */
 .gauge-plain .gauge-val{font-size:18px;font-weight:700}
 .gauge-plain .gauge-k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 3px}
