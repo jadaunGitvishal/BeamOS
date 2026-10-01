@@ -15,6 +15,7 @@ import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import AttentionCard from "../components/AttentionCard";
 import KpiCard from "../components/KpiCard";
+import ProgressBar from "../components/ProgressBar";
 import WorkspaceSwitcher from "../components/WorkspaceSwitcher";
 import PeriodSelector from "../components/PeriodSelector";
 
@@ -566,44 +567,61 @@ export default function OverviewView() {
 
       {regionRows ? (
         <div className="sec">
-          <div className="ch">
-            <h2>Regions</h2>
-            <span className="hint">
-              SLA by region{regionTarget !== null ? ` · target ${regionTarget}%` : ""}
-            </span>
-          </div>
-          <div className="card">
-            <div className="paq">
-              {regionRows.map((r) => {
-                const s = REGION_STATUS[r.sla_status] || REGION_STATUS.unknown;
-                return (
-                  <div className="paq-row" key={r.region_id || "__unassigned__"}>
-                    <div style={{ minWidth: 0 }}>
-                      <span
-                        className="paq-title"
-                        style={r.region_id === null ? { color: "var(--ink3)" } : undefined}
-                      >
-                        {r.region_name}
-                      </span>
-                    </div>
-                    <div className="paq-meta">
-                      {/* status carries the colour signal; the uptime number
-                          stays neutral so a "Breach" region whose absolute
-                          uptime is still >90 doesn't read red-then-green. */}
-                      <span style={{ color: s.color }}>{s.label}</span>
-                      <span style={{ color: r.avg_uptime_pct !== null ? "var(--ink2)" : "var(--ink3)" }}>
-                        {r.avg_uptime_pct !== null ? `${r.avg_uptime_pct}%` : "—"}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="mt16">
-              <Link className="btn" to="/regions">
-                View all in Regions
+          <div className="card pad0 panel">
+            <div className="panel-head panel-head-pad">
+              <div>
+                <p className="eyebrow">Comparative performance</p>
+                <h2>Regional health</h2>
+              </div>
+              <Link className="panel-link" to="/regions">
+                Open region view →
               </Link>
             </div>
+            {/* Real /regions/sla-overview fields only - no per-region trend or
+                period-over-period change exists, so neither is shown. */}
+            <table className="regtab">
+              <thead>
+                <tr>
+                  <th>Region</th>
+                  <th>Compliance{regionTarget !== null ? ` · target ${regionTarget}%` : ""}</th>
+                  <th className="r">Screens</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {regionRows.map((r) => {
+                  const s = REGION_STATUS[r.sla_status] || REGION_STATUS.unknown;
+                  return (
+                    <tr key={r.region_id || "__unassigned__"}>
+                      <td className="regtab-name" style={{ boxShadow: `inset 3px 0 0 ${s.color}` }}>
+                        <span style={r.region_id === null ? { color: "var(--ink3)" } : undefined}>{r.region_name}</span>
+                        <small>
+                          {n0(r.workspace_count)} workspace{r.workspace_count === 1 ? "" : "s"}
+                        </small>
+                      </td>
+                      <td style={{ minWidth: 170 }}>
+                        {/* Bar wears the status colour so it never disagrees
+                            with the Status column (e.g. amber bar, red Breach). */}
+                        <ProgressBar
+                          percentage={r.avg_uptime_pct}
+                          target={regionTarget}
+                          color={r.avg_uptime_pct !== null ? s.color : undefined}
+                        />
+                      </td>
+                      <td className="r regtab-screens">
+                        <span className="num">
+                          {n0(r.devices_with_data)} <small>of {n0(r.device_count)}</small>
+                        </span>
+                        <small>with data</small>
+                      </td>
+                      <td>
+                        <span style={{ color: s.color, fontWeight: 500 }}>{s.label}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
       ) : null}

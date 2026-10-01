@@ -344,6 +344,12 @@ tr.click:hover{background:#F7F9FC}
 .panel-chart h3{font-size:13px;font-weight:600;margin:0}
 .panel-link{font-size:12.5px;color:var(--accent);text-decoration:none;white-space:nowrap;margin-top:2px}
 .panel-link:hover{text-decoration:underline}
+.panel-head-pad{padding:16px 18px 8px;margin:0}
+/* Overview "Regional health" table */
+.regtab td{vertical-align:middle}
+.regtab-name span{display:block;font-weight:500}
+.regtab-name small,.regtab-screens small{display:block;font-size:11px;color:var(--ink3);margin-top:1px}
+.regtab-screens .num small{display:inline;font-size:11.5px;color:var(--ink3)}
 .paq-ranked .paq-row{border-left:3px solid var(--line);padding:10px 0 10px 12px;align-items:center;gap:12px}
 .paq-ranked .paq-row:first-child{padding-top:10px}
 .paq-ranked .paq-row:last-child{padding-bottom:10px}
