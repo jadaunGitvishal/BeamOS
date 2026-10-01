@@ -14,6 +14,7 @@ import { deliveryColor } from "../lib/campaigns";
 import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import AttentionCard from "../components/AttentionCard";
+import KpiCard from "../components/KpiCard";
 import WorkspaceSwitcher from "../components/WorkspaceSwitcher";
 import PeriodSelector from "../components/PeriodSelector";
 
@@ -235,6 +236,17 @@ export default function OverviewView() {
   // "Online now" tile - rather than a heartbeat-age cut-off, which would need
   // a threshold this page doesn't otherwise define.
   const { start: periodStart, end: periodEnd } = periodWindow(period);
+
+  // KPI row - every figure is from data this page already loaded:
+  //   on air: overview online / total
+  //   below target: SLA devices with data whose availability is under the
+  //     SLA target (uptimeVals = those with data); sla null -> "—"
+  //   open issues: issue groups + their summed affected_devices (a device
+  //     in two groups counts twice, so no % bar against the fleet)
+  //   incomplete plays: total_plays - completed_plays for the period
+  const belowTarget = slaTarget !== null ? uptimeVals.filter((v) => v < slaTarget).length : null;
+  const affectedScreens = issues !== null ? issues.reduce((a, i) => a + i.affected_devices, 0) : null;
+  const incompletePlays = overview.total_plays - overview.completed_plays;
   const reportingPct = total ? Math.round((online / total) * 100) : null;
 
   return (
@@ -335,19 +347,48 @@ export default function OverviewView() {
       </div>
 
       <div className="grid g4 mt16">
-        <StatTile label="Total devices" value={n0(total)} card />
-        <StatTile label="Online now" value={n0(online)} sub={total ? `${((online / total) * 100).toFixed(1)}% of the fleet` : null} card />
-        <StatTile label="Needs attention" value={n0(attention.length)} sub="low storage, low RAM or weak Wi-Fi" card />
-        {issues !== null ? (
-          <StatTile
-            label="Open issues"
-            value={n0(issues.length)}
-            sub={`${n0(issues.reduce((a, i) => a + i.affected_devices, 0))} devices affected`}
-            card
-          />
-        ) : (
-          <StatTile label="Open issues" value="—" sub="platform admin only" card />
-        )}
+        <KpiCard
+          label="Screens on air now"
+          value={n0(online)}
+          ofValue={n0(total)}
+          subLine={total ? `${((online / total) * 100).toFixed(1)}% of fleet` : "no screens yet"}
+          percentage={total ? (online / total) * 100 : null}
+          color="var(--on)"
+          linkTo="/devices"
+        />
+        <KpiCard
+          label="Screens below target"
+          value={belowTarget !== null ? n0(belowTarget) : "—"}
+          ofValue={belowTarget !== null ? n0(uptimeVals.length) : null}
+          subLine={
+            belowTarget !== null
+              ? `uptime under the ${slaTarget}% SLA target`
+              : "SLA data unavailable"
+          }
+          percentage={belowTarget !== null && uptimeVals.length ? (belowTarget / uptimeVals.length) * 100 : null}
+          color="var(--bad)"
+          linkTo="/regions"
+        />
+        <KpiCard
+          label="Open issues"
+          value={issues !== null ? n0(issues.length) : "—"}
+          subLine={
+            issues !== null
+              ? `${n0(affectedScreens)} screen${affectedScreens === 1 ? "" : "s"} affected`
+              : "platform admin only"
+          }
+          color="var(--warn)"
+          linkTo={issues !== null ? "/issues" : null}
+        />
+        <KpiCard
+          label="Incomplete plays"
+          value={n0(incompletePlays)}
+          ofValue={n0(overview.total_plays)}
+          subLine="incomplete this period"
+          percentage={overview.total_plays ? (incompletePlays / overview.total_plays) * 100 : null}
+          color="var(--accent)"
+          linkTo="/content"
+        />
       </div>
 
       {overview.org ? (

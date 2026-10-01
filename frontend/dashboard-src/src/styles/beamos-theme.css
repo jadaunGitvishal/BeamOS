@@ -231,6 +231,14 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .stat .k{font-size:11.5px;color:var(--ink2);margin:0 0 3px}
 .stat .v{font-size:22px;font-weight:600;letter-spacing:-.02em;margin:0;line-height:1.15}
 .stat .s{font-size:11px;color:var(--ink3);margin:2px 0 0;font-family:var(--f-mono)}
+/* KpiCard (components/KpiCard.jsx) - colour comes in via border-top-color */
+.kpi{border-top:3px solid var(--line);display:flex;flex-direction:column}
+.kpi-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.kpi-link{flex:none;width:22px;height:22px;margin:-3px -4px 0 0;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;color:var(--ink3);font-size:13px;line-height:1;text-decoration:none}
+.kpi-link:hover{background:var(--line-soft);color:var(--ink)}
+.kpi .v small{font-size:13px;font-weight:500;color:var(--ink3);letter-spacing:0}
+.kpi-bar{margin-top:auto;padding-top:12px}
+.kpi-bar .pbar{min-width:0}
 
 /* ComplianceGauge — ring + centred % beside a label/caption */
 .gauge{display:flex;flex-direction:row;align-items:center;gap:14px}
