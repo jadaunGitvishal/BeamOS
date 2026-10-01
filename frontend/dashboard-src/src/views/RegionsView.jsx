@@ -4,8 +4,10 @@ import { useSession } from "../hooks/useSession";
 import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
-import { n0, cCol, periodWindow, periodLabel, isoDateOnly } from "../lib/format";
+import { n0, periodWindow, periodLabel, isoDateOnly } from "../lib/format";
 import { REGION_STATUS as STATUS } from "../lib/regions";
+import ProgressBar from "../components/ProgressBar";
+import CategoryBarChart from "../components/CategoryBarChart";
 
 // Phase 3 Stage C — per-region SLA rollup, read off
 // GET /api/organizations/:orgId/regions/sla-overview (Stage B). The endpoint
@@ -13,6 +15,10 @@ import { REGION_STATUS as STATUS } from "../lib/regions";
 // "Unassigned" bucket for region-less workspaces, so this view just renders it.
 // Status label/colour vocabulary lives in lib/regions.js, shared with the
 // Overview "Regions" teaser.
+//
+// The endpoint returns one period average per region, not a daily series, so
+// rows get a ProgressBar vs the target (no Sparkline — there's no trend data
+// to draw and we don't fabricate one).
 
 export default function RegionsView() {
   const { me } = useSession();
@@ -114,6 +120,20 @@ export default function RegionsView() {
               </p>
             </div>
           ) : null}
+          <CategoryBarChart
+            className="mb10"
+            title="Uptime by region"
+            hint={`average over the ${periodLabel(period)}${target !== null ? `, target ${target}%` : ""}`}
+            layout="horizontal"
+            unit="%"
+            domain={[0, 100]}
+            height={Math.max(110, regions.length * 34 + 30)}
+            data={regions.map((r) => ({
+              label: r.region_name,
+              value: r.avg_uptime_pct,
+              color: (STATUS[r.sla_status] || STATUS.unknown).color,
+            }))}
+          />
           <div className="card pad0">
           <table>
             <thead>
@@ -121,7 +141,7 @@ export default function RegionsView() {
                 <th>Region</th>
                 <th className="r">Workspaces</th>
                 <th className="r">Screens</th>
-                <th className="r">Avg uptime</th>
+                <th>Avg uptime vs target</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -144,8 +164,8 @@ export default function RegionsView() {
                         <small style={{ color: "var(--ink3)" }}> ({n0(r.devices_with_data)} w/ data)</small>
                       ) : null}
                     </td>
-                    <td className="r mono" style={{ color: r.avg_uptime_pct !== null ? cCol(r.avg_uptime_pct) : "var(--ink3)" }}>
-                      {r.avg_uptime_pct !== null ? `${r.avg_uptime_pct}%` : "—"}
+                    <td style={{ minWidth: 180 }}>
+                      <ProgressBar percentage={r.avg_uptime_pct} target={target} />
                     </td>
                     <td>
                       <span style={{ color: s.color, fontWeight: 500 }}>{s.label}</span>

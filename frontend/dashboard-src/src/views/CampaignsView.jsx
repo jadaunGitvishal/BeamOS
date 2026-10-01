@@ -6,6 +6,7 @@ import { useToast } from "../hooks/useToast";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0 } from "../lib/format";
 import { CAMPAIGN_STATUS as STATUS, deliveryColor } from "../lib/campaigns";
+import ProgressBar from "../components/ProgressBar";
 
 // Phase 5 Stage C — the Campaigns page. Lists a workspace's campaigns (Stage A)
 // with their computed status and delivery numbers (Stage B), and lets a
@@ -257,7 +258,7 @@ export default function CampaignsView() {
                 <th>Campaign</th>
                 <th>Status</th>
                 <th>Dates</th>
-                <th className="r">Delivery</th>
+                <th>Delivery</th>
                 <th className="r">Plays (actual / expected)</th>
                 {canWrite ? <th className="r">Actions</th> : null}
               </tr>
@@ -282,8 +283,8 @@ export default function CampaignsView() {
                       <td className="mono" style={{ fontSize: 12 }}>
                         {c.start_date} → {c.end_date}
                       </td>
-                      <td className="r mono" style={{ color: deliveryColor(c.delivery_pct), fontWeight: 500 }}>
-                        {c.delivery_pct == null ? "—" : `${c.delivery_pct}%`}
+                      <td style={{ minWidth: 160 }}>
+                        <ProgressBar percentage={c.delivery_pct} color={deliveryColor(c.delivery_pct)} />
                       </td>
                       <td className="r mono">
                         {c.actual_plays == null ? (

@@ -14,6 +14,7 @@ import {
   rankOpenTickets,
 } from "../lib/tickets";
 import StatTile from "../components/StatTile";
+import CategoryBarChart from "../components/CategoryBarChart";
 
 // Phase 4 Stage D — the Operations page. Pulls the ticket list (Stage A) and the
 // response-time rollup (Stage C) for one workspace and shows: a priority/age
@@ -201,6 +202,18 @@ export default function OperationsView() {
           card
         />
       </div>
+
+      <CategoryBarChart
+        className="mt16"
+        title="SLA attention"
+        hint="open tickets by response-time state"
+        height={150}
+        data={[
+          { label: "Breached", value: summary.counts.breached, color: "var(--bad)" },
+          { label: "Due today", value: summary.counts.due_today, color: "var(--warn)" },
+          { label: "Within SLA", value: summary.counts.within_sla, color: "var(--ok)" },
+        ]}
+      />
 
       {/* Ownership breakdown */}
       <div className="sec">

@@ -5,6 +5,7 @@ import { useClock } from "../hooks/useClock";
 import { useToast } from "../hooks/useToast";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { SIM_STATUSES, SIM_STATUS } from "../lib/sim-inventory";
+import CategoryBarChart from "../components/CategoryBarChart";
 
 // Ref 65 — SIM inventory: a manual stock ledger for physical SIM cards
 // (in_stock -> assigned -> active -> retired), no carrier API integration.
@@ -235,6 +236,20 @@ export default function SimInventoryView() {
         </button>
       ) : null}
       {formPanel}
+
+      {allSims.length ? (
+        <CategoryBarChart
+          className="mb10"
+          title="SIMs by status"
+          hint={`all ${allSims.length} SIMs, ignoring the filters below`}
+          height={150}
+          data={SIM_STATUSES.map((st) => ({
+            label: SIM_STATUS[st].label,
+            value: allSims.filter((s) => s.status === st).length,
+            color: SIM_STATUS[st].color,
+          }))}
+        />
+      ) : null}
 
       <div className="ctl mb10">
         <div className="seg" role="group" aria-label="Filter by status">
