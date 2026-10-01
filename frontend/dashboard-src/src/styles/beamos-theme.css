@@ -314,7 +314,7 @@ tr.click:hover{background:#F7F9FC}
 .exc p{margin:0 0 8px;font-size:12.5px;color:var(--ink2)}
 .exc .meta{display:flex;gap:14px;font-family:var(--f-mono);font-size:10.5px;color:var(--ink3);flex-wrap:wrap}
 
-.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:9px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:9px}
 .tile{border:1px solid var(--line);border-radius:8px;background:var(--paper);overflow:hidden;cursor:pointer;transition:border-color .12s}
 .tile:hover{border-color:#B9C5D4}
 .tile .scr{height:66px;background:#EDF1F6;display:grid;place-items:center;font-family:var(--f-mono);font-size:10px;color:var(--ink3);overflow:hidden}

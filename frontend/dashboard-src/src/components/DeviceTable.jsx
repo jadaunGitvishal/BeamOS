@@ -4,6 +4,12 @@ import { isAtRisk, isWeakSignal } from "../lib/risk";
 import StatusTag from "./StatusTag";
 import StatusCategoryTag from "./StatusCategoryTag";
 
+// Free storage: GB (1 dp) from 1024 MB up, else whole MB; "—" when unknown.
+function fmtStorage(mb) {
+  if (mb === null || mb === undefined) return "—";
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+}
+
 function DeviceTableRow({ device: d }) {
   const navigate = useNavigate();
   const risk = isAtRisk(d) || isWeakSignal(d);
@@ -23,6 +29,15 @@ function DeviceTableRow({ device: d }) {
       <td>
         <StatusCategoryTag category={d.status_category} />
       </td>
+      <td className="num" style={isWeakSignal(d) ? { color: "var(--warn)" } : undefined}>
+        {d.wifi_rssi === null || d.wifi_rssi === undefined ? "—" : `${d.wifi_rssi} dBm`}
+      </td>
+      <td
+        className="num"
+        style={d.storage_free_mb !== null && d.storage_free_mb !== undefined && d.storage_free_mb < 500 ? { color: "var(--warn)" } : undefined}
+      >
+        {fmtStorage(d.storage_free_mb)}
+      </td>
       <td className="num" title={seenTitle}>
         {timeAgo(d.last_heartbeat)}
       </td>
@@ -33,12 +48,14 @@ function DeviceTableRow({ device: d }) {
 export default function DeviceTable({ devices }) {
   return (
     <div className="card pad0">
-      <table>
+      <table style={{ minWidth: 640 }}>
         <thead>
           <tr>
             <th>Name</th>
             <th>Status</th>
             <th>Category</th>
+            <th>Wi-Fi</th>
+            <th>Free storage</th>
             <th>Last seen</th>
           </tr>
         </thead>

@@ -4,6 +4,8 @@ import { useApi } from "../hooks/useApi";
 import { useSession } from "../hooks/useSession";
 import { apiFetch } from "../lib/api";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
+import { n0 } from "../lib/format";
+import KpiCard from "../components/KpiCard";
 import DeviceTile from "../components/DeviceTile";
 import DeviceTable from "../components/DeviceTable";
 
@@ -88,6 +90,15 @@ export default function DevicesView() {
       (!catFilter || d.status_category === catFilter),
   );
 
+  // KPI row: computed over the whole fleet, not the filtered list.
+  const total = devices.length;
+  const onlineNow = devices.filter((d) => d.status === "online").length;
+  const active = devices.filter((d) => d.status_category === "active").length;
+  const inactive = devices.filter((d) => d.status_category === "inactive").length;
+  const offline = devices.filter((d) => d.status_category === "offline").length;
+  const atRisk = devices.filter((d) => isAtRisk(d) || isWeakSignal(d)).length;
+  const share = (n) => (total ? (n / total) * 100 : null);
+
   const qparam = urlSearch ? `&q=${encodeURIComponent(urlSearch)}` : "";
   const rparam = riskOnly ? "&risk=1" : "";
   const cparam = catFilter ? `&cat=${catFilter}` : "";
@@ -108,6 +119,45 @@ export default function DevicesView() {
         </span>
       </div>
       <p className="sub">What each device is reporting right now.</p>
+
+      {total > 0 ? (
+        <div className="grid g4" style={{ marginBottom: 16 }}>
+          <KpiCard
+            label="Screens"
+            value={n0(total)}
+            subLine={`${n0(onlineNow)} online now`}
+            percentage={share(onlineNow)}
+            color="var(--accent)"
+          />
+          <KpiCard
+            label="Active"
+            value={n0(active)}
+            ofValue={n0(total)}
+            subLine={inactive ? `${n0(inactive)} inactive (blocked)` : "online and not blocked"}
+            percentage={share(active)}
+            color="var(--ok)"
+            linkTo="/devices?cat=active"
+          />
+          <KpiCard
+            label="Offline"
+            value={n0(offline)}
+            ofValue={n0(total)}
+            subLine={offline ? "not connected" : "every screen is connected"}
+            percentage={share(offline)}
+            color={offline ? "var(--bad)" : "var(--ok)"}
+            linkTo="/devices?cat=offline"
+          />
+          <KpiCard
+            label="At risk or weak signal"
+            value={n0(atRisk)}
+            ofValue={n0(total)}
+            subLine={atRisk ? "low storage, low memory or weak Wi-Fi" : "storage, memory and Wi-Fi look fine"}
+            percentage={share(atRisk)}
+            color={atRisk ? "var(--warn)" : "var(--ok)"}
+            linkTo="/devices?risk=1"
+          />
+        </div>
+      ) : null}
 
       <div className="ctl mb10">
         <div className="seg" role="group" aria-label="View">
