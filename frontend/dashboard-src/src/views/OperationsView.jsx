@@ -11,6 +11,7 @@ import {
   CAUSE_LABELS,
   CATEGORY_LABEL,
   CATEGORY_COLOR,
+  OWNER_LABELS,
   rankOpenTickets,
 } from "../lib/tickets";
 import StatTile from "../components/StatTile";
@@ -22,13 +23,6 @@ import CategoryBarChart from "../components/CategoryBarChart";
 // and a small per-owner count. workspace_editor+ can change a ticket's
 // status/owner inline (PATCH, Stage A); a viewer sees the same data read-only.
 
-const OWNER_LABELS = {
-  customer_it: "Customer IT",
-  store_staff: "Store staff",
-  platform: "Platform",
-  hardware: "Hardware",
-  unassigned: "Unassigned",
-};
 const OWNER_OPTIONS = ["unassigned", "customer_it", "store_staff", "platform", "hardware"];
 const CATEGORY_OPTIONS = ["reactive", "proactive", "emergency"];
 const STATUS_OPTIONS = ["open", "in_progress", "resolved", "closed"];

@@ -332,6 +332,25 @@ tr.click:hover{background:#F7F9FC}
 
 /* Overview "Priority actions" teaser — compact top-3 ticket rows */
 .paq{display:flex;flex-direction:column}
+/* Overview two-column SLA / Priority actions panels */
+.ovsplit{align-items:start}
+.panel-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
+.panel-head .eyebrow{margin-bottom:3px}
+.panel-note{font-size:12px;color:var(--ink3);margin:0 0 12px}
+.panel-gauge{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.panel .gauge.card{border:0;padding:0;background:none}
+.panel-delta{margin:0;font-size:12px;color:var(--ink2)}
+.panel-chart{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-soft)}
+.panel-chart h3{font-size:13px;font-weight:600;margin:0}
+.panel-link{font-size:12.5px;color:var(--accent);text-decoration:none;white-space:nowrap;margin-top:2px}
+.panel-link:hover{text-decoration:underline}
+.paq-ranked .paq-row{border-left:3px solid var(--line);padding:10px 0 10px 12px;align-items:center;gap:12px}
+.paq-ranked .paq-row:first-child{padding-top:10px}
+.paq-ranked .paq-row:last-child{padding-bottom:10px}
+.paq-num{flex:none;font-size:12px;color:var(--ink3);font-family:var(--f-mono);width:20px}
+.paq-owner{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);margin-bottom:2px}
+.paq-open{font-family:var(--f-ui);font-weight:500;color:var(--accent);text-decoration:none;margin-top:4px}
+.paq-open:hover{text-decoration:underline}
 .paq-row{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--line-soft)}
 .paq-row:first-child{padding-top:0}
 .paq-row:last-child{padding-bottom:0;border-bottom:0}

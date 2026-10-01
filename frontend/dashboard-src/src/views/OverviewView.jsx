@@ -8,7 +8,7 @@ import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, cCol, periodWindow, isoDateOnly, formatDuration, fmtPeriodRange } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
-import { PRIORITY_COLOR, RESPONSE_STATUS, CATEGORY_LABEL, CATEGORY_COLOR, causeHint, rankOpenTickets } from "../lib/tickets";
+import { PRIORITY_COLOR, RESPONSE_STATUS, CATEGORY_LABEL, CATEGORY_COLOR, OWNER_LABELS, causeHint, rankOpenTickets } from "../lib/tickets";
 import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
 import { deliveryColor } from "../lib/campaigns";
 import StatTile from "../components/StatTile";
@@ -206,6 +206,21 @@ export default function OverviewView() {
   const trend = (data.slaTrend ?? [])
     .map((p) => ({ day: p.day, pct: Number(p.avg_uptime_pct) }))
     .filter((p) => Number.isFinite(p.pct));
+  // Last 7 days vs the 7 before, from the same daily trend series. Only shown
+  // when both windows have at least 4 days of data (in practice the 30d view;
+  // 7d/24h fetch 7 days, so there's no previous week to compare against).
+  const weekDelta = (() => {
+    if (!trend.length) return null;
+    const dayNum = (d) => Math.round(Date.parse(`${d}T00:00:00Z`) / 86400000);
+    const last = Math.max(...trend.map((p) => dayNum(p.day)));
+    const recent = trend.filter((p) => last - dayNum(p.day) < 7).map((p) => p.pct);
+    const prev = trend.filter((p) => last - dayNum(p.day) >= 7 && last - dayNum(p.day) < 14).map((p) => p.pct);
+    if (recent.length < 4 || prev.length < 4) return null;
+    const mean = (a) => a.reduce((x, v) => x + v, 0) / a.length;
+    return Math.round((mean(recent) - mean(prev)) * 10) / 10;
+  })();
+  const meetsTarget = fleetUptime !== null && slaTarget !== null ? fleetUptime >= slaTarget : null;
+
   const trendFloor = trend.length
     ? Math.max(0, Math.floor(Math.min(...trend.map((p) => p.pct), slaTarget ?? 100) / 5) * 5 - 5)
     : 0;
@@ -398,59 +413,57 @@ export default function OverviewView() {
         </div>
       ) : null}
 
-      <div className="sec">
-        <h2>SLA compliance</h2>
-        {sla ? (
-          <>
-            <p className="sub" style={{ margin: "0 0 12px" }}>
-              The SLA target is platform-wide for now
-              {slaTarget !== null ? ` — ${slaTarget}% uptime` : ""}
-              {slaThresholdH !== null ? `, escalating a breach after ${slaThresholdH}h continuously offline` : ""}.
-            </p>
-
-            <div className="grid g4">
-              <ComplianceGauge label="Fleet uptime vs target" percentage={fleetUptime} target={slaTarget} />
-              <StatTile
-                label="Mean time to recovery"
-                value={fleetMttr !== null ? formatDuration(fleetMttr) : "—"}
-                sub={mttrOutages ? `across ${n0(mttrOutages)} completed outage${mttrOutages === 1 ? "" : "s"}` : "no completed outages in range"}
-                card
-              />
-              <StatTile
-                label="Live breaches"
-                value={
-                  <span style={{ color: liveBreaches.length ? "var(--bad)" : "var(--ok)" }}>{n0(liveBreaches.length)}</span>
-                }
-                sub={liveBreaches.length ? `past the ${slaThresholdH ?? "escalation"}h threshold` : "none right now"}
-                card
-              />
-              <StatTile
-                label="Fleet uptime"
-                value={
-                  fleetUptime !== null ? (
-                    <span style={{ color: slaTarget !== null && fleetUptime >= slaTarget ? "var(--ok)" : "var(--bad)" }}>
-                      {fleetUptime.toFixed(1)}%
-                    </span>
-                  ) : (
-                    "—"
-                  )
-                }
-                sub={
-                  fleetUptime !== null
-                    ? `avg across ${n0(uptimeVals.length)} device${uptimeVals.length === 1 ? "" : "s"} with data`
-                    : "no data yet"
-                }
-                card
-              />
+      {/* SLA (left) + Priority actions (right), side by side; stacks on narrow screens. */}
+      <div className={`sec${openQueue != null ? " grid g2 ovsplit" : ""}`}>
+        <div className="card panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Fleet health · SLA</p>
+              <h2>Fleet uptime compliance</h2>
             </div>
-
-            {trend.length >= 2 ? (
-              <div className="card mt16">
-                <div className="ch">
-                  <h2>Fleet uptime trend</h2>
-                  <span className="hint">daily average vs the {slaTarget ?? "—"}% target</span>
-                </div>
-                <div style={{ width: "100%", height: 190 }}>
+            {meetsTarget !== null ? (
+              <span className={`tag ${meetsTarget ? "p-ok" : "p-bad"}`}>{meetsTarget ? "On target" : "Below target"}</span>
+            ) : null}
+          </div>
+          {sla ? (
+            <>
+              <p className="panel-note">
+                Platform-wide target{slaTarget !== null ? ` ${slaTarget}% uptime` : ""}
+                {slaThresholdH !== null ? `, escalating after ${slaThresholdH}h continuously offline` : ""}
+                {fleetUptime !== null ? ` · avg across ${n0(uptimeVals.length)} device${uptimeVals.length === 1 ? "" : "s"} with data` : ""}.
+              </p>
+              <div className="panel-gauge">
+                <ComplianceGauge label="Fleet uptime vs target" percentage={fleetUptime} target={slaTarget} />
+                {weekDelta !== null ? (
+                  <p className="panel-delta">
+                    <span style={{ color: weekDelta > 0 ? "var(--ok)" : weekDelta < 0 ? "var(--bad)" : "var(--ink3)" }} aria-hidden="true">
+                      {weekDelta > 0 ? "↗" : weekDelta < 0 ? "↘" : "→"}
+                    </span>{" "}
+                    {weekDelta === 0 ? "No change" : `${weekDelta > 0 ? "+" : "−"}${Math.abs(weekDelta).toFixed(1)} pts`} vs previous 7 days
+                  </p>
+                ) : null}
+              </div>
+              <div className="grid g2 mt16">
+                <StatTile
+                  label="Mean time to recovery"
+                  value={fleetMttr !== null ? formatDuration(fleetMttr) : "—"}
+                  sub={mttrOutages ? `across ${n0(mttrOutages)} completed outage${mttrOutages === 1 ? "" : "s"}` : "no completed outages in range"}
+                />
+                <StatTile
+                  label="Live breaches"
+                  value={
+                    <span style={{ color: liveBreaches.length ? "var(--bad)" : "var(--ok)" }}>{n0(liveBreaches.length)}</span>
+                  }
+                  sub={liveBreaches.length ? `past the ${slaThresholdH ?? "escalation"}h threshold` : "none right now"}
+                />
+              </div>
+              {trend.length >= 2 ? (
+                <div className="panel-chart">
+                  <div className="ch">
+                    <h3>Fleet uptime trend</h3>
+                    <span className="hint">daily average vs the {slaTarget ?? "—"}% target</span>
+                  </div>
+                  <div style={{ width: "100%", height: 190 }}>
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={trend} margin={{ top: 8, right: 14, bottom: 0, left: 4 }}>
                       <XAxis
@@ -492,33 +505,37 @@ export default function OverviewView() {
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <div className="card">
+                </div>
+              ) : null}
+            </>
+          ) : (
             <p className="empty" style={{ padding: 0 }}>
               SLA data isn’t available for this view.
             </p>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
 
-      {openQueue != null ? (
-        <div className="sec">
-          <div className="ch">
-            <h2>Priority actions</h2>
-            {openQueue.length ? <span className="hint">{n0(openQueue.length)} open · top 3</span> : null}
-          </div>
-          {topActions.length ? (
-            <div className="card">
-              <div className="paq">
-                {topActions.map((t) => {
+        {openQueue != null ? (
+          <div className="card panel">
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Exceptions</p>
+                <h2>Priority actions</h2>
+              </div>
+              <Link className="panel-link" to="/operations">
+                View all {n0(openQueue.length)} →
+              </Link>
+            </div>
+            {topActions.length ? (
+              <div className="paq paq-ranked">
+                {topActions.map((t, i) => {
                   const rs = RESPONSE_STATUS[t.response_status];
                   const cause = causeHint(t);
                   return (
-                    <div className="paq-row" key={t.id}>
-                      <div style={{ minWidth: 0 }}>
+                    <div className="paq-row" key={t.id} style={{ borderLeftColor: PRIORITY_COLOR[t.priority] || "var(--line)" }}>
+                      <span className="paq-num">{String(i + 1).padStart(2, "0")}</span>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <span className="paq-owner">{OWNER_LABELS[t.owner_category] || t.owner_category}</span>
                         <span className="paq-title">{t.title}</span>
                         {cause ? <span className="paq-cause">Likely cause: {cause}</span> : null}
                       </div>
@@ -530,29 +547,22 @@ export default function OverviewView() {
                           </span>
                         ) : null}
                         {rs ? <span style={{ color: rs.color }}>{rs.label}</span> : null}
+                        <Link className="paq-open" to="/operations">
+                          Open in Operations →
+                        </Link>
                       </div>
                     </div>
                   );
                 })}
               </div>
-              <div className="mt16">
-                <Link className="btn" to="/operations">
-                  View all in Operations
-                </Link>
-              </div>
-            </div>
-          ) : (
-            <div className="card">
+            ) : (
               <p className="empty" style={{ padding: 0 }}>
-                All clear — no open operational tickets right now.{" "}
-                <Link to="/operations" style={{ color: "var(--accent)" }}>
-                  Operations
-                </Link>
+                All clear — no open operational tickets right now.
               </p>
-            </div>
-          )}
-        </div>
-      ) : null}
+            )}
+          </div>
+        ) : null}
+      </div>
 
       {regionRows ? (
         <div className="sec">

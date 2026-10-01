@@ -11,6 +11,14 @@ export const PRIORITY_COLOR = { high: "var(--bad)", medium: "var(--warn)", low: 
 export const CATEGORY_LABEL = { proactive: "Proactive", reactive: "Reactive", emergency: "Emergency" };
 export const CATEGORY_COLOR = { proactive: "var(--ink3)", reactive: "var(--ink3)", emergency: "var(--bad)" };
 
+export const OWNER_LABELS = {
+  customer_it: "Customer IT",
+  store_staff: "Store staff",
+  platform: "Platform",
+  hardware: "Hardware",
+  unassigned: "Unassigned",
+};
+
 export const RESPONSE_STATUS = {
   breached: { label: "Breached", color: "var(--bad)" },
   due_today: { label: "Due today", color: "var(--warn)" },
