@@ -184,8 +184,8 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .sub{color:var(--ink2);font-size:13px;margin:2px 0 20px;max-width:70ch}
 .eyebrow{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 4px}
 /* Overview header: text left, Network health gauge right; wraps under on narrow screens */
-.ovhead{align-items:center;margin-bottom:20px}
-.ovhead-text{min-width:0;flex:1 1 320px}
+.ovhead{align-items:stretch;margin-bottom:20px;background:var(--paper);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
+.ovhead-text{min-width:0;flex:1 1 320px;display:flex;flex-direction:column;justify-content:center}
 .ovhead-text .sub{margin:2px 0 6px}
 .ovhead .gauge{flex:none}
 /* Workspace switcher in the Topbar: light-theme overrides of the rail styling
@@ -203,12 +203,12 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .top .wsw-item.on{color:var(--ink);background:rgba(23,185,231,.10)}
 .top .wsw-item-org,.top .wsw-item.on .wsw-item-org{color:var(--ink3)}
 /* Overview header status row: reporting period + live line */
-.ovbar{display:flex;align-items:center;gap:12px 18px;flex-wrap:wrap;margin:-6px 0 20px}
+.ovbar{display:flex;align-items:center;gap:12px 18px;flex-wrap:wrap;margin:0 0 20px;background:var(--paper);border:1px solid var(--line);border-radius:var(--r);padding:12px 18px}
 .ovbar-period{font-size:13px;color:var(--ink);font-weight:500}
 .ovbar-period small{display:block;font-size:9px;font-weight:400;letter-spacing:.13em;text-transform:uppercase;color:var(--ink3);margin-bottom:2px}
 .ovbar-live{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);margin-left:auto}
 .ovbar-live .livedot{margin-top:0}
-.ovhead .gauge-plain{background:var(--paper);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
+.ovhead .gauge-plain{background:transparent;border:0;padding:0}
 /* ComplianceGauge variant="plain" (Overview header) */
 .gauge-plain .gauge-val{font-size:18px;font-weight:700}
 .gauge-plain .gauge-k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 3px}
