@@ -34,6 +34,8 @@
   --ok:#0E8A47; --warn:#B45309; --bad:#BE3B31;
   /* Overview header "Network health" gauge only - the demo's lighter amber/red */
   --health-warn:#D5852C; --health-bad:#D9534F;
+  /* light-blue tinted panel (Overview header gauge slot, from the demo) */
+  --panel-tint:#E1F0F6;
   /* --accent matches the sidebar's cyan; --cyan is kept as an explicit alias. */
   --accent:#17B9E7;
   --cyan:#17B9E7;
@@ -189,6 +191,7 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .ovhead-text{min-width:0;flex:1 1 320px}
 .ovhead-text .sub{margin:2px 0 6px}
 .ovhead .gauge{flex:none}
+.ovhead .gauge-plain{background:var(--panel-tint);border-radius:var(--r);padding:14px 22px 14px 16px}
 /* ComplianceGauge variant="plain" (Overview header) */
 .gauge-plain .gauge-val{font-size:18px;font-weight:700}
 .gauge-plain .gauge-k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 3px}
