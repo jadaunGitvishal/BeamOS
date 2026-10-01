@@ -14,8 +14,8 @@ import {
   OWNER_LABELS,
   rankOpenTickets,
 } from "../lib/tickets";
-import StatTile from "../components/StatTile";
-import CategoryBarChart from "../components/CategoryBarChart";
+import KpiCard from "../components/KpiCard";
+import ShareBars from "../components/ShareBars";
 
 // Phase 4 Stage D — the Operations page. Pulls the ticket list (Stage A) and the
 // response-time rollup (Stage C) for one workspace and shows: a priority/age
@@ -127,6 +127,11 @@ export default function OperationsView() {
   const ownerCounts = {};
   for (const t of queue) ownerCounts[t.owner_category] = (ownerCounts[t.owner_category] || 0) + 1;
   const ownerRows = Object.entries(ownerCounts).sort((a, b) => b[1] - a[1]);
+  const priorityRows = ["high", "medium", "low"]
+    .map((pr) => ({ key: pr, label: pr.charAt(0).toUpperCase() + pr.slice(1), count: queue.filter((t) => t.priority === pr).length, color: PRIORITY_COLOR[pr] }))
+    .filter((r) => r.count > 0);
+  const totalOpen = summary.total_open;
+  const shareOf = (n) => (totalOpen ? (n / totalOpen) * 100 : null);
 
   const nowSec = Math.floor(Date.now() / 1000);
   const targets = summary.targets || {};
@@ -167,75 +172,59 @@ export default function OperationsView() {
 
       {/* SLA attention */}
       <div className="grid g4">
-        <StatTile
+        <KpiCard
           label="Breached"
-          value={<span style={{ color: "var(--bad)" }}>{n0(summary.counts.breached)}</span>}
-          sub="past the response-time target"
-          card
+          value={n0(summary.counts.breached)}
+          ofValue={totalOpen ? n0(totalOpen) : null}
+          subLine="past the response-time target"
+          percentage={shareOf(summary.counts.breached)}
+          color="var(--bad)"
         />
-        <StatTile
+        <KpiCard
           label="Due today"
-          value={<span style={{ color: "var(--warn)" }}>{n0(summary.counts.due_today)}</span>}
-          sub="in the final half of the budget"
-          card
+          value={n0(summary.counts.due_today)}
+          ofValue={totalOpen ? n0(totalOpen) : null}
+          subLine="in the final half of the budget"
+          percentage={shareOf(summary.counts.due_today)}
+          color="var(--warn)"
         />
-        <StatTile
+        <KpiCard
           label="Within SLA"
-          value={<span style={{ color: "var(--ok)" }}>{n0(summary.counts.within_sla)}</span>}
-          sub="comfortably inside target"
-          card
+          value={n0(summary.counts.within_sla)}
+          ofValue={totalOpen ? n0(totalOpen) : null}
+          subLine="comfortably inside target"
+          percentage={shareOf(summary.counts.within_sla)}
+          color="var(--ok)"
         />
-        <StatTile
+        <KpiCard
           label="Open tickets"
-          value={n0(summary.total_open)}
-          sub={
+          value={n0(totalOpen)}
+          subLine={
             targets.high
               ? `targets ${targets.high}h / ${targets.medium}h / ${targets.low}h (H/M/L)`
               : "high / medium / low priority"
           }
-          card
+          color="var(--accent)"
         />
       </div>
 
-      <CategoryBarChart
-        className="mt16"
-        title="SLA attention"
-        hint="open tickets by response-time state"
-        height={150}
-        data={[
-          { label: "Breached", value: summary.counts.breached, color: "var(--bad)" },
-          { label: "Due today", value: summary.counts.due_today, color: "var(--warn)" },
-          { label: "Within SLA", value: summary.counts.within_sla, color: "var(--ok)" },
-        ]}
-      />
-
-      {/* Ownership breakdown */}
-      <div className="sec">
-        <h2>Ownership</h2>
-        {ownerRows.length ? (
-          <div className="card">
-            {ownerRows.map(([cat, count], i) => (
-              <div
-                key={cat}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  padding: "6px 0",
-                  fontSize: 13,
-                  borderBottom: i < ownerRows.length - 1 ? "1px solid var(--line-soft)" : "none",
-                }}
-              >
-                <span style={cat === "unassigned" ? { color: "var(--ink3)" } : undefined}>{ownerLabel(cat)}</span>
-                <span className="mono">{n0(count)}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="sub" style={{ margin: 0 }}>
-            Nothing to assign.
-          </p>
-        )}
-      </div>
+      {queue.length ? (
+        <div className="grid g2 mt16 csplit">
+          <ShareBars
+            title="Ownership"
+            note="Who open tickets are waiting on."
+            rows={ownerRows.map(([cat, count]) => ({
+              key: cat,
+              label: ownerLabel(cat),
+              count,
+              color: cat === "unassigned" ? "var(--bad)" : "var(--accent)",
+            }))}
+            total={queue.length}
+            foot="Unassigned tickets are flagged red."
+          />
+          <ShareBars title="Priority mix" note="Open tickets by priority." rows={priorityRows} total={queue.length} />
+        </div>
+      ) : null}
 
       {/* Ranked queue */}
       <div className="sec">
@@ -249,7 +238,7 @@ export default function OperationsView() {
           </div>
         ) : (
           <div className="card pad0">
-            <table>
+            <table style={{ minWidth: 760 }}>
               <thead>
                 <tr>
                   <th>Ticket</th>
@@ -285,13 +274,15 @@ export default function OperationsView() {
                         <td style={t.owner_category === "unassigned" ? { color: "var(--ink3)" } : undefined}>
                           {ownerLabel(t.owner_category)}
                         </td>
-                        <td style={{ color: PRIORITY_COLOR[t.priority], fontWeight: 500, textTransform: "capitalize" }}>
+                        <td style={{ color: PRIORITY_COLOR[t.priority], fontWeight: 500, textTransform: "capitalize", whiteSpace: "nowrap" }}>
+                          <i className="dot" style={{ background: PRIORITY_COLOR[t.priority], marginRight: 6 }} />
                           {t.priority}
                         </td>
                         <td style={{ color: CATEGORY_COLOR[t.ticket_category] || "var(--ink3)", fontWeight: t.ticket_category === "emergency" ? 600 : 400 }}>
                           {CATEGORY_LABEL[t.ticket_category] || t.ticket_category}
                         </td>
-                        <td style={{ color: rs ? rs.color : "var(--ink3)", fontWeight: 500 }}>
+                        <td style={{ color: rs ? rs.color : "var(--ink3)", fontWeight: 500, whiteSpace: "nowrap" }}>
+                          {rs ? <i className="dot" style={{ background: rs.color, marginRight: 6 }} /> : null}
                           {rs ? rs.label : "—"}
                         </td>
                         <td className="r mono">{formatDuration(nowSec - t.created_at)}</td>
