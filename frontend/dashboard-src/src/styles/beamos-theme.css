@@ -192,21 +192,22 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .ovhead-text{min-width:0;flex:1 1 320px}
 .ovhead-text .sub{margin:2px 0 6px}
 .ovhead .gauge{flex:none}
-/* Overview header status row: workspace switcher (light-theme overrides of the
-   rail styling it was built with), reporting period, period control, live line */
+/* Workspace switcher in the Topbar: light-theme overrides of the rail styling
+   it was built with */
+.top .wsw{margin-top:0;padding:4px 10px;min-width:210px;background:var(--paper);border:1px solid var(--line)}
+.top .wsw small{color:var(--ink3)}
+.top .wsw-trigger{margin-top:2px}
+.top .wsw-current-name{color:var(--ink)}
+.top .wsw-current-org{color:var(--ink3)}
+.top .wsw-chevron{border-color:var(--ink3)}
+.top .wsw-menu{background:var(--paper);border-color:var(--line);box-shadow:0 8px 24px rgba(17,24,38,.12)}
+.top .wsw-group{color:var(--ink3)}
+.top .wsw-item{color:var(--ink2)}
+.top .wsw-item:hover{background:var(--line-soft);color:var(--ink)}
+.top .wsw-item.on{color:var(--ink);background:rgba(23,185,231,.10)}
+.top .wsw-item-org,.top .wsw-item.on .wsw-item-org{color:var(--ink3)}
+/* Overview header status row: reporting period + live line */
 .ovbar{display:flex;align-items:center;gap:12px 18px;flex-wrap:wrap;margin:-6px 0 20px}
-.ovbar .wsw{margin-top:0;padding:6px 12px;min-width:220px;background:var(--paper);border:1px solid var(--line)}
-.ovbar .wsw small{color:var(--ink3)}
-.ovbar .wsw-trigger{margin-top:2px}
-.ovbar .wsw-current-name{color:var(--ink)}
-.ovbar .wsw-current-org{color:var(--ink3)}
-.ovbar .wsw-chevron{border-color:var(--ink3)}
-.ovbar .wsw-menu{background:var(--paper);border-color:var(--line);box-shadow:0 8px 24px rgba(17,24,38,.12)}
-.ovbar .wsw-group{color:var(--ink3)}
-.ovbar .wsw-item{color:var(--ink2)}
-.ovbar .wsw-item:hover{background:var(--line-soft);color:var(--ink)}
-.ovbar .wsw-item.on{color:var(--ink);background:rgba(23,185,231,.10)}
-.ovbar .wsw-item-org,.ovbar .wsw-item.on .wsw-item-org{color:var(--ink3)}
 .ovbar-period{font-size:13px;color:var(--ink);font-weight:500}
 .ovbar-period small{display:block;font-size:9px;font-weight:400;letter-spacing:.13em;text-transform:uppercase;color:var(--ink3);margin-bottom:2px}
 .ovbar-live{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);margin-left:auto}

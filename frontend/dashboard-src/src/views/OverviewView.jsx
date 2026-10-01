@@ -13,8 +13,6 @@ import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import KpiCard from "../components/KpiCard";
 import ProgressBar from "../components/ProgressBar";
-import WorkspaceSwitcher from "../components/WorkspaceSwitcher";
-import PeriodSelector from "../components/PeriodSelector";
 
 export default function OverviewView() {
   const { me, setDeviceCount, setIssueCount } = useSession();
@@ -226,12 +224,10 @@ export default function OverviewView() {
       </div>
 
       <div className="ovbar">
-        <WorkspaceSwitcher />
         <span className="ovbar-period">
           <small>Reporting period</small>
           {fmtPeriodRange(periodStart, periodEnd)}
         </span>
-        <PeriodSelector />
         <span className="ovbar-live" title="Share of screens connected right now (online ÷ total)">
           <span className="livedot" aria-hidden="true"></span>
           Live data · {reportingPct !== null ? `${reportingPct}% reporting` : "no screens yet"}

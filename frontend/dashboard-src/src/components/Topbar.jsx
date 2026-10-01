@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import Breadcrumb from "./Breadcrumb";
 import PeriodSelector from "./PeriodSelector";
+import WorkspaceSwitcher from "./WorkspaceSwitcher";
 import { usePeriod } from "../hooks/usePeriod";
 import { periodWindow, isoDateOnly } from "../lib/format";
 
@@ -29,7 +30,8 @@ async function downloadOverview(format, period) {
 }
 
 // The user's email + Sign out now live in the sidebar footer (Rail.jsx),
-// matching the demo — the Topbar keeps the breadcrumb + period control, plus
+// matching the demo — the Topbar keeps the breadcrumb, the workspace switcher
+// and the period control (the one shared instance, on every page), plus
 // an "Export report" menu on the Overview route only (it exports Overview's
 // numbers, so it isn't a global control).
 export default function Topbar() {
@@ -53,6 +55,7 @@ export default function Topbar() {
       <Breadcrumb />
       <div className="topsp"></div>
       <div className="ctl">
+        <WorkspaceSwitcher />
         <PeriodSelector />
         {onOverview ? (
           <div className="export-menu-wrap" ref={exportRef}>
