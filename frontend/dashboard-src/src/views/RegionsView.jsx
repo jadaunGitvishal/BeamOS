@@ -130,8 +130,12 @@ export default function RegionsView() {
           <div className="grid g4">
             <KpiCard
               label="Regions"
-              value={n0(namedRegions.length)}
-              subLine={`${n0(totalWorkspaces)} workspace${totalWorkspaces === 1 ? "" : "s"} in scope`}
+              value={n0(regions.length)}
+              subLine={
+                namedRegions.length
+                  ? `${n0(namedRegions.length)} named · ${n0(totalWorkspaces)} workspace${totalWorkspaces === 1 ? "" : "s"}`
+                  : `${n0(totalWorkspaces)} workspace${totalWorkspaces === 1 ? "" : "s"}, none assigned to a region`
+              }
               color="var(--accent)"
             />
             <KpiCard
