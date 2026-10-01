@@ -182,6 +182,11 @@ h1{font-size:24px;font-weight:600;letter-spacing:-.02em;margin:0}
 h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .sub{color:var(--ink2);font-size:13px;margin:2px 0 20px;max-width:70ch}
 .eyebrow{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 4px}
+/* Overview header: text left, Network health gauge right; wraps under on narrow screens */
+.ovhead{align-items:center;margin-bottom:20px}
+.ovhead-text{min-width:0;flex:1 1 320px}
+.ovhead-text .sub{margin:2px 0 6px}
+.ovhead .gauge{flex:none}
 .stamp{font-family:var(--f-mono);font-size:11px;color:var(--ink3)}
 
 /* ---------- primitives ---------- */
@@ -193,7 +198,6 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
 .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
-.g5{grid-template-columns:repeat(5,minmax(0,1fr))}
 .stat .k{font-size:11.5px;color:var(--ink2);margin:0 0 3px}
 .stat .v{font-size:22px;font-weight:600;letter-spacing:-.02em;margin:0;line-height:1.15}
 .stat .s{font-size:11px;color:var(--ink3);margin:2px 0 0;font-family:var(--f-mono)}
@@ -376,7 +380,7 @@ tr.click:hover{background:#F7F9FC}
   .lbx-img{max-height:44vh}
 }
 
-@media (max-width:1080px){ .hero{grid-template-columns:1fr} .heroL{border-right:0;border-bottom:1px solid var(--line)} .g4{grid-template-columns:repeat(2,minmax(0,1fr))} .g5{grid-template-columns:repeat(2,minmax(0,1fr))} .g5>:first-child{grid-column:1/-1} }
+@media (max-width:1080px){ .hero{grid-template-columns:1fr} .heroL{border-right:0;border-bottom:1px solid var(--line)} .g4{grid-template-columns:repeat(2,minmax(0,1fr))} }
 @media (max-width:860px){
   .shell{flex-direction:column}
   .rail{width:100%;flex:none;height:auto;position:static;padding:12px 14px 8px}

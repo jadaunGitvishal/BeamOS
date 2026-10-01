@@ -231,12 +231,16 @@ export default function OverviewView() {
 
   return (
     <>
-      <p className="eyebrow">Organisation overview</p>
-      <div className="pt">
-        <h1>Network performance</h1>
-        <span className="stamp">as of {asof}</span>
+      {/* Header: title block left, Network health gauge right (as in the demo). */}
+      <div className="pt ovhead">
+        <div className="ovhead-text">
+          <p className="eyebrow">Organisation overview</p>
+          <h1>Network performance</h1>
+          <p className="sub">One view of delivery, availability and the work that will recover performance.</p>
+          <span className="stamp">as of {asof}</span>
+        </div>
+        <ComplianceGauge label="Network health" percentage={health} target={HEALTH_TARGET} caption={healthCaption} />
       </div>
-      <p className="sub">One view of delivery, availability and the work that will recover performance.</p>
 
       <div className="card pad0 hero rise">
         <div className="heroL">
@@ -299,8 +303,7 @@ export default function OverviewView() {
         </div>
       </div>
 
-      <div className="grid g5 mt16">
-        <ComplianceGauge label="Network health" percentage={health} target={HEALTH_TARGET} caption={healthCaption} />
+      <div className="grid g4 mt16">
         <StatTile label="Total devices" value={n0(total)} card />
         <StatTile label="Online now" value={n0(online)} sub={total ? `${((online / total) * 100).toFixed(1)}% of the fleet` : null} card />
         <StatTile label="Needs attention" value={n0(attention.length)} sub="low storage, low RAM or weak Wi-Fi" card />
