@@ -221,13 +221,11 @@ export default function OverviewView() {
     ? Math.round((healthParts.reduce((a, v) => a + v, 0) / healthParts.length) * 10) / 10
     : null;
   // "Critical exceptions" = the open error groups the Issues page lists
-  // (platform admins only; for everyone else issues is null).
-  const healthCaption =
-    health === null
-      ? "no data yet"
-      : issues !== null && issues.length > 0
-        ? `Needs attention · ${n0(issues.length)} critical exception${issues.length === 1 ? "" : "s"}`
-        : "All clear";
+  // (platform admins only; for everyone else issues is null). Any open
+  // exception turns the ring amber, as in the demo.
+  const exceptions = issues !== null ? issues.length : 0;
+  const healthStatus = health === null ? "No data yet" : exceptions > 0 ? "Needs attention" : "All clear";
+  const healthDetail = exceptions > 0 ? `${n0(exceptions)} critical exception${exceptions === 1 ? "" : "s"}` : null;
 
   return (
     <>
@@ -239,7 +237,17 @@ export default function OverviewView() {
           <p className="sub">One view of delivery, availability and the work that will recover performance.</p>
           <span className="stamp">as of {asof}</span>
         </div>
-        <ComplianceGauge label="Network health" percentage={health} target={HEALTH_TARGET} caption={healthCaption} />
+        <ComplianceGauge
+          variant="plain"
+          size={64}
+          label="Network health"
+          percentage={health}
+          target={HEALTH_TARGET}
+          status={healthStatus}
+          detail={healthDetail}
+          color={exceptions > 0 ? "var(--health-warn)" : undefined}
+          detailColor="var(--health-bad)"
+        />
       </div>
 
       <div className="card pad0 hero rise">

@@ -32,6 +32,8 @@
   --line:#E1E7EE; --line-soft:#EDF1F6;
   --ink:#111826; --ink2:#4C5868; --ink3:#6B7688;
   --ok:#0E8A47; --warn:#B45309; --bad:#BE3B31;
+  /* Overview header "Network health" gauge only - the demo's lighter amber/red */
+  --health-warn:#D5852C; --health-bad:#D9534F;
   /* --accent matches the sidebar's cyan; --cyan is kept as an explicit alias. */
   --accent:#17B9E7;
   --cyan:#17B9E7;
@@ -187,6 +189,11 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .ovhead-text{min-width:0;flex:1 1 320px}
 .ovhead-text .sub{margin:2px 0 6px}
 .ovhead .gauge{flex:none}
+/* ComplianceGauge variant="plain" (Overview header) */
+.gauge-plain .gauge-val{font-size:18px;font-weight:700}
+.gauge-plain .gauge-k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 3px}
+.gauge-plain .gauge-status{font-size:15px;font-weight:600;color:var(--ink);margin:0;letter-spacing:-.01em}
+.gauge-plain .gauge-detail{font-size:12px;margin:3px 0 0}
 .stamp{font-family:var(--f-mono);font-size:11px;color:var(--ink3)}
 
 /* ---------- primitives ---------- */
@@ -223,6 +230,7 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 @media (max-width:560px){
   .gauge{flex-direction:column;align-items:flex-start;gap:9px}
   .gauge-body{align-self:stretch}
+  .gauge.gauge-plain{flex-direction:row;align-items:center;gap:14px}
 }
 .v small{font-size:12px;font-weight:400;color:var(--ink2);letter-spacing:0}
 .tag{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:2.5px 8px;border-radius:20px;white-space:nowrap;font-weight:500}
