@@ -5,8 +5,17 @@ import { useClock } from "../hooks/useClock";
 import { useToast } from "../hooks/useToast";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0 } from "../lib/format";
-import { CAMPAIGN_STATUS as STATUS, deliveryColor } from "../lib/campaigns";
+import {
+  CAMPAIGN_STATUS as STATUS,
+  deliveryColor,
+  summarizeCampaigns,
+  campaignLength,
+  dayNum,
+  todayStr,
+} from "../lib/campaigns";
 import ProgressBar from "../components/ProgressBar";
+import KpiCard from "../components/KpiCard";
+import { DeliveryBars, CampaignTimeline, PlaysChart } from "../components/CampaignCharts";
 
 // Phase 5 Stage C — the Campaigns page. Lists a workspace's campaigns (Stage A)
 // with their computed status and delivery numbers (Stage B), and lets a
@@ -96,6 +105,8 @@ export default function CampaignsView() {
 
   const campaigns = data.campaigns || [];
   const playlists = data.playlists || [];
+  const sum = summarizeCampaigns(campaigns);
+  const today = todayStr();
 
   function openNew() {
     setForm({ ...EMPTY_FORM });
@@ -251,8 +262,52 @@ export default function CampaignsView() {
           </p>
         </div>
       ) : (
-        <div className="card pad0">
-          <table>
+        <>
+          {/* KPI row + charts: all from the fields the campaigns API returns. */}
+          <div className="grid g4">
+            <KpiCard
+              label="Live campaigns"
+              value={n0(sum.live)}
+              ofValue={n0(sum.total)}
+              subLine={`${n0(sum.draft)} scheduled · ${n0(sum.completed)} completed`}
+              color="var(--ok)"
+            />
+            <KpiCard
+              label="Delivered vs plan"
+              value={sum.deliveredPct !== null ? `${sum.deliveredPct}%` : "—"}
+              subLine={
+                sum.deliveredPct !== null
+                  ? `${n0(sum.deliveredAgainstPlan)} of ${n0(sum.planned)} planned plays`
+                  : "no campaign has a daily target"
+              }
+              percentage={sum.deliveredPct}
+              color={deliveryColor(sum.deliveredPct)}
+            />
+            <KpiCard
+              label="Behind pace"
+              value={n0(sum.behind)}
+              ofValue={sum.liveWithTarget ? n0(sum.liveWithTarget) : null}
+              subLine={sum.liveWithTarget ? "live with a target, under 90% of plan" : "no live campaign has a target"}
+              percentage={sum.liveWithTarget ? (sum.behind / sum.liveWithTarget) * 100 : null}
+              color="var(--bad)"
+            />
+            <KpiCard
+              label="Plays delivered"
+              value={n0(sum.totalPlays)}
+              subLine="across all campaigns, to date"
+              color="var(--accent)"
+            />
+          </div>
+
+          <div className="grid g2 mt16 csplit">
+            <DeliveryBars campaigns={campaigns} />
+            <CampaignTimeline campaigns={campaigns} />
+          </div>
+
+          <PlaysChart campaigns={campaigns} />
+
+        <div className="card pad0 mt16">
+          <table className="ctable">
             <thead>
               <tr>
                 <th>Campaign</th>
@@ -279,7 +334,15 @@ export default function CampaignsView() {
                           <div style={{ color: "var(--ink2)", fontSize: 11.5, marginTop: 2 }}>{c.description}</div>
                         ) : null}
                       </td>
-                      <td style={{ color: s.color, fontWeight: 500 }}>{s.label}</td>
+                      <td style={{ color: s.color, fontWeight: 500 }}>
+                        {s.label}
+                        {c.status === "live" ? (
+                          <small className="cday">
+                            day {n0(Math.min(Math.floor(dayNum(today) - dayNum(c.start_date)) + 1, campaignLength(c)))} of{" "}
+                            {n0(campaignLength(c))}
+                          </small>
+                        ) : null}
+                      </td>
                       <td className="mono" style={{ fontSize: 12 }}>
                         {c.start_date} → {c.end_date}
                       </td>
@@ -315,6 +378,7 @@ export default function CampaignsView() {
             </tbody>
           </table>
         </div>
+        </>
       )}
     </>
   );

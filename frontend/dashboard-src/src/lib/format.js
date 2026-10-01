@@ -52,7 +52,7 @@ export function isoDateOnly(d) {
 // "25 Aug – 24 Sep 2026", "28 Dec 2025 – 3 Jan 2026".
 // Fixed three-letter months: toLocaleDateString("en-GB") renders September
 // as "Sept" in current ICU builds.
-const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export function fmtPeriodRange(start, end) {
   const dm = (x) => `${x.getDate()} ${MON[x.getMonth()]}`;
   const endStr = `${dm(end)} ${end.getFullYear()}`;
