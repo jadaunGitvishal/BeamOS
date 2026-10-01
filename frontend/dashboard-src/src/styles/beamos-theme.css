@@ -179,6 +179,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .seg button{padding:5px 10px;font-size:12px;color:var(--ink2);border-right:1px solid var(--line-soft);flex:none;white-space:nowrap}
 .seg button:last-child{border-right:0}
 .seg button.on{background:var(--ink);color:#fff}
+.seg button:disabled{color:var(--ink3);cursor:not-allowed}
 
 .wrap{padding:22px 26px 60px;max-width:1320px;width:100%}
 .pt{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:4px}
@@ -191,6 +192,25 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .ovhead-text{min-width:0;flex:1 1 320px}
 .ovhead-text .sub{margin:2px 0 6px}
 .ovhead .gauge{flex:none}
+/* Overview header status row: workspace switcher (light-theme overrides of the
+   rail styling it was built with), reporting period, period control, live line */
+.ovbar{display:flex;align-items:center;gap:12px 18px;flex-wrap:wrap;margin:-6px 0 20px}
+.ovbar .wsw{margin-top:0;padding:6px 12px;min-width:220px;background:var(--paper);border:1px solid var(--line)}
+.ovbar .wsw small{color:var(--ink3)}
+.ovbar .wsw-trigger{margin-top:2px}
+.ovbar .wsw-current-name{color:var(--ink)}
+.ovbar .wsw-current-org{color:var(--ink3)}
+.ovbar .wsw-chevron{border-color:var(--ink3)}
+.ovbar .wsw-menu{background:var(--paper);border-color:var(--line);box-shadow:0 8px 24px rgba(17,24,38,.12)}
+.ovbar .wsw-group{color:var(--ink3)}
+.ovbar .wsw-item{color:var(--ink2)}
+.ovbar .wsw-item:hover{background:var(--line-soft);color:var(--ink)}
+.ovbar .wsw-item.on{color:var(--ink);background:rgba(23,185,231,.10)}
+.ovbar .wsw-item-org,.ovbar .wsw-item.on .wsw-item-org{color:var(--ink3)}
+.ovbar-period{font-size:13px;color:var(--ink);font-weight:500}
+.ovbar-period small{display:block;font-size:9px;font-weight:400;letter-spacing:.13em;text-transform:uppercase;color:var(--ink3);margin-bottom:2px}
+.ovbar-live{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);margin-left:auto}
+.ovbar-live .livedot{margin-top:0}
 .ovhead .gauge-plain{background:var(--panel-tint);border-radius:var(--r);padding:14px 22px 14px 16px}
 /* ComplianceGauge variant="plain" (Overview header) */
 .gauge-plain .gauge-val{font-size:18px;font-weight:700}
@@ -399,7 +419,7 @@ tr.click:hover{background:#F7F9FC}
   .navgroup{display:contents}
   .nav a{display:inline-flex;align-items:center;min-height:0;padding:8px 10px;border-left:0;border-radius:7px;white-space:nowrap}
   .nav a.on{background:rgba(23,185,231,.12)}
-  .nav-icon,.navgrp,.wsw,.railstatus{display:none}
+  .nav-icon,.navgrp,.rail .wsw,.railstatus{display:none}
   .railfoot{margin-top:10px}
   .railuser{padding:0;justify-content:flex-end}
   .railuser-email{display:none}

@@ -31,6 +31,20 @@ export function isoDateOnly(d) {
   return d.toISOString().slice(0, 10);
 }
 
+// Overview header "Reporting period": a periodWindow() range as day-first
+// dates, collapsing the shared month/year - "18–24 Aug 2026",
+// "25 Aug – 24 Sep 2026", "28 Dec 2025 – 3 Jan 2026".
+// Fixed three-letter months: toLocaleDateString("en-GB") renders September
+// as "Sept" in current ICU builds.
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export function fmtPeriodRange(start, end) {
+  const dm = (x) => `${x.getDate()} ${MON[x.getMonth()]}`;
+  const endStr = `${dm(end)} ${end.getFullYear()}`;
+  if (start.getFullYear() !== end.getFullYear()) return `${dm(start)} ${start.getFullYear()} – ${endStr}`;
+  if (start.getMonth() !== end.getMonth()) return `${dm(start)} – ${endStr}`;
+  return `${start.getDate()}–${endStr}`;
+}
+
 export function periodLabel(period) {
   return period === 1 ? "last 24 hours" : `last ${period} days`;
 }

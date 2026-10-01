@@ -1,7 +1,6 @@
 import { useClock } from "../hooks/useClock";
 import { useSession } from "../hooks/useSession";
 import Nav from "./Nav";
-import WorkspaceSwitcher from "./WorkspaceSwitcher";
 
 export default function Rail() {
   const clock = useClock();
@@ -18,7 +17,6 @@ export default function Rail() {
           CXO1<span>.ai</span>
         </span>
       </div>
-      <WorkspaceSwitcher />
       <Nav />
       <div className="railfoot">
         <div className="railstatus">

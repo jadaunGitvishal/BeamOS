@@ -6,7 +6,7 @@ import { useSession } from "../hooks/useSession";
 import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
-import { n0, cCol, periodWindow, isoDateOnly, formatDuration } from "../lib/format";
+import { n0, cCol, periodWindow, isoDateOnly, formatDuration, fmtPeriodRange } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import { PRIORITY_COLOR, RESPONSE_STATUS, CATEGORY_LABEL, CATEGORY_COLOR, causeHint, rankOpenTickets } from "../lib/tickets";
 import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
@@ -14,6 +14,8 @@ import { deliveryColor } from "../lib/campaigns";
 import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import AttentionCard from "../components/AttentionCard";
+import WorkspaceSwitcher from "../components/WorkspaceSwitcher";
+import PeriodSelector from "../components/PeriodSelector";
 
 export default function OverviewView() {
   const { me, setDeviceCount, setIssueCount } = useSession();
@@ -227,6 +229,14 @@ export default function OverviewView() {
   const healthStatus = health === null ? "No data yet" : exceptions > 0 ? "Needs attention" : "All clear";
   const healthDetail = exceptions > 0 ? `${n0(exceptions)} critical exception${exceptions === 1 ? "" : "s"}` : null;
 
+  // Header status row. "Reporting period" is the selected periodWindow() as
+  // dates. "Live data · X% reporting" is online / total from the overview
+  // response - the server's live connection status, the same figure as the
+  // "Online now" tile - rather than a heartbeat-age cut-off, which would need
+  // a threshold this page doesn't otherwise define.
+  const { start: periodStart, end: periodEnd } = periodWindow(period);
+  const reportingPct = total ? Math.round((online / total) * 100) : null;
+
   return (
     <>
       {/* Header: title block left, Network health gauge right (as in the demo). */}
@@ -248,6 +258,19 @@ export default function OverviewView() {
           color={exceptions > 0 ? "var(--health-warn)" : undefined}
           detailColor="var(--health-bad)"
         />
+      </div>
+
+      <div className="ovbar">
+        <WorkspaceSwitcher />
+        <span className="ovbar-period">
+          <small>Reporting period</small>
+          {fmtPeriodRange(periodStart, periodEnd)}
+        </span>
+        <PeriodSelector />
+        <span className="ovbar-live" title="Share of screens connected right now (online ÷ total)">
+          <span className="livedot" aria-hidden="true"></span>
+          Live data · {reportingPct !== null ? `${reportingPct}% reporting` : "no screens yet"}
+        </span>
       </div>
 
       <div className="card pad0 hero rise">
