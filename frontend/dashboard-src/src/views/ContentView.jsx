@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../hooks/useApi";
 import { usePeriod } from "../hooks/usePeriod";
 import { apiFetch } from "../lib/api";
-import { n0, cPill, formatDuration, periodWindow, periodLabel } from "../lib/format";
-import StatTile from "../components/StatTile";
+import { n0, cCol, formatDuration, periodWindow, periodLabel } from "../lib/format";
+import { summarizeContent, contentLabel } from "../lib/content";
+import KpiCard from "../components/KpiCard";
+import ProgressBar from "../components/ProgressBar";
 import PlayTimeline from "../components/PlayTimeline";
+import { CompletionBars, PlaysByContent } from "../components/ContentCharts";
 
 // Authenticated download, not a plain <a href> - export needs the Bearer
 // token, which only fetch() can attach. Same fetch -> blob -> synthetic-<a>-click
@@ -75,9 +78,8 @@ export default function ContentView() {
   }
   if (!content) return <p className="sub">Loading…</p>;
 
-  const totalPlays = content.reduce((a, c) => a + c.plays, 0);
-  const totalCompleted = content.reduce((a, c) => a + (c.completed_plays || 0), 0);
-  const overallPct = totalPlays ? (totalCompleted / totalPlays) * 100 : null;
+  const sum = summarizeContent(content);
+  const totalPlays = sum.plays;
 
   return (
     <>
@@ -118,24 +120,57 @@ export default function ContentView() {
         </div>
       </div>
 
-      <div className="grid g4">
-        <StatTile label="Total plays" value={n0(totalPlays)} card />
-        <StatTile label="Completed plays" value={n0(totalCompleted)} card />
-        <StatTile label="Overall completion" value={overallPct !== null ? overallPct.toFixed(1) + "%" : "—"} card />
-        <StatTile label="Content items" value={n0(content.length)} card />
-      </div>
+      {content.length ? (
+        <>
+          <div className="grid g4">
+            <KpiCard
+              label="Total plays"
+              value={n0(sum.plays)}
+              subLine={`across ${n0(sum.items)} content item${sum.items === 1 ? "" : "s"}`}
+              color="var(--accent)"
+            />
+            <KpiCard
+              label="Completed plays"
+              value={n0(sum.completed)}
+              ofValue={n0(sum.plays)}
+              subLine={`${n0(sum.incomplete)} stopped early`}
+              percentage={sum.plays ? (sum.completed / sum.plays) * 100 : null}
+              color="var(--on)"
+            />
+            <KpiCard
+              label="Overall completion"
+              value={sum.pct !== null ? `${sum.pct}%` : "—"}
+              subLine="completed plays ÷ all plays"
+              percentage={sum.pct}
+              color={sum.color}
+            />
+            <KpiCard
+              label="Weak content"
+              value={n0(sum.weak)}
+              ofValue={n0(sum.items)}
+              subLine={sum.weak ? `under 75% completion · ${n0(sum.weakPlays)} plays` : "nothing under 75% completion"}
+              percentage={sum.items ? (sum.weak / sum.items) * 100 : null}
+              color={sum.weak ? "var(--bad)" : "var(--ok)"}
+            />
+          </div>
+          <div className="grid g2 mt16 csplit">
+            <CompletionBars content={content} />
+            <PlaysByContent content={content} />
+          </div>
+        </>
+      ) : null}
 
       <div className="sec">
-        <h2>Content</h2>
+        <h2>All content</h2>
         <div className="card pad0">
           {content.length ? (
-            <table>
+            <table style={{ minWidth: 720 }}>
               <thead>
                 <tr>
                   <th>Content</th>
                   <th className="r">Plays</th>
                   <th className="r">Completed</th>
-                  <th className="r">Completion</th>
+                  <th style={{ minWidth: 170 }}>Completion</th>
                   <th className="r">Watch time</th>
                 </tr>
               </thead>
@@ -147,7 +182,7 @@ export default function ContentView() {
                   <tr
                     key={c.content_id || i}
                     className={clickable ? "click" : undefined}
-                    style={isSel ? { background: "#EEF2F8" } : undefined}
+                    style={isSel ? { background: "var(--line-soft)" } : undefined}
                     onClick={
                       clickable
                         ? () =>
@@ -160,16 +195,22 @@ export default function ContentView() {
                     }
                   >
                     <td className="trunc" style={{ fontWeight: 500 }}>
-                      {c.content_name || c.content_id || "—"}
+                      {contentLabel(c)}
                     </td>
-                    <td className="r num">{n0(c.plays)}</td>
+                    <td className="r num">
+                      {n0(c.plays)}
+                      {totalPlays ? (
+                        <div style={{ color: "var(--ink3)", fontSize: 11, fontWeight: 400 }}>
+                          {((c.plays / totalPlays) * 100).toFixed(1)}% of plays
+                        </div>
+                      ) : null}
+                    </td>
                     <td className="r num">{n0(c.completed_plays || 0)}</td>
-                    <td className="r">
-                      {c.completion_pct !== null ? (
-                        <span className={`plain ${cPill(c.completion_pct)}`}>{c.completion_pct.toFixed(1)}%</span>
-                      ) : (
-                        <span style={{ color: "var(--ink3)" }}>—</span>
-                      )}
+                    <td>
+                      <ProgressBar
+                        percentage={c.completion_pct}
+                        color={c.completion_pct !== null ? cCol(c.completion_pct) : undefined}
+                      />
                     </td>
                     <td className="r mono">{formatDuration(c.total_seconds)}</td>
                   </tr>
