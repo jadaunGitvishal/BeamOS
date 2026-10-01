@@ -205,6 +205,14 @@ h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
 .gauge-body{min-width:0}
 .gauge-body .k{margin:0 0 4px}
 .gauge-body .s{margin:0;font-size:11px;color:var(--ink3);font-family:var(--f-mono)}
+/* ProgressBar / Sparkline (components/ProgressBar.jsx, Sparkline.jsx) */
+.pbar{display:flex;align-items:center;gap:8px;min-width:120px}
+.pbar-k{font-size:11.5px;color:var(--ink2);flex:none}
+.pbar-track{position:relative;flex:1;height:6px;border-radius:3px;background:var(--line-soft);min-width:60px}
+.pbar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+.pbar-tgt{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--ink2);border-radius:1px}
+.pbar-v{font-size:12px;font-weight:500;min-width:44px;text-align:right;flex:none}
+.spark{display:inline-block;vertical-align:middle}
 /* narrow columns can't fit the ring + text side by side - stack them */
 @media (max-width:560px){
   .gauge{flex-direction:column;align-items:flex-start;gap:9px}
