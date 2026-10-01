@@ -1,9 +1,7 @@
-import { useClock } from "../hooks/useClock";
 import { useSession } from "../hooks/useSession";
 import Nav from "./Nav";
 
 export default function Rail() {
-  const clock = useClock();
   const { me, logout } = useSession();
   // /api/auth/me spreads the user's fields at the top level (...req.user),
   // so the email is me.email — same source the Topbar used.
@@ -23,7 +21,6 @@ export default function Rail() {
           <span className="livedot" aria-hidden="true"></span>
           <div>
             <strong>Fleet sync live</strong>
-            <small>as of {clock}</small>
           </div>
         </div>
         <div className="railuser">

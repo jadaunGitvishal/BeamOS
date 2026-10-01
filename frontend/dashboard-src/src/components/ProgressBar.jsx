@@ -1,3 +1,5 @@
+import { targetStatus, TARGET_STATUS } from "../lib/format";
+
 // Horizontal percentage bar with the same colour rule as ComplianceGauge.jsx:
 // green when it meets `target`, amber within 5 pts, red otherwise, grey with no
 // data. With no target the bar is the neutral accent (or pass `color` to use a
@@ -11,15 +13,9 @@ export default function ProgressBar({ percentage, target, label, color, showValu
   const pct = has ? Number(percentage) : 0;
   const tgt = target != null && Number.isFinite(Number(target)) ? Number(target) : null;
 
-  const auto = !has
-    ? "var(--ink3)"
-    : tgt == null
-      ? "var(--accent)"
-      : pct >= tgt
-        ? "var(--ok)"
-        : tgt - pct <= 5
-          ? "var(--warn)"
-          : "var(--bad)";
+  // Shared target rule (lib/format.js targetStatus); no target -> accent.
+  const st = targetStatus(pct, tgt);
+  const auto = !has ? "var(--ink3)" : st ? TARGET_STATUS[st].color : "var(--accent)";
   const fill = has ? (color ?? auto) : "var(--ink3)";
   const width = Math.max(0, Math.min(100, pct));
 

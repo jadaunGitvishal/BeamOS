@@ -6,7 +6,7 @@ import { useSession } from "../hooks/useSession";
 import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
-import { n0, cCol, periodWindow, isoDateOnly, formatDuration, fmtPeriodRange } from "../lib/format";
+import { n0, cCol, periodWindow, isoDateOnly, formatDuration, fmtPeriodRange, targetStatus, TARGET_STATUS } from "../lib/format";
 import { PRIORITY_COLOR, RESPONSE_STATUS, CATEGORY_LABEL, CATEGORY_COLOR, OWNER_LABELS, causeHint, rankOpenTickets } from "../lib/tickets";
 import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
 import StatTile from "../components/StatTile";
@@ -155,7 +155,7 @@ export default function OverviewView() {
     const mean = (a) => a.reduce((x, v) => x + v, 0) / a.length;
     return Math.round((mean(recent) - mean(prev)) * 10) / 10;
   })();
-  const meetsTarget = fleetUptime !== null && slaTarget !== null ? fleetUptime >= slaTarget : null;
+  const fleetStatus = targetStatus(fleetUptime, slaTarget);
 
   const trendFloor = trend.length
     ? Math.max(0, Math.floor(Math.min(...trend.map((p) => p.pct), slaTarget ?? 100) / 5) * 5 - 5)
@@ -174,18 +174,18 @@ export default function OverviewView() {
   const health = healthParts.length
     ? Math.round((healthParts.reduce((a, v) => a + v, 0) / healthParts.length) * 10) / 10
     : null;
-  // "Critical exceptions" = the open error groups the Issues page lists
-  // (platform admins only; for everyone else issues is null). Any open
-  // exception turns the ring amber, as in the demo.
+  // Ring colour and status word follow the shared target rule on the score
+  // itself; "critical exceptions" (the open error groups the Issues page
+  // lists - platform admins only, null otherwise) are reported as a separate
+  // line, not folded into the colour.
   const exceptions = issues !== null ? issues.length : 0;
-  const healthStatus = health === null ? "No data yet" : exceptions > 0 ? "Needs attention" : "All clear";
+  const healthSt = targetStatus(health, HEALTH_TARGET);
+  const healthStatus = health === null ? "No data yet" : TARGET_STATUS[healthSt].label;
   const healthDetail = exceptions > 0 ? `${n0(exceptions)} critical exception${exceptions === 1 ? "" : "s"}` : null;
 
-  // Header status row. "Reporting period" is the selected periodWindow() as
-  // dates. "Live data · X% reporting" is online / total from the overview
-  // response - the server's live connection status, the same figure as the
-  // "Online now" tile - rather than a heartbeat-age cut-off, which would need
-  // a threshold this page doesn't otherwise define.
+  // Header meta line: the selected periodWindow() as dates, the org counts
+  // (org/platform admins only), and "Live data · X% online" = online / total
+  // from the overview response (the server's live connection status).
   const { start: periodStart, end: periodEnd } = periodWindow(period);
 
   // KPI row - every figure is from data this page already loaded:
@@ -198,7 +198,7 @@ export default function OverviewView() {
   const belowTarget = slaTarget !== null ? uptimeVals.filter((v) => v < slaTarget).length : null;
   const affectedScreens = issues !== null ? issues.reduce((a, i) => a + i.affected_devices, 0) : null;
   const incompletePlays = overview.total_plays - overview.completed_plays;
-  const reportingPct = total ? Math.round((online / total) * 100) : null;
+  const onlinePct = total ? Math.round((online / total) * 100) : null;
 
   return (
     <>
@@ -208,7 +208,24 @@ export default function OverviewView() {
           <p className="eyebrow">Organisation overview</p>
           <h1>Network performance</h1>
           <p className="sub">One view of delivery, availability and the work that will recover performance.</p>
-          <span className="stamp">as of {asof}</span>
+          <div className="ovhead-meta">
+            <span>
+              <small>Reporting period</small>
+              {fmtPeriodRange(periodStart, periodEnd)}
+            </span>
+            {overview.org ? (
+              <span>
+                <small>Organisation</small>
+                {n0(overview.org.workspace_count)} workspace{overview.org.workspace_count === 1 ? "" : "s"} ·{" "}
+                {n0(overview.org.device_count)} screen{overview.org.device_count === 1 ? "" : "s"}
+              </span>
+            ) : null}
+            <span className="ovhead-live" title="Share of screens connected right now (online ÷ total)">
+              <small>Live data</small>
+              <span className="livedot" aria-hidden="true"></span>
+              {onlinePct !== null ? `${onlinePct}% online` : "no screens yet"} · as of {asof}
+            </span>
+          </div>
         </div>
         <ComplianceGauge
           variant="plain"
@@ -218,19 +235,7 @@ export default function OverviewView() {
           target={HEALTH_TARGET}
           status={healthStatus}
           detail={healthDetail}
-          color={exceptions > 0 ? "var(--warn)" : undefined}
         />
-      </div>
-
-      <div className="ovbar">
-        <span className="ovbar-period">
-          <small>Reporting period</small>
-          {fmtPeriodRange(periodStart, periodEnd)}
-        </span>
-        <span className="ovbar-live" title="Share of screens connected right now (online ÷ total)">
-          <span className="livedot" aria-hidden="true"></span>
-          Live data · {reportingPct !== null ? `${reportingPct}% reporting` : "no screens yet"}
-        </span>
       </div>
 
       <div className="grid g4">
@@ -246,10 +251,9 @@ export default function OverviewView() {
         <KpiCard
           label="Screens below target"
           value={belowTarget !== null ? n0(belowTarget) : "—"}
-          ofValue={belowTarget !== null ? n0(uptimeVals.length) : null}
           subLine={
             belowTarget !== null
-              ? `uptime under the ${slaTarget}% SLA target`
+              ? `of ${n0(uptimeVals.length)} reporting data · under ${slaTarget}%`
               : "SLA data unavailable"
           }
           percentage={belowTarget !== null && uptimeVals.length ? (belowTarget / uptimeVals.length) * 100 : null}
@@ -290,22 +294,10 @@ export default function OverviewView() {
           <p className="s mono" style={{ marginTop: 9, color: "var(--ink3)" }}>
             {n0(overview.completed_plays)} of {n0(overview.total_plays)} plays completed
           </p>
-          <div className="grid g2 mt16">
-            <StatTile label="Total plays" value={n0(overview.total_plays)} card={false} />
-            <StatTile
-              label="Devices online"
-              value={
-                <>
-                  {n0(online)} <small>of {n0(total)}</small>
-                </>
-              }
-              card={false}
-            />
-          </div>
         </div>
         <div className="heroR">
           <div className="ch">
-            <h2>Device status</h2>
+            <h2>Screen status</h2>
             <span className="hint">online vs offline, right now</span>
           </div>
           <div className="own">
@@ -339,23 +331,17 @@ export default function OverviewView() {
         </div>
       </div>
 
-      {overview.org ? (
-        <div className="grid g2 mt16">
-          <StatTile label="Workspaces in org" value={n0(overview.org.workspace_count)} card />
-          <StatTile label="Devices in org" value={n0(overview.org.device_count)} card />
-        </div>
-      ) : null}
-
-      {/* SLA (left) + Priority actions (right), side by side; stacks on narrow screens. */}
-      <div className={`sec${openQueue != null ? " grid g2 ovsplit" : ""}`}>
+      {/* SLA (left) + outages and Priority actions (right). Columns stretch to
+          equal height; stacks on narrow screens. */}
+      <div className={`sec${sla || openQueue != null ? " grid g2 ovsplit" : ""}`}>
         <div className="card panel">
           <div className="panel-head">
             <div>
               <p className="eyebrow">Fleet health · SLA</p>
               <h2>Fleet uptime compliance</h2>
             </div>
-            {meetsTarget !== null ? (
-              <span className={`tag ${meetsTarget ? "p-ok" : "p-bad"}`}>{meetsTarget ? "On target" : "Below target"}</span>
+            {fleetStatus ? (
+              <span className={`tag ${TARGET_STATUS[fleetStatus].pill}`}>{TARGET_STATUS[fleetStatus].label}</span>
             ) : null}
           </div>
           {sla ? (
@@ -363,7 +349,7 @@ export default function OverviewView() {
               <p className="panel-note">
                 Platform-wide target{slaTarget !== null ? ` ${slaTarget}% uptime` : ""}
                 {slaThresholdH !== null ? `, escalating after ${slaThresholdH}h continuously offline` : ""}
-                {fleetUptime !== null ? ` · avg across ${n0(uptimeVals.length)} device${uptimeVals.length === 1 ? "" : "s"} with data` : ""}.
+                {fleetUptime !== null ? ` · avg across ${n0(uptimeVals.length)} screen${uptimeVals.length === 1 ? "" : "s"} with data` : ""}.
               </p>
               <div className="panel-gauge">
                 <ComplianceGauge label="Fleet uptime vs target" percentage={fleetUptime} target={slaTarget} />
@@ -375,20 +361,6 @@ export default function OverviewView() {
                     {weekDelta === 0 ? "No change" : `${weekDelta > 0 ? "+" : "−"}${Math.abs(weekDelta).toFixed(1)} pts`} vs previous 7 days
                   </p>
                 ) : null}
-              </div>
-              <div className="grid g2 mt16">
-                <StatTile
-                  label="Mean time to recovery"
-                  value={fleetMttr !== null ? formatDuration(fleetMttr) : "—"}
-                  sub={mttrOutages ? `across ${n0(mttrOutages)} completed outage${mttrOutages === 1 ? "" : "s"}` : "no completed outages in range"}
-                />
-                <StatTile
-                  label="Live breaches"
-                  value={
-                    <span style={{ color: liveBreaches.length ? "var(--bad)" : "var(--ok)" }}>{n0(liveBreaches.length)}</span>
-                  }
-                  sub={liveBreaches.length ? `past the ${slaThresholdH ?? "escalation"}h threshold` : "none right now"}
-                />
               </div>
               {trend.length >= 2 ? (
                 <div className="panel-chart">
@@ -448,53 +420,80 @@ export default function OverviewView() {
           )}
         </div>
 
-        {openQueue != null ? (
-          <div className="card panel">
-            <div className="panel-head">
-              <div>
-                <p className="eyebrow">Exceptions</p>
-                <h2>Priority actions</h2>
+        <div className="ovright">
+          {sla ? (
+            <div className="card panel">
+              <div className="panel-head">
+                <div>
+                  <p className="eyebrow">Outages</p>
+                  <h2>Recovery and live breaches</h2>
+                </div>
               </div>
-              <Link className="panel-link" to="/operations">
-                View all {n0(openQueue.length)} →
-              </Link>
+              <div className="grid g2">
+                <StatTile
+                  label="Mean time to recovery"
+                  value={fleetMttr !== null ? formatDuration(fleetMttr) : "—"}
+                  sub={mttrOutages ? `across ${n0(mttrOutages)} completed outage${mttrOutages === 1 ? "" : "s"}` : "no completed outages in range"}
+                />
+                <StatTile
+                  label="Live breaches"
+                  value={
+                    <span style={{ color: liveBreaches.length ? "var(--bad)" : "var(--ok)" }}>{n0(liveBreaches.length)}</span>
+                  }
+                  sub={liveBreaches.length ? `past the ${slaThresholdH ?? "escalation"}h threshold` : "none right now"}
+                />
+              </div>
             </div>
-            {topActions.length ? (
-              <div className="paq paq-ranked">
-                {topActions.map((t, i) => {
-                  const rs = RESPONSE_STATUS[t.response_status];
-                  const cause = causeHint(t);
-                  return (
-                    <div className="paq-row" key={t.id} style={{ borderLeftColor: PRIORITY_COLOR[t.priority] || "var(--line)" }}>
-                      <span className="paq-num">{String(i + 1).padStart(2, "0")}</span>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <span className="paq-owner">{OWNER_LABELS[t.owner_category] || t.owner_category}</span>
-                        <span className="paq-title">{t.title}</span>
-                        {cause ? <span className="paq-cause">Likely cause: {cause}</span> : null}
-                      </div>
-                      <div className="paq-meta">
-                        <span style={{ color: PRIORITY_COLOR[t.priority], textTransform: "capitalize" }}>{t.priority}</span>
-                        {t.ticket_category && t.ticket_category !== "reactive" ? (
-                          <span style={{ color: CATEGORY_COLOR[t.ticket_category] || "var(--ink3)" }}>
-                            {CATEGORY_LABEL[t.ticket_category] || t.ticket_category}
-                          </span>
-                        ) : null}
-                        {rs ? <span style={{ color: rs.color }}>{rs.label}</span> : null}
-                        <Link className="paq-open" to="/operations">
-                          Open in Operations →
-                        </Link>
-                      </div>
-                    </div>
-                  );
-                })}
+          ) : null}
+
+          {openQueue != null ? (
+            <div className="card panel ovright-grow">
+              <div className="panel-head">
+                <div>
+                  <p className="eyebrow">Exceptions</p>
+                  <h2>Priority actions</h2>
+                </div>
+                <Link className="panel-link" to="/operations">
+                  View all {n0(openQueue.length)} →
+                </Link>
               </div>
-            ) : (
-              <p className="empty" style={{ padding: 0 }}>
-                All clear — no open operational tickets right now.
-              </p>
-            )}
-          </div>
-        ) : null}
+              {topActions.length ? (
+                <div className="paq paq-ranked">
+                  {topActions.map((t, i) => {
+                    const rs = RESPONSE_STATUS[t.response_status];
+                    const cause = causeHint(t);
+                    return (
+                      <div className="paq-row" key={t.id} style={{ borderLeftColor: PRIORITY_COLOR[t.priority] || "var(--line)" }}>
+                        <span className="paq-num">{String(i + 1).padStart(2, "0")}</span>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <span className="paq-owner">{OWNER_LABELS[t.owner_category] || t.owner_category}</span>
+                          <span className="paq-title">{t.title}</span>
+                          {cause ? <span className="paq-cause">Likely cause: {cause}</span> : null}
+                        </div>
+                        <div className="paq-meta">
+                          <span style={{ color: PRIORITY_COLOR[t.priority], textTransform: "capitalize" }}>{t.priority}</span>
+                          {t.ticket_category && t.ticket_category !== "reactive" ? (
+                            <span style={{ color: CATEGORY_COLOR[t.ticket_category] || "var(--ink3)" }}>
+                              {CATEGORY_LABEL[t.ticket_category] || t.ticket_category}
+                            </span>
+                          ) : null}
+                          {rs ? <span style={{ color: rs.color }}>{rs.label}</span> : null}
+                          <Link className="paq-open" to="/operations">
+                            Open in Operations →
+                          </Link>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="empty" style={{ padding: 0 }}>
+                  All clear — no open operational tickets right now.
+                </p>
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {regionRows ? (
@@ -504,6 +503,7 @@ export default function OverviewView() {
               <div>
                 <p className="eyebrow">Comparative performance</p>
                 <h2>Regional health</h2>
+                {regionTarget !== null ? <p className="panel-note">Uptime vs the {regionTarget}% target</p> : null}
               </div>
               <Link className="panel-link" to="/regions">
                 Open region view →
@@ -515,14 +515,16 @@ export default function OverviewView() {
               <thead>
                 <tr>
                   <th>Region</th>
-                  <th>Compliance{regionTarget !== null ? ` · target ${regionTarget}%` : ""}</th>
+                  <th>Compliance</th>
                   <th className="r">Screens</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {regionRows.map((r) => {
-                  const s = REGION_STATUS[r.sla_status] || REGION_STATUS.unknown;
+                  // Same target rule as the gauge and pill; no data -> grey "No data".
+                  const st = targetStatus(r.avg_uptime_pct, regionTarget);
+                  const s = st ? TARGET_STATUS[st] : REGION_STATUS.unknown;
                   return (
                     <tr key={r.region_id || "__unassigned__"}>
                       <td className="regtab-name" style={{ boxShadow: `inset 3px 0 0 ${s.color}` }}>
@@ -531,14 +533,8 @@ export default function OverviewView() {
                           {n0(r.workspace_count)} workspace{r.workspace_count === 1 ? "" : "s"}
                         </small>
                       </td>
-                      <td style={{ minWidth: 170 }}>
-                        {/* Bar wears the status colour so it never disagrees
-                            with the Status column (e.g. amber bar, red Breach). */}
-                        <ProgressBar
-                          percentage={r.avg_uptime_pct}
-                          target={regionTarget}
-                          color={r.avg_uptime_pct !== null ? s.color : undefined}
-                        />
+                      <td className="regtab-bar">
+                        <ProgressBar percentage={r.avg_uptime_pct} target={regionTarget} />
                       </td>
                       <td className="r regtab-screens">
                         <span className="num">
@@ -580,7 +576,7 @@ export default function OverviewView() {
                 </div>
                 <div className="ctl mt16">
                   <Link className="btn" to={`/device/${encodeURIComponent(d.device_id)}`}>
-                    Open device
+                    Open screen
                   </Link>
                 </div>
               </div>

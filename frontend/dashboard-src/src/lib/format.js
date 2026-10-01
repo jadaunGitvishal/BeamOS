@@ -2,6 +2,22 @@ export const n0 = (v) => Math.round(v).toLocaleString("en-IN");
 
 export const cCol = (v) => (v >= 90 ? "var(--ok)" : v >= 75 ? "var(--warn)" : "var(--bad)");
 
+// One status-colour rule for anything measured against a target: green when it
+// meets the target, amber within 5 pts of it, red further below. Used by
+// ComplianceGauge, ProgressBar and the Overview pill / region rows so a ring,
+// a pill and a bar showing the same number can never disagree.
+export function targetStatus(pct, target) {
+  if (pct == null || target == null || !Number.isFinite(Number(pct)) || !Number.isFinite(Number(target))) return null;
+  const p = Number(pct);
+  const t = Number(target);
+  return p >= t ? "ok" : t - p <= 5 ? "warn" : "bad";
+}
+export const TARGET_STATUS = {
+  ok: { label: "On target", color: "var(--ok)", pill: "p-ok" },
+  warn: { label: "Near target", color: "var(--warn)", pill: "p-warn" },
+  bad: { label: "Below target", color: "var(--bad)", pill: "p-bad" },
+};
+
 export const cPill = (v) => (v >= 90 ? "p-ok" : v >= 75 ? "p-warn" : "p-bad");
 
 export function formatDuration(totalSeconds) {

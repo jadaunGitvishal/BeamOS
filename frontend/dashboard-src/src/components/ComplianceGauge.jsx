@@ -1,3 +1,5 @@
+import { targetStatus, TARGET_STATUS } from "../lib/format";
+
 // Reusable circular progress gauge: a big % in the centre of a ring whose
 // coloured arc fills toward `target`, with the arc + value coloured by whether
 // the value meets that target (green) or not (amber when within 5 pts, else
@@ -44,13 +46,9 @@ export default function ComplianceGauge({
   // falls back to a fraction of 100.
   const frac = Math.max(0, Math.min(1, !plain && tgt != null && tgt > 0 ? pct / tgt : pct / 100));
 
-  const autoColor = !has
-    ? "var(--ink3)"
-    : meets
-      ? "var(--ok)"
-      : gap != null && gap <= 5
-        ? "var(--warn)"
-        : "var(--bad)";
+  // Shared target rule (lib/format.js targetStatus); no target -> red, as before.
+  const st = targetStatus(pct, tgt);
+  const autoColor = !has ? "var(--ink3)" : st ? TARGET_STATUS[st].color : "var(--bad)";
   const color = has && colorOverride ? colorOverride : autoColor;
 
   const autoCaption = !has
