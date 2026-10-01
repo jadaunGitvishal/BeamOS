@@ -3,7 +3,8 @@ import { n0 } from "../lib/format";
 
 // A card of labelled share-of-total bars (count / total), reusing the
 // Campaigns/Content .cdel row layout. rows: [{ key, label, count, color }].
-export default function ShareBars({ title, note, rows, total, foot }) {
+// `unit` is the singular noun for the count line ("ticket" -> "3 tickets").
+export default function ShareBars({ title, note, rows, total, foot, unit = "ticket" }) {
   return (
     <div className="card panel">
       <div className="panel-head">
@@ -18,7 +19,8 @@ export default function ShareBars({ title, note, rows, total, foot }) {
             <div className="cdel-name">
               <span>{r.label}</span>
               <small>
-                {n0(r.count)} ticket{r.count === 1 ? "" : "s"}
+                {n0(r.count)} {unit}
+                {r.count === 1 ? "" : "s"}
               </small>
             </div>
             <ProgressBar percentage={total ? Math.round((r.count / total) * 1000) / 10 : null} color={r.color} />

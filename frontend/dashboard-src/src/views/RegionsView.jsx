@@ -5,9 +5,10 @@ import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, periodWindow, periodLabel, isoDateOnly } from "../lib/format";
-import { REGION_STATUS as STATUS } from "../lib/regions";
+import { REGION_STATUS as STATUS, rankRegionsByAttention } from "../lib/regions";
 import ProgressBar from "../components/ProgressBar";
-import CategoryBarChart from "../components/CategoryBarChart";
+import KpiCard from "../components/KpiCard";
+import ShareBars from "../components/ShareBars";
 
 // Phase 3 Stage C — per-region SLA rollup, read off
 // GET /api/organizations/:orgId/regions/sla-overview (Stage B). The endpoint
@@ -95,6 +96,12 @@ export default function RegionsView() {
   // The rollup always returns an "Unassigned" bucket when the org has
   // region-less workspaces, so "no regions" means "no bucket with a real id".
   const namedRegions = regions.filter((r) => r.region_id !== null);
+  const compliant = regions.filter((r) => r.sla_status === "compliant").length;
+  const breach = regions.filter((r) => r.sla_status === "breach").length;
+  const totalWorkspaces = regions.reduce((a, r) => a + r.workspace_count, 0);
+  const totalDevices = regions.reduce((a, r) => a + r.device_count, 0);
+  const withData = regions.reduce((a, r) => a + r.devices_with_data, 0);
+  const ranked = rankRegionsByAttention(regions);
 
   return (
     <>
@@ -113,29 +120,90 @@ export default function RegionsView() {
       ) : (
         <>
           {!namedRegions.length ? (
-            <div className="card" style={{ marginBottom: 10 }}>
+            <div className="card" style={{ marginBottom: 16 }}>
               <p className="empty" style={{ padding: 0 }}>
                 No regions defined yet. An organization admin can create regions and assign workspaces to them in
                 Settings — until then every workspace counts as Unassigned.
               </p>
             </div>
           ) : null}
-          <CategoryBarChart
-            className="mb10"
-            title="Uptime by region"
-            hint={`average over the ${periodLabel(period)}${target !== null ? `, target ${target}%` : ""}`}
-            layout="horizontal"
-            unit="%"
-            domain={[0, 100]}
-            height={Math.max(110, regions.length * 34 + 30)}
-            data={regions.map((r) => ({
-              label: r.region_name,
-              value: r.avg_uptime_pct,
-              color: (STATUS[r.sla_status] || STATUS.unknown).color,
-            }))}
-          />
+          <div className="grid g4">
+            <KpiCard
+              label="Regions"
+              value={n0(namedRegions.length)}
+              subLine={`${n0(totalWorkspaces)} workspace${totalWorkspaces === 1 ? "" : "s"} in scope`}
+              color="var(--accent)"
+            />
+            <KpiCard
+              label="Compliant"
+              value={n0(compliant)}
+              ofValue={n0(regions.length)}
+              subLine={target !== null ? `at or above ${target}% uptime` : "at or above the uptime target"}
+              percentage={regions.length ? (compliant / regions.length) * 100 : null}
+              color="var(--ok)"
+            />
+            <KpiCard
+              label="In breach"
+              value={n0(breach)}
+              ofValue={n0(regions.length)}
+              subLine={breach ? "below the uptime target" : "no region below target"}
+              color={breach ? "var(--bad)" : "var(--ok)"}
+            />
+            <KpiCard
+              label="Screens"
+              value={n0(totalDevices)}
+              subLine={withData < totalDevices ? `${n0(withData)} reporting uptime data` : "all reporting uptime data"}
+              percentage={totalDevices ? (withData / totalDevices) * 100 : null}
+              color="var(--accent)"
+            />
+          </div>
+
+          <div className="grid g2 mt16 csplit">
+            <div className="card panel">
+              <div className="panel-head">
+                <div>
+                  <h2>Uptime by region</h2>
+                  <p className="panel-note">
+                    Average over the {periodLabel(period)}
+                    {target !== null ? `; tick marks the ${target}% target` : ""}.
+                  </p>
+                </div>
+              </div>
+              <div className="cdel">
+                {ranked.map((r) => {
+                  const s = STATUS[r.sla_status] || STATUS.unknown;
+                  return (
+                    <div className="cdel-row" key={r.region_id || "__unassigned__"}>
+                      <div className="cdel-name">
+                        <span style={r.region_id === null ? { color: "var(--ink3)" } : undefined}>{r.region_name}</span>
+                        <small>{s.label}</small>
+                      </div>
+                      <ProgressBar percentage={r.avg_uptime_pct} target={target} color={s.color} />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <ShareBars
+              title="Screens by region"
+              note="Share of all screens you can see."
+              unit="screen"
+              rows={[...regions]
+                .sort((x, y) => y.device_count - x.device_count)
+                .map((r) => ({
+                  key: r.region_id || "__unassigned__",
+                  label: r.region_name,
+                  count: r.device_count,
+                  color: r.region_id === null ? "var(--ink3)" : "var(--accent)",
+                }))}
+              total={totalDevices}
+            />
+          </div>
+
+          <div className="sec">
+          <h2>All regions</h2>
           <div className="card pad0">
-          <table>
+          <table style={{ minWidth: 640 }}>
             <thead>
               <tr>
                 <th>Region</th>
@@ -165,9 +233,10 @@ export default function RegionsView() {
                       ) : null}
                     </td>
                     <td style={{ minWidth: 180 }}>
-                      <ProgressBar percentage={r.avg_uptime_pct} target={target} />
+                      <ProgressBar percentage={r.avg_uptime_pct} target={target} color={s.color} />
                     </td>
-                    <td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <i className="dot" style={{ background: s.color, marginRight: 6 }} />
                       <span style={{ color: s.color, fontWeight: 500 }}>{s.label}</span>
                     </td>
                   </tr>
@@ -175,6 +244,7 @@ export default function RegionsView() {
               })}
             </tbody>
           </table>
+          </div>
           </div>
         </>
       )}
