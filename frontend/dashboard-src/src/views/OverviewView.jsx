@@ -6,7 +6,7 @@ import { useSession } from "../hooks/useSession";
 import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
-import { n0, cCol, periodWindow, periodLabel, isoDateOnly, formatDuration } from "../lib/format";
+import { n0, cCol, periodWindow, isoDateOnly, formatDuration } from "../lib/format";
 import { isAtRisk, isWeakSignal } from "../lib/risk";
 import { PRIORITY_COLOR, RESPONSE_STATUS, CATEGORY_LABEL, CATEGORY_COLOR, causeHint, rankOpenTickets } from "../lib/tickets";
 import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
@@ -207,15 +207,36 @@ export default function OverviewView() {
     ? Math.max(0, Math.floor(Math.min(...trend.map((p) => p.pct), slaTarget ?? 100) / 5) * 5 - 5)
     : 0;
 
+  // "Network health": no single health score exists server-side, so this is a
+  // plain composite of the page's two headline percentages, weighted equally:
+  //   health = (fleet uptime % + play completion %) / 2
+  // Uptime says "were the screens on", completion says "did what we scheduled
+  // actually play" - together they're delivery + availability, the two things
+  // the header promises. If only one is available it stands alone; neither ->
+  // no data. Its target is 90, the same "good" line cCol already uses for
+  // completion on this page (amber within 5 pts, red below 85).
+  const HEALTH_TARGET = 90;
+  const healthParts = [fleetUptime, completion].filter((v) => v !== null && Number.isFinite(Number(v))).map(Number);
+  const health = healthParts.length
+    ? Math.round((healthParts.reduce((a, v) => a + v, 0) / healthParts.length) * 10) / 10
+    : null;
+  // "Critical exceptions" = the open error groups the Issues page lists
+  // (platform admins only; for everyone else issues is null).
+  const healthCaption =
+    health === null
+      ? "no data yet"
+      : issues !== null && issues.length > 0
+        ? `Needs attention · ${n0(issues.length)} critical exception${issues.length === 1 ? "" : "s"}`
+        : "All clear";
+
   return (
     <>
+      <p className="eyebrow">Organisation overview</p>
       <div className="pt">
-        <h1>Overview</h1>
+        <h1>Network performance</h1>
         <span className="stamp">as of {asof}</span>
       </div>
-      <p className="sub">
-        Live figures for the {periodLabel(period)}, from {n0(total)} device{total === 1 ? "" : "s"} in this workspace.
-      </p>
+      <p className="sub">One view of delivery, availability and the work that will recover performance.</p>
 
       <div className="card pad0 hero rise">
         <div className="heroL">
@@ -278,7 +299,8 @@ export default function OverviewView() {
         </div>
       </div>
 
-      <div className="grid g4 mt16">
+      <div className="grid g5 mt16">
+        <ComplianceGauge label="Network health" percentage={health} target={HEALTH_TARGET} caption={healthCaption} />
         <StatTile label="Total devices" value={n0(total)} card />
         <StatTile label="Online now" value={n0(online)} sub={total ? `${((online / total) * 100).toFixed(1)}% of the fleet` : null} card />
         <StatTile label="Needs attention" value={n0(attention.length)} sub="low storage, low RAM or weak Wi-Fi" card />
