@@ -285,7 +285,52 @@ export default function OverviewView() {
         </span>
       </div>
 
-      <div className="card pad0 hero rise">
+      <div className="grid g4">
+        <KpiCard
+          label="Screens on air now"
+          value={n0(online)}
+          ofValue={n0(total)}
+          subLine={total ? `${((online / total) * 100).toFixed(1)}% of fleet` : "no screens yet"}
+          percentage={total ? (online / total) * 100 : null}
+          color="var(--on)"
+          linkTo="/devices"
+        />
+        <KpiCard
+          label="Screens below target"
+          value={belowTarget !== null ? n0(belowTarget) : "—"}
+          ofValue={belowTarget !== null ? n0(uptimeVals.length) : null}
+          subLine={
+            belowTarget !== null
+              ? `uptime under the ${slaTarget}% SLA target`
+              : "SLA data unavailable"
+          }
+          percentage={belowTarget !== null && uptimeVals.length ? (belowTarget / uptimeVals.length) * 100 : null}
+          color="var(--bad)"
+          linkTo="/regions"
+        />
+        <KpiCard
+          label="Open issues"
+          value={issues !== null ? n0(issues.length) : "—"}
+          subLine={
+            issues !== null
+              ? `${n0(affectedScreens)} screen${affectedScreens === 1 ? "" : "s"} affected`
+              : "platform admin only"
+          }
+          color="var(--warn)"
+          linkTo={issues !== null ? "/issues" : null}
+        />
+        <KpiCard
+          label="Incomplete plays"
+          value={n0(incompletePlays)}
+          ofValue={n0(overview.total_plays)}
+          subLine="incomplete this period"
+          percentage={overview.total_plays ? (incompletePlays / overview.total_plays) * 100 : null}
+          color="var(--accent)"
+          linkTo="/content"
+        />
+      </div>
+
+      <div className="card pad0 hero rise mt16">
         <div className="heroL">
           <p className="k" style={{ fontSize: 11.5, color: "var(--ink2)", margin: "0 0 6px" }}>
             Play completion rate
@@ -344,51 +389,6 @@ export default function OverviewView() {
             </div>
           </div>
         </div>
-      </div>
-
-      <div className="grid g4 mt16">
-        <KpiCard
-          label="Screens on air now"
-          value={n0(online)}
-          ofValue={n0(total)}
-          subLine={total ? `${((online / total) * 100).toFixed(1)}% of fleet` : "no screens yet"}
-          percentage={total ? (online / total) * 100 : null}
-          color="var(--on)"
-          linkTo="/devices"
-        />
-        <KpiCard
-          label="Screens below target"
-          value={belowTarget !== null ? n0(belowTarget) : "—"}
-          ofValue={belowTarget !== null ? n0(uptimeVals.length) : null}
-          subLine={
-            belowTarget !== null
-              ? `uptime under the ${slaTarget}% SLA target`
-              : "SLA data unavailable"
-          }
-          percentage={belowTarget !== null && uptimeVals.length ? (belowTarget / uptimeVals.length) * 100 : null}
-          color="var(--bad)"
-          linkTo="/regions"
-        />
-        <KpiCard
-          label="Open issues"
-          value={issues !== null ? n0(issues.length) : "—"}
-          subLine={
-            issues !== null
-              ? `${n0(affectedScreens)} screen${affectedScreens === 1 ? "" : "s"} affected`
-              : "platform admin only"
-          }
-          color="var(--warn)"
-          linkTo={issues !== null ? "/issues" : null}
-        />
-        <KpiCard
-          label="Incomplete plays"
-          value={n0(incompletePlays)}
-          ofValue={n0(overview.total_plays)}
-          subLine="incomplete this period"
-          percentage={overview.total_plays ? (incompletePlays / overview.total_plays) * 100 : null}
-          color="var(--accent)"
-          linkTo="/content"
-        />
       </div>
 
       {overview.org ? (
