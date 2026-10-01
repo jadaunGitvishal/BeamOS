@@ -7,13 +7,10 @@ import { usePeriod } from "../hooks/usePeriod";
 import { useClock } from "../hooks/useClock";
 import { apiFetch, UnauthenticatedError } from "../lib/api";
 import { n0, cCol, periodWindow, isoDateOnly, formatDuration, fmtPeriodRange } from "../lib/format";
-import { isAtRisk, isWeakSignal } from "../lib/risk";
 import { PRIORITY_COLOR, RESPONSE_STATUS, CATEGORY_LABEL, CATEGORY_COLOR, OWNER_LABELS, causeHint, rankOpenTickets } from "../lib/tickets";
 import { REGION_STATUS, rankRegionsByAttention } from "../lib/regions";
-import { deliveryColor } from "../lib/campaigns";
 import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
-import AttentionCard from "../components/AttentionCard";
 import KpiCard from "../components/KpiCard";
 import ProgressBar from "../components/ProgressBar";
 import WorkspaceSwitcher from "../components/WorkspaceSwitcher";
@@ -40,7 +37,7 @@ export default function OverviewView() {
         if (e instanceof UnauthenticatedError || e.name === "AbortError") throw e;
         return null;
       };
-      const [overview, devices, sla, slaTrend, tickets, regions, campaigns, recon, pendingInst] = await Promise.all([
+      const [overview, devices, sla, slaTrend, tickets, regions] = await Promise.all([
         apiFetch(`/api/dashboard/overview?start=${encodeURIComponent(start.toISOString())}`, { signal }),
         apiFetch("/api/dashboard/devices", { signal }),
         apiFetch(`/api/dashboard/reports/sla-overview?start=${encodeURIComponent(isoDateOnly(start))}`, { signal }).catch(softFail),
@@ -58,19 +55,6 @@ export default function OverviewView() {
               { signal },
             ).catch(softFail)
           : Promise.resolve(null),
-        // Campaigns teaser — same endpoint the Campaigns page uses. Soft-fails
-        // to null so the section just hides on a 403/500 or no workspace.
-        wsId
-          ? apiFetch(`/api/workspaces/${encodeURIComponent(wsId)}/campaigns`, { signal }).catch(softFail)
-          : Promise.resolve(null),
-        // Reconciliation teaser — the same live GET the Reconciliation page uses
-        // (ghost/stale device counts, computed on demand). Soft-fails to null so
-        // a 403/500 just hides the section.
-        apiFetch("/api/dashboard/reports/reconciliation", { signal }).catch(softFail),
-        // Pending-installations teaser — the same live GET the Pending
-        // Installations page uses (registration codes cut ahead of an install
-        // that no device activated). Soft-fails to null so a 403/500 hides it.
-        apiFetch("/api/dashboard/reports/pending-installations", { signal }).catch(softFail),
       ]);
       let issues = null;
       if (isAdmin) {
@@ -83,7 +67,7 @@ export default function OverviewView() {
           issues = [];
         }
       }
-      return { overview, devices, issues, sla, slaTrend, tickets, regions, campaigns, recon, pendingInst };
+      return { overview, devices, issues, sla, slaTrend, tickets, regions };
     },
     [period, isAdmin, wsId, orgId],
   );
@@ -106,12 +90,11 @@ export default function OverviewView() {
   }
   if (!data) return <p className="sub">Loading…</p>;
 
-  const { overview, devices, issues, sla, tickets, regions, campaigns, recon, pendingInst } = data;
+  const { overview, issues, sla, tickets, regions } = data;
   const total = overview.total_devices,
     online = overview.online,
     offline = overview.offline;
   const completion = overview.completion_pct;
-  const attention = devices.filter((d) => isAtRisk(d) || isWeakSignal(d));
 
   // --- Overview Stage B: "Priority actions" teaser — top 3 of the same ranked
   // open-ticket queue the Operations page shows. tickets === null (fetch soft-
@@ -131,52 +114,6 @@ export default function OverviewView() {
     regions && Array.isArray(regions.regions) && regions.regions.some((r) => r.region_id !== null)
       ? rankRegionsByAttention(regions.regions)
       : null;
-
-  // --- Overview Stage D: "Campaigns" teaser — the live campaigns the Campaigns
-  // page tracks, condensed to name / delivery % / plays. Empty-state blends the
-  // Stage B & C reasoning: the section shows only if this workspace uses
-  // campaigns at all (>=1 of any status — no campaigns => usage gap, hide, cf.
-  // Stage C); but if some exist and none are live, keep the section with a
-  // "nothing running" note, because for a workspace that runs campaigns
-  // "nothing scheduled right now" is a real status worth confirming (cf. Stage
-  // B's "All clear"). null (soft-fail / no workspace) => hide.
-  const allCampaigns = Array.isArray(campaigns) ? campaigns : null;
-  const liveCampaigns = allCampaigns ? allCampaigns.filter((c) => c.status === "live") : [];
-  const showCampaigns = allCampaigns != null && allCampaigns.length > 0;
-
-  // --- Overview Stage E: "Reconciliation" teaser — ghost (registered, never
-  // reported) + stale (silent N+ days) device counts from the live
-  // GET /api/dashboard/reports/reconciliation (the SAME on-demand endpoint the
-  // full Reconciliation view uses — never waits for the scheduled email).
-  //
-  // Empty-state follows Stage B's "All clear" model, NOT Stage C/D's
-  // hide-if-unused: reconciliation isn't an opt-in feature you configure (like
-  // regions or campaigns) — every workspace's device inventory is always being
-  // checked — so "0 discrepancies" is a genuine, reassuring status worth
-  // confirming ("every device is accounted for"). The one nuance: a workspace
-  // with NO devices at all has nothing to reconcile, so "all clear" would be a
-  // hollow reassurance — show a neutral "no devices yet" note there instead.
-  // recon == null (soft-fail / no workspace) => hide the section entirely.
-  const reconCounts = recon?.counts ?? null;
-
-  // --- Overview Stage F: "Pending installations" teaser — registration codes
-  // cut ahead of an install that no device has activated against: `pending`
-  // (still inside the 30-day window, worth chasing) + `abandoned` (expired
-  // unclaimed). Same live GET the full Pending Installations view uses.
-  //
-  // Empty-state follows the Campaigns (Stage D) model, NOT Reconciliation's
-  // (Stage E) "All clear". Reconciliation always applies — every workspace has a
-  // device inventory being checked, so "0 discrepancies" is a real reassurance
-  // there. Advance registration codes are opt-in: a workspace can pair every
-  // device directly and never cut one, so "0 pending installs" for it is a
-  // non-event, not a reassurance (cf. "no regions" / "no campaigns"). So: hide
-  // the section entirely when the workspace has never generated a code
-  // (code_count === 0); once it has, keep the section even at zero flagged with
-  // an "all clear" note, because for a workspace that DOES provision this way
-  // "every code activated" is worth confirming (cf. Campaigns' "nothing
-  // running"). pendingInst == null (soft-fail / no workspace) => hide.
-  const piCounts = pendingInst?.counts ?? null;
-  const showPending = pendingInst != null && pendingInst.code_count > 0;
 
   // --- Ref 51: SLA compliance (merged into this page, not a separate view) ---
   const slaTarget = sla?.target?.uptime_target_pct ?? null;
@@ -626,131 +563,6 @@ export default function OverviewView() {
         </div>
       ) : null}
 
-      {showCampaigns ? (
-        <div className="sec">
-          <div className="ch">
-            <h2>Campaigns</h2>
-            {liveCampaigns.length ? <span className="hint">{n0(liveCampaigns.length)} live</span> : null}
-          </div>
-          {liveCampaigns.length ? (
-            <div className="card">
-              <div className="paq">
-                {liveCampaigns.map((c) => (
-                  <div className="paq-row" key={c.id}>
-                    <div style={{ minWidth: 0 }}>
-                      <span className="paq-title">{c.name}</span>
-                      {c.playlist_name ? <span className="paq-cause">{c.playlist_name}</span> : null}
-                    </div>
-                    <div className="paq-meta">
-                      <span style={{ color: deliveryColor(c.delivery_pct) }}>
-                        {c.delivery_pct == null ? "—" : `${c.delivery_pct}%`}
-                      </span>
-                      <span style={{ color: "var(--ink3)" }}>
-                        {c.actual_plays == null
-                          ? "n/a"
-                          : `${n0(c.actual_plays)} / ${c.expected_plays == null ? "—" : n0(c.expected_plays)}`}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt16">
-                <Link className="btn" to="/campaigns">
-                  View all in Campaigns
-                </Link>
-              </div>
-            </div>
-          ) : (
-            <div className="card">
-              <p className="empty" style={{ padding: 0 }}>
-                No campaigns running right now.{" "}
-                <Link to="/campaigns" style={{ color: "var(--accent)" }}>
-                  Campaigns
-                </Link>
-              </p>
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {recon ? (
-        <div className="sec">
-          <div className="ch">
-            <h2>Reconciliation</h2>
-            {reconCounts && reconCounts.total ? (
-              <span className="hint">{n0(reconCounts.total)} to review</span>
-            ) : null}
-          </div>
-          {reconCounts && reconCounts.total ? (
-            <div className="card">
-              <div className="grid g2">
-                <StatTile label="Ghost devices" value={n0(reconCounts.ghost)} sub="registered, never reported" />
-                <StatTile
-                  label="Stale devices"
-                  value={n0(reconCounts.stale)}
-                  sub={`no heartbeat in ${recon.stale_after_days}+ days`}
-                />
-              </div>
-              <div className="mt16">
-                <Link className="btn" to="/reconciliation">
-                  View all in Reconciliation
-                </Link>
-              </div>
-            </div>
-          ) : (
-            <div className="card">
-              <p className="empty" style={{ padding: 0 }}>
-                {recon.device_count === 0 ? (
-                  "No devices registered in this workspace yet."
-                ) : (
-                  <>
-                    All clear — every device is accounted for and reporting.{" "}
-                    <Link to="/reconciliation" style={{ color: "var(--accent)" }}>
-                      Reconciliation
-                    </Link>
-                  </>
-                )}
-              </p>
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {showPending ? (
-        <div className="sec">
-          <div className="ch">
-            <h2>Pending installations</h2>
-            {piCounts && piCounts.total ? <span className="hint">{n0(piCounts.total)} to chase</span> : null}
-          </div>
-          {piCounts && piCounts.total ? (
-            <div className="card">
-              <div className="grid g2">
-                <StatTile
-                  label="Pending"
-                  value={n0(piCounts.pending)}
-                  sub={`code cut > ${pendingInst.grace_days}d ago, not activated`}
-                />
-                <StatTile label="Abandoned" value={n0(piCounts.abandoned)} sub="expired, never activated" />
-              </div>
-              <div className="mt16">
-                <Link className="btn" to="/pending-installations">
-                  View all in Pending Installations
-                </Link>
-              </div>
-            </div>
-          ) : (
-            <div className="card">
-              <p className="empty" style={{ padding: 0 }}>
-                All clear — every registration code has been activated or handled.{" "}
-                <Link to="/pending-installations" style={{ color: "var(--accent)" }}>
-                  Pending Installations
-                </Link>
-              </p>
-            </div>
-          )}
-        </div>
-      ) : null}
-
       {sla && liveBreaches.length ? (
         <div className="sec">
           <h2>Live SLA breaches</h2>
@@ -781,33 +593,6 @@ export default function OverviewView() {
           </div>
         </div>
       ) : null}
-
-      <div className="sec">
-        <h2>Needs attention</h2>
-        {attention.length ? (
-          <>
-            <div className="grid" style={{ gap: 8 }}>
-              {attention.slice(0, 10).map((d) => (
-                <AttentionCard key={d.id} device={d} />
-              ))}
-            </div>
-            {attention.length > 10 ? (
-              <p className="s mono mt16" style={{ color: "var(--ink3)" }}>
-                Showing 10 of {attention.length}.{" "}
-                <Link to="/devices?risk=1" style={{ color: "var(--accent)" }}>
-                  View all in Devices
-                </Link>
-              </p>
-            ) : null}
-          </>
-        ) : (
-          <div className="card">
-            <p className="empty" style={{ padding: 0 }}>
-              Nothing needs attention right now.
-            </p>
-          </div>
-        )}
-      </div>
     </>
   );
 }
