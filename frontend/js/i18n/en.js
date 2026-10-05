@@ -416,6 +416,15 @@ export default {
   "device.toast.shutdown_sent": "Shutdown command sent",
   "device.toast.screen_off_sent": "Screen off command sent",
   "device.toast.screen_on_sent": "Screen on command sent",
+  // Ref 47: kiosk lockdown
+  "device.lockdown.enable": "Enable kiosk lockdown",
+  "device.lockdown.disable": "Disable kiosk lockdown",
+  "device.lockdown.hint": "Device owner devices only. Requires workspace admin.",
+  "device.lockdown.enable_confirm":
+    "This blocks USB file transfer, external storage, factory reset from Settings, safe mode, and USB debugging, and pins the screen to BeamOS. It only works on devices provisioned as device owner. To undo it, the device must be online to receive 'Disable kiosk lockdown'.",
+  "device.lockdown.enable_sent": "Kiosk lockdown command sent",
+  "device.lockdown.disable_sent": "Disable kiosk lockdown command sent",
+  "device.lockdown.failed": "Kiosk lockdown command failed: {error}",
   "device.toast.launch_sent": "Launch command sent",
   "device.toast.update_triggered": "Update check triggered",
   "device.toast.location_request_sent": "Location permission request sent",

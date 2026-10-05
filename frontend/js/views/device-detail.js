@@ -179,6 +179,13 @@ async function loadDevice(deviceId, activeTab = null) {
     const device = await api.getDevice(deviceId);
     currentDevice = device;
     const latestTelemetry = device.telemetry?.[0] || {};
+    // Ref 47: kiosk lockdown buttons only for users who can admin the device's workspace
+    // (same accessible_workspaces[].can_admin pattern as settings.js). The server re-checks.
+    let storedUser = {};
+    try { storedUser = JSON.parse(localStorage.getItem("user") || "{}"); } catch { /* */ }
+    const canAdminDeviceWs = (storedUser.accessible_workspaces || []).some(
+      (w) => w.id === device.workspace_id && w.can_admin,
+    );
 
     contentEl.innerHTML = `
       <div class="device-header">
@@ -474,6 +481,24 @@ async function loadDevice(deviceId, activeTab = null) {
             </svg>
             ${t("device.ctl.screen_on")}
           </button>
+          ${
+            canAdminDeviceWs
+              ? `
+          <button class="btn btn-secondary btn-sm" id="enableLockdownBtn" title="${esc(t("device.lockdown.hint"))}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+            ${t("device.lockdown.enable")}
+          </button>
+          <button class="btn btn-secondary btn-sm" id="disableLockdownBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+            </svg>
+            ${t("device.lockdown.disable")}
+          </button>
+          `
+              : ""
+          }
           <button class="btn btn-secondary btn-sm" id="launchAppBtn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polygon points="5 3 19 12 5 21 5 3"/>
@@ -1081,6 +1106,25 @@ async function setupActions(device) {
   // Screen On
   document.getElementById("screenOnBtn")?.addEventListener("click", () => {
     sendWithFeedback("screen_on", "Screen on", "device.toast.screen_on_sent");
+  });
+
+  // Ref 47: kiosk lockdown - REST route (server requires workspace admin), not the socket.
+  async function sendLockdown(type, label, successKey) {
+    try {
+      const r = await api.sendDeviceCommand(device.id, type, {});
+      if (r.delivered) showToast(t(successKey), "success");
+      else if (r.queued) showToast(t("device.toast.command_queued", { cmd: label }), "warning");
+      else showToast(t("device.toast.command_undeliverable", { cmd: label }), "error");
+    } catch (err) {
+      showToast(t("device.lockdown.failed", { error: err.message }), "error");
+    }
+  }
+  document.getElementById("enableLockdownBtn")?.addEventListener("click", () => {
+    if (!confirm(t("device.lockdown.enable_confirm"))) return;
+    sendLockdown("enable_kiosk_lockdown", t("device.lockdown.enable"), "device.lockdown.enable_sent");
+  });
+  document.getElementById("disableLockdownBtn")?.addEventListener("click", () => {
+    sendLockdown("disable_kiosk_lockdown", t("device.lockdown.disable"), "device.lockdown.disable_sent");
   });
 
   // Launch Player

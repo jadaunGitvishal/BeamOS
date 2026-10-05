@@ -123,6 +123,15 @@ the pairing port only exists while the pairing dialog is open.
 
 ---
 
+## Kiosk lockdown (device stuck pinned, USB / debugging blocked)
+
+If a device is pinned to BeamOS and USB file transfer, external storage or USB debugging
+don't work, kiosk lockdown is probably on. See [kiosk-lockdown.md](kiosk-lockdown.md)
+for what it blocks on each Android version and how to turn it off (the device must be
+online to receive *Disable kiosk lockdown*).
+
+---
+
 ## Reference: where things live
 
 | Thing | Location |

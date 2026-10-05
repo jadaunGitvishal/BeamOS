@@ -1242,7 +1242,8 @@ paths:
               properties:
                 type:
                   type: string
-                  enum: [screen_on, screen_off, launch, update, reboot, shutdown]
+                  enum: [screen_on, screen_off, launch, update, reboot, shutdown, enable_kiosk_lockdown, disable_kiosk_lockdown]
+                  description: enable_kiosk_lockdown and disable_kiosk_lockdown require workspace admin access (403 otherwise).
                 payload: { type: object }
       responses:
         '200': { description: '{ success, sent, offline, total, results }.' }

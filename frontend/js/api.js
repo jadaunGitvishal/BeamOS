@@ -191,6 +191,9 @@ export const api = {
   addDeviceToGroup: (groupId, device_id) => request(`/groups/${groupId}/devices`, { method: 'POST', body: JSON.stringify({ device_id }) }),
   removeDeviceFromGroup: (groupId, deviceId) => request(`/groups/${groupId}/devices/${deviceId}`, { method: 'DELETE' }),
   sendGroupCommand: (groupId, type, payload) => request(`/groups/${groupId}/command`, { method: 'POST', body: JSON.stringify({ type, payload }) }),
+  // Ref 47: single-device REST command route (POST /api/devices/:id/command). Used only by
+  // the kiosk lockdown buttons; the other device controls stay on the socket path.
+  sendDeviceCommand: (deviceId, type, payload) => request(`/devices/${encodeURIComponent(deviceId)}/command`, { method: 'POST', body: JSON.stringify({ type, payload: payload || {} }) }),
 
   // Video walls
   getWalls: () => request('/walls'),

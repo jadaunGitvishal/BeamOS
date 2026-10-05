@@ -5,13 +5,14 @@ import android.app.ActivityManager
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Build
-import android.os.UserManager
+import androidx.annotation.ChecksSdkIntAtLeast
 import com.remotedisplay.player.data.ServerConfig
 import com.remotedisplay.player.util.DebugLog
 
 /**
- * Ref 35 Stage C: the actual USB + kiosk (lock task) lockdown. Everything here is inert
+ * Ref 35 Stage C / Ref 47: the actual USB + kiosk (lock task) lockdown. Everything here is inert
  * until [enable] is explicitly called (a deliberate device:command, wired in MainActivity's
  * onCommand handler - never triggered just because the app happens to hold Device Owner).
  *
@@ -24,6 +25,14 @@ import com.remotedisplay.player.util.DebugLog
  * they throw SecurityException otherwise. Every entry point checks
  * [DeviceAdminReceiver.isDeviceOwner] first and no-ops (logged) rather than crash a device
  * that was never made Device Owner.
+ *
+ * Ref 47: WHICH user restrictions are applied is decided by [LockdownPolicy] (pure,
+ * unit-tested), per Android version - USB file transfer, physical media, factory reset
+ * (API 21+), safe boot (API 23+) and, in release builds only, USB debugging. enable(),
+ * disable() and the rollback all iterate that one list so they can never drift. The lock
+ * task allowlist + startLockTask() apply on every version (API 21+); setLockTaskFeatures()
+ * only exists from API 28, and ActivityManager.lockTaskModeState from API 23 (API 21-22 use
+ * the older isInLockTaskMode) - both are version-guarded so lockdown works on Android 5-8.
  */
 object KioskLockdown {
     private const val TAG = "KioskLockdown"
@@ -36,9 +45,32 @@ object KioskLockdown {
      *  re-entry itself counting as a fresh "automatic" activation. */
     fun isEnabled(context: Context): Boolean = ServerConfig(context).kioskLockdownEnabled
 
+    /** Ref 47: debug vs release, for [LockdownPolicy.restrictions]. BuildConfig generation
+     *  is off in this project (AGP 8 default), so read the manifest's debuggable flag,
+     *  which AGP sets for the debug build type and not for release. */
+    private fun isDebugBuild(context: Context) =
+        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /** Ref 47: [LockdownPolicy.supportsLockTaskFeatures] for THIS device. The annotation
+     *  tells lint this really is an SDK_INT >= 28 check, so the guarded
+     *  setLockTaskFeatures() call isn't reported as NewApi. */
+    @ChecksSdkIntAtLeast(api = Build.VERSION_CODES.P)
+    private fun lockTaskFeaturesSupported(): Boolean =
+        LockdownPolicy.supportsLockTaskFeatures(Build.VERSION.SDK_INT)
+
+    /** Ref 47: lock task state on every supported version. lockTaskModeState is API 23+;
+     *  API 21-22 only have the (later deprecated) boolean isInLockTaskMode. */
+    @Suppress("DEPRECATION")
+    private fun isInLockTask(am: ActivityManager): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            am.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
+        } else {
+            am.isInLockTaskMode
+        }
+
     /**
-     * Applies the DevicePolicyManager-level policy: USB restrictions + the lock-task
-     * allowlist/feature set. Does NOT itself call startLockTaskMode() - that is an Activity
+     * Applies the DevicePolicyManager-level policy: the [LockdownPolicy] user restrictions +
+     * the lock-task allowlist (and, on API 28+, its feature set). Does NOT itself call startLockTaskMode() - that is an Activity
      * method (see [enterLockTaskIfNeeded]), called separately once this returns true.
      */
     fun enable(context: Context): Boolean {
@@ -48,12 +80,10 @@ object KioskLockdown {
         }
         val dpm = dpm(context)
         val admin = adminComponent(context)
+        val restrictions = LockdownPolicy.restrictions(Build.VERSION.SDK_INT, isDebugBuild(context))
         return try {
-            dpm.addUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                dpm.addUserRestriction(admin, UserManager.DISALLOW_MOUNT_PHYSICAL_MEDIA)
-            }
-            DebugLog.i(TAG, "USB restrictions applied")
+            for (r in restrictions) dpm.addUserRestriction(admin, r)
+            DebugLog.i(TAG, "User restrictions applied: $restrictions")
 
             dpm.setLockTaskPackages(admin, arrayOf(context.packageName))
             // LOCK_TASK_FEATURE_NONE: real-hardware-verified default. We originally tried
@@ -66,8 +96,16 @@ object KioskLockdown {
             // the system notification shade) is the correct default - "our own status
             // purposes" is already served by the app's own in-app status views
             // (ProvisioningActivity/MainActivity), which need no lock-task feature at all.
-            dpm.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE)
-            DebugLog.i(TAG, "Lock task allowlist + features set")
+            // Ref 47: setLockTaskFeatures() is API 28+. Calling it unguarded threw
+            // NoSuchMethodError on Android 5-8, which the catch below turned into a full
+            // rollback - lockdown never applied at all there. Below 28 there is no feature
+            // set to configure; plain lock task mode already hides home/recents.
+            if (lockTaskFeaturesSupported()) {
+                dpm.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE)
+                DebugLog.i(TAG, "Lock task allowlist + features set")
+            } else {
+                DebugLog.i(TAG, "Lock task allowlist set (no feature set below API 28)")
+            }
 
             ServerConfig(context).kioskLockdownEnabled = true
             true
@@ -79,10 +117,7 @@ object KioskLockdown {
             // locked down with kioskLockdownEnabled still false and no way back short of
             // manually re-deriving what had actually been applied.
             try {
-                dpm.clearUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    dpm.clearUserRestriction(admin, UserManager.DISALLOW_MOUNT_PHYSICAL_MEDIA)
-                }
+                for (r in restrictions) dpm.clearUserRestriction(admin, r)
                 dpm.setLockTaskPackages(admin, emptyArray())
             } catch (rollbackError: Throwable) {
                 DebugLog.e(TAG, "enable: rollback after failure also failed: ${rollbackError.message}")
@@ -104,11 +139,11 @@ object KioskLockdown {
             val dpm = dpm(context)
             val admin = adminComponent(context)
 
-            dpm.clearUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                dpm.clearUserRestriction(admin, UserManager.DISALLOW_MOUNT_PHYSICAL_MEDIA)
-            }
-            DebugLog.i(TAG, "USB restrictions cleared")
+            // Ref 47: clear the release-build set even in a debug build, so a
+            // DISALLOW_DEBUGGING_FEATURES left by an earlier release build is removed too.
+            val restrictions = LockdownPolicy.restrictionsToClear(Build.VERSION.SDK_INT)
+            for (r in restrictions) dpm.clearUserRestriction(admin, r)
+            DebugLog.i(TAG, "User restrictions cleared: $restrictions")
 
             dpm.setLockTaskPackages(admin, emptyArray())
             DebugLog.i(TAG, "Lock task allowlist cleared")
@@ -139,7 +174,7 @@ object KioskLockdown {
         try {
             enable(activity)
             val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            if (am.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_NONE) {
+            if (!isInLockTask(am)) {
                 activity.startLockTask()
                 DebugLog.i(TAG, "Entered lock task mode")
             }
@@ -153,7 +188,7 @@ object KioskLockdown {
     fun exitLockTaskIfActive(activity: Activity) {
         try {
             val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            if (am.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE) {
+            if (isInLockTask(am)) {
                 activity.stopLockTask()
                 DebugLog.i(TAG, "Exited lock task mode")
             }

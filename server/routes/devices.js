@@ -8,7 +8,8 @@ const { accessContext } = require('../lib/tenancy');
 const { stripDeviceSecrets } = require('../lib/device-sanitize');
 const { layoutZones, orphanCountsByDevice } = require('../lib/zone-validate');
 const { asyncHandler } = require('../lib/async-handler');
-const { ALLOWED_COMMANDS } = require('../lib/device-commands');
+const { ALLOWED_COMMANDS, LOCKDOWN_COMMANDS } = require('../lib/device-commands');
+const { canAdminWorkspace } = require('../lib/permissions'); // Ref 47
 const { requireScope } = require('../middleware/apiToken');
 const commandQueue = require('../lib/command-queue');
 const config = require('../config');
@@ -274,6 +275,14 @@ router.post('/:id/command', requireScope('full'), asyncHandler(async (req, res) 
   const { type, payload } = req.body || {};
   if (!type) return res.status(400).json({ error: 'command type required' });
   if (!ALLOWED_COMMANDS.includes(type)) return res.status(400).json({ error: 'invalid command type' });
+  // Ref 47: kiosk lockdown is stricter than the write gate above - workspace admin or
+  // above on the DEVICE's own workspace (platform_operator excluded, see canAdminWorkspace).
+  if (LOCKDOWN_COMMANDS.includes(type)) {
+    const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
+    if (!(await canAdminWorkspace(db, req.user, ws))) {
+      return res.status(403).json({ error: 'Kiosk lockdown commands require workspace admin access' });
+    }
+  }
 
   const deviceNs = req.app.get('io').of('/device');
   const room = deviceNs.adapter.rooms.get(device.id);
