@@ -8,6 +8,8 @@
 // `color` per item is optional (defaults to the accent). `layout="horizontal"`
 // draws bars left-to-right with labels down the side — better for long names.
 // `unit` is appended to values ("%"); `domain` overrides the value axis.
+// `tooltipLabel(row)` (optional) replaces the tooltip heading — e.g. a full
+// name when the axis shows a shortened label. Omitted = recharts' default.
 
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell, LabelList } from "recharts";
 
@@ -20,6 +22,7 @@ export default function CategoryBarChart({
   height = 170,
   domain,
   className = "",
+  tooltipLabel,
 }) {
   const rows = (data || []).map((d) => ({ ...d, value: d.value == null ? null : Number(d.value) }));
   const horizontal = layout === "horizontal";
@@ -79,6 +82,9 @@ export default function CategoryBarChart({
             <Tooltip
               cursor={{ fill: "var(--line-soft)" }}
               formatter={(v) => [fmt(v), title || "Value"]}
+              {...(tooltipLabel
+                ? { labelFormatter: (label, payload) => (payload?.[0]?.payload ? tooltipLabel(payload[0].payload) : label) }
+                : {})}
               contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid var(--line)" }}
             />
             <Bar
