@@ -195,6 +195,13 @@ export async function render(container) {
       <h4 style="font-size:14px;margin:20px 0 8px">${t("regions.assign_heading")}</h4>
       <div id="regionAssignList"><p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p></div>
     </div>
+
+    <div class="settings-section" id="authPolicySection">
+      <h3>${t("authpolicy.title")}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px">${esc(t("authpolicy.desc"))}</p>
+      <div class="form-group"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ssoOnlyToggle" disabled> ${t("authpolicy.sso_only_label")}</label></div>
+      <p id="ssoOnlyNote" style="color:var(--text-muted);font-size:12px;display:none"></p>
+    </div>
     `
         : ""
     }
@@ -1013,6 +1020,52 @@ export async function render(container) {
     });
 
     loadRegions();
+
+    // ---- Ref 5: SSO-only mode (same org-admin gate as Regions) ----
+    const ssoToggle = document.getElementById("ssoOnlyToggle");
+    const ssoNote = document.getElementById("ssoOnlyNote");
+    let authPolicy = null;
+
+    function renderAuthPolicy() {
+      ssoToggle.checked = authPolicy.sso_only;
+      let note = "";
+      if (!authPolicy.sso_tenant_configured && !authPolicy.sso_only) note = t("authpolicy.no_tenant");
+      else if (!authPolicy.caller_can_enable && !authPolicy.sso_only) note = t("authpolicy.must_use_microsoft");
+      // Turning it off is always allowed; turning it on only when the server would accept it.
+      ssoToggle.disabled = !authPolicy.sso_only && !!note;
+      ssoNote.textContent = note;
+      ssoNote.style.display = note ? "block" : "none";
+    }
+
+    async function loadAuthPolicy() {
+      try {
+        authPolicy = await api.getOrgAuthPolicy(orgId);
+      } catch (err) {
+        ssoNote.textContent = err.message;
+        ssoNote.style.color = "var(--danger)";
+        ssoNote.style.display = "block";
+        return;
+      }
+      renderAuthPolicy();
+    }
+
+    ssoToggle.addEventListener("change", async () => {
+      const next = ssoToggle.checked;
+      if (next && !confirm(t("authpolicy.enable_confirm"))) {
+        ssoToggle.checked = false;
+        return;
+      }
+      ssoToggle.disabled = true;
+      try {
+        authPolicy = await api.setOrgAuthPolicy(orgId, next);
+        showToast(t(next ? "authpolicy.enabled_toast" : "authpolicy.disabled_toast"), "success");
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+      renderAuthPolicy();
+    });
+
+    loadAuthPolicy();
   }
 
   // #73: agency scope reveals a playlist picker (the token's allowlist). Loaded lazily once.

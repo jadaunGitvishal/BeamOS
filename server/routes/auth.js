@@ -35,6 +35,12 @@ const { isDuplicateKeyError } = require("../lib/outage-format");
 // Ref 5: OIDC id_token validation for the tenant-restricted Microsoft login - the
 // same jose/JWKS trust anchors Ref 9's Service Principal auth already uses.
 const { verifyEntraIdToken } = require("../middleware/entraToken");
+// Ref 5: per-organization SSO-only mode (organizations.sso_only).
+const { isSsoOnlyUser } = require("../lib/sso-policy");
+const SSO_REQUIRED = {
+  code: "SSO_REQUIRED",
+  error: "Your organization requires Microsoft sign-in.",
+};
 
 // Phase 2.1: find or create the user's default org+workspace. Returns the
 // workspace_id to embed in the JWT. Idempotent: if the user already has
@@ -235,6 +241,13 @@ router.post("/login", asyncHandler(async (req, res) => {
   if (user.deactivated_at) {
     logFailedLogin(email, getClientIp(req), "Account deactivated");
     return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
+  }
+  // Ref 5: SSO-only org - refuse password login. Same post-password position as
+  // the deactivated check (no enumeration), and BEFORE the TOTP branch so a
+  // blocked user never receives an mfa_token.
+  if (await isSsoOnlyUser(db, user)) {
+    await logFailedLogin(email, getClientIp(req), "SSO required");
+    return res.status(403).json(SSO_REQUIRED);
   }
 
   // #100: password OK. If TOTP is enabled, DON'T issue a session yet - return an
@@ -458,6 +471,12 @@ router.post("/totp/verify", asyncHandler(async (req, res) => {
   // Ref 5/8: deactivated between the password step and this one.
   if (user.deactivated_at)
     return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
+  // Ref 5: org switched to SSO-only between the password step and this one.
+  // Checked before the code so a refused attempt consumes no TOTP step / recovery code.
+  if (await isSsoOnlyUser(db, user)) {
+    await logFailedLogin(user.email, getClientIp(req), "SSO required");
+    return res.status(403).json(SSO_REQUIRED);
+  }
 
   // TOTP first (with intra-window replay block via totp_last_step), then a recovery code.
   const step = totp.verifyCode(
@@ -510,6 +529,12 @@ router.post("/google", async (req, res) => {
     if (user && user.deactivated_at) {
       logFailedLogin(user.email, getClientIp(req), "Account deactivated");
       return res.status(403).json({ error: ACCOUNT_DEACTIVATED_MESSAGE });
+    }
+    // Ref 5: an existing member of an SSO-only org can't use Google either -
+    // refused before the provider-link UPDATE / session below.
+    if (user && await isSsoOnlyUser(db, user)) {
+      await logFailedLogin(user.email, getClientIp(req), "SSO required");
+      return res.status(403).json(SSO_REQUIRED);
     }
 
     if (!user) {
@@ -718,15 +743,28 @@ router.post("/microsoft", async (req, res) => {
     } else if (user.auth_provider !== "microsoft") {
       // Existing account with different provider — do NOT silently overwrite auth_provider.
       if (user.password_hash) {
-        return res.status(409).json({
-          error:
-            "An account with this email already exists. Please log in with your password.",
-        });
+        // Ref 5: exception - a member of an SSO-only org can no longer use the
+        // password, so the 409 would strand them. When the identity came from a
+        // VERIFIED id_token of the configured tenant (tenantRestricted), link the
+        // account to Microsoft instead. Every other case keeps the 409.
+        if (tenantRestricted && await isSsoOnlyUser(db, user)) {
+          await db.prepare(
+            "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
+          ).run("microsoft", microsoftId, user.id);
+          await logActivity(user.id, "account_linked_microsoft", user.email, null, getClientIp(req), null);
+          user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+        } else {
+          return res.status(409).json({
+            error:
+              "An account with this email already exists. Please log in with your password.",
+          });
+        }
+      } else {
+        await db.prepare(
+          "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
+        ).run("microsoft", microsoftId, user.id);
+        user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
       }
-      await db.prepare(
-        "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
-      ).run("microsoft", microsoftId, user.id);
-      user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
     }
 
     const workspaceId = await ensureDefaultOrgForUser(user, {

@@ -52,6 +52,10 @@ const REQUIRED_COLUMNS = [
   // SELECT it on every token request, so an un-migrated DB would 500 every API /
   // SCIM call. Nullable, no default - NULL = no cap, i.e. today's behaviour.
   ['organizations', 'max_token_lifetime_days', "ALTER TABLE organizations ADD COLUMN max_token_lifetime_days INT NULL"],
+  // Ref 5: SSO-only mode. lib/sso-policy.js reads it on every password / Google
+  // login, so an un-migrated DB would 500 every login. Default 0 = every existing
+  // org keeps today's behaviour after the repair.
+  ['organizations', 'sso_only', "ALTER TABLE organizations ADD COLUMN sso_only TINYINT(1) NOT NULL DEFAULT 0"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
   // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)
   // always lists these columns now, so an un-migrated DB would fail every telemetry

@@ -90,6 +90,12 @@ export const api = {
     body: JSON.stringify({ name }),
   }),
   deleteOrgRegion: (orgId, id) => request(`/organizations/${encodeURIComponent(orgId)}/regions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Ref 5: org SSO-only mode. Same org-admin gate as regions.
+  getOrgAuthPolicy: (orgId) => request(`/organizations/${encodeURIComponent(orgId)}/auth-policy`),
+  setOrgAuthPolicy: (orgId, sso_only) => request(`/organizations/${encodeURIComponent(orgId)}/auth-policy`, {
+    method: 'PATCH',
+    body: JSON.stringify({ sso_only }),
+  }),
   // region_id: a region id, or null to unassign.
   setWorkspaceRegion: (workspaceId, region_id) => request(`/workspaces/${encodeURIComponent(workspaceId)}/region`, {
     method: 'PATCH',

@@ -153,6 +153,10 @@ CREATE TABLE IF NOT EXISTS organizations (
     -- stays valid, in days, checked against the token's AGE at auth time (so it
     -- is retroactive - see lib/token-lifetime.js). NULL = no cap (default).
     max_token_lifetime_days INT NULL,
+    -- Ref 5: SSO-only mode. 1 = members must sign in with Microsoft (Entra ID);
+    -- password and Google login are refused (lib/sso-policy.js). Platform admins
+    -- are exempt. 0 = today's behaviour (default).
+    sso_only                TINYINT(1) NOT NULL DEFAULT 0,
     created_at              BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     updated_at              BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     FOREIGN KEY (owner_user_id) REFERENCES users(id),

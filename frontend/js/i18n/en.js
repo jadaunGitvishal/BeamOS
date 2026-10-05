@@ -538,6 +538,20 @@ export default {
   "regions.unassigned": "— No region —",
   "regions.assigned_toast": "Workspace region updated",
 
+  // Ref 5: per-organization SSO-only mode
+  "authpolicy.title": "Authentication",
+  "authpolicy.sso_only_label": "Require Microsoft sign-in (SSO only)",
+  "authpolicy.desc":
+    "When on, members of this organization can only sign in with Microsoft. Password and Google sign-in are refused.",
+  "authpolicy.no_tenant":
+    "Unavailable: the server administrator must set SSO_TENANT_ID (Microsoft sign-in restricted to your tenant) first.",
+  "authpolicy.must_use_microsoft":
+    "Sign in with Microsoft before enabling SSO-only, so you don't lock yourself out.",
+  "authpolicy.enable_confirm":
+    "Members will only be able to sign in with Microsoft. Platform admins are exempt. Existing sessions stay valid until they expire.",
+  "authpolicy.enabled_toast": "SSO-only mode enabled",
+  "authpolicy.disabled_toast": "SSO-only mode disabled",
+
   "settings.save_profile": "Save Profile",
   "settings.email_alerts": "Email me when devices go offline",
   "settings.change_password": "Change Password",

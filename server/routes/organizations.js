@@ -11,6 +11,7 @@ const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
 const { parseLifetimeDays } = require("../lib/token-lifetime"); // Ref 34
+const config = require("../config"); // Ref 5: ssoTenantId gates SSO-only mode
 
 function formatTimestamp(epochSeconds) {
   if (epochSeconds === null || epochSeconds === undefined) return "";
@@ -649,6 +650,75 @@ router.patch(
       );
     }
     res.json(tokenPolicyView({ ...org, max_token_lifetime_days: parsed.value }));
+  }),
+);
+
+// ---- Ref 5: SSO-only mode (organizations.sso_only) ----
+// Same gate as token-policy (loadOrgForRegions). Enforcement lives in
+// routes/auth.js via lib/sso-policy.js. Enabling needs SSO_TENANT_ID (otherwise
+// there is no verified Microsoft login to require), and - so an admin can't lock
+// themselves out - a caller whose own account already signs in with Microsoft.
+// Platform admins are exempt from that check (they are exempt from enforcement
+// too). Disabling is always allowed. The tenant id itself is never returned.
+function authPolicyView(org, user) {
+  const ssoTenantConfigured = !!config.ssoTenantId;
+  return {
+    organization_id: org.id,
+    sso_only: !!org.sso_only,
+    sso_tenant_configured: ssoTenantConfigured,
+    caller_can_enable:
+      ssoTenantConfigured && (isPlatformRole(user.role) || user.auth_provider === "microsoft"),
+  };
+}
+
+// GET /:orgId/auth-policy
+router.get(
+  "/:orgId/auth-policy",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    res.json(authPolicyView(org, req.user));
+  }),
+);
+
+// PATCH /:orgId/auth-policy  { sso_only: boolean }
+router.patch(
+  "/:orgId/auth-policy",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    if (!req.body || typeof req.body.sso_only !== "boolean") {
+      return res.status(400).json({ error: "sso_only is required (true or false)" });
+    }
+    const next = req.body.sso_only;
+    if (next) {
+      if (!config.ssoTenantId) {
+        return res.status(400).json({
+          error: "SSO-only mode needs Microsoft sign-in restricted to your tenant. Ask the server administrator to set SSO_TENANT_ID first.",
+        });
+      }
+      if (!isPlatformRole(req.user.role) && req.user.auth_provider !== "microsoft") {
+        return res.status(403).json({
+          error: "Sign in with Microsoft before enabling SSO-only, so you don't lock yourself out.",
+        });
+      }
+    }
+
+    await db
+      .prepare("UPDATE organizations SET sso_only = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+      .run(next ? 1 : 0, org.id);
+    const before = !!org.sso_only;
+    if (before !== next) {
+      await logActivity(
+        req.user.id,
+        "org_sso_only_changed",
+        `org: ${org.name} (${org.id}), sso_only: ${before} -> ${next}`,
+        null,
+        getClientIp(req),
+        null,
+      );
+    }
+    res.json(authPolicyView({ ...org, sso_only: next ? 1 : 0 }, req.user));
   }),
 );
 

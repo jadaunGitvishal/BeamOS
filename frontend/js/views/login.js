@@ -227,6 +227,17 @@ function setupHandlers(config, isSetup) {
     el.textContent = msg;
     el.style.display = "block";
   };
+  // Ref 5: the user's organization is SSO-only - show the server's message and
+  // point at the Microsoft button by promoting it to the primary button style.
+  const showAuthError = (data) => {
+    showError(data.error);
+    if (data.code !== "SSO_REQUIRED") return;
+    const msBtn = document.getElementById("microsoftSignInBtn");
+    if (!msBtn) return;
+    msBtn.classList.replace("btn-secondary", "btn-primary");
+    msBtn.scrollIntoView({ block: "center", behavior: "smooth" });
+    msBtn.focus();
+  };
 
   // Support token login
   document
@@ -297,7 +308,7 @@ function setupHandlers(config, isSetup) {
       });
       const data = await res.json();
       if (!res.ok) {
-        showError(data.error);
+        showAuthError(data);
         return;
       }
       onAuthSuccess(data);
@@ -371,7 +382,7 @@ function setupHandlers(config, isSetup) {
                 });
                 const data = await res.json();
                 if (res.ok) onAuthSuccess(data);
-                else showError(data.error);
+                else showAuthError(data);
               }
             },
           });

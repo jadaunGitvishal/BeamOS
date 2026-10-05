@@ -121,6 +121,93 @@ the tenant itself and users from other tenants are stopped at Microsoft's
 sign-in page as well as by the server. When unset, it is unchanged
 (`MICROSOFT_TENANT_ID`, default `common`).
 
+### SSO-only mode (per organization)
+
+An organization can require Microsoft sign-in for its members, with no
+separate local login. The setting is `organizations.sso_only`
+(`TINYINT(1) NOT NULL DEFAULT 0`). It is added to existing databases at boot
+by the [`lib/schema-check.js`](../server/lib/schema-check.js) repair. With the
+default `0`, every login path behaves exactly as before.
+
+**Enabling.** An org owner or org admin (or a platform admin) opens
+*Settings → Authentication* and turns on *Require Microsoft sign-in (SSO
+only)*, or calls the API:
+
+```bash
+curl -s https://signage.example.com/api/organizations/<org id>/auth-policy \
+  -H "Authorization: Bearer $SESSION_JWT"
+# -> {"organization_id":"…","sso_only":false,"sso_tenant_configured":true,"caller_can_enable":true}
+
+curl -s -X PATCH https://signage.example.com/api/organizations/<org id>/auth-policy \
+  -H "Authorization: Bearer $SESSION_JWT" -H "content-type: application/json" \
+  -d '{"sso_only": true}'
+```
+
+The endpoint uses the same permission check as `token-policy` and regions.
+Every actual change is audited as `org_sso_only_changed` (`sso_only: false ->
+true`). The response never includes the tenant id.
+
+| Rule | Result |
+|---|---|
+| `SSO_TENANT_ID` not set on the server | Enabling returns `400`. Without it, the Microsoft login is not tenant-restricted, so there's nothing safe to require. The settings toggle is disabled with an explanation |
+| Caller's own account does not sign in with Microsoft (`auth_provider` is not `microsoft`) | Enabling returns `403` "Sign in with Microsoft before enabling SSO-only, so you don't lock yourself out." Platform admins are exempt |
+| Disabling | Always allowed for anyone who passes the org-admin check |
+
+**What members see.** A member is SSO-only if they belong to **any**
+organization with `sso_only = 1`, either directly (`organization_members`) or
+through one of its workspaces (`workspace_members`). The strictest setting
+wins. The check is [`lib/sso-policy.js`](../server/lib/sso-policy.js)
+`isSsoOnlyUser()`.
+
+- **Password login** (`POST /api/auth/login`): a correct password returns
+  `403 {"code":"SSO_REQUIRED","error":"Your organization requires Microsoft sign-in."}`.
+  The check runs after the password and deactivation checks, so an unknown
+  email or wrong password still gets the generic `401` (no account
+  enumeration). It runs before the TOTP step, so a blocked user never gets an
+  `mfa_token`. The login page shows the message and highlights the *Sign in
+  with Microsoft* button.
+- **Google login** (`POST /api/auth/google`): an existing SSO-only member gets
+  the same `403 SSO_REQUIRED` before any session is issued. Signing up a new
+  user with Google is unchanged.
+- **TOTP second step** (`POST /api/auth/totp/verify`) applies the same check.
+  A TOTP user who got an `mfa_token` just before the org was switched to
+  SSO-only gets `403 SSO_REQUIRED` with no session. The check runs before the
+  code is verified, so the refused attempt uses up no TOTP step or recovery code.
+- Each refusal is audited as `auth:login_failed` with reason `SSO required`.
+- The login page still shows the password form (`GET /api/auth/config`
+  keeps `localEnabled: true`), because it can't know the user's organization
+  until the email is entered. The server enforces the rule.
+
+**Linking existing password accounts.** Normally, a Microsoft sign-in for an
+email that already has a password account returns `409` "log in with your
+password". For an SSO-only member that would be a dead end. So when
+`SSO_TENANT_ID` is set (the id_token was verified against your tenant) **and**
+the user is SSO-only, the account is linked instead. `auth_provider` becomes
+`microsoft` and `provider_id` becomes the token's `oid`. The rest of the row
+(memberships, history) is kept. It is audited as `account_linked_microsoft`.
+In every other case the `409` stays. After linking, the old password no longer
+works, because password login only accepts `auth_provider = 'local'` accounts.
+
+**Exemptions and what isn't affected.**
+
+- **Platform admins** (`superadmin`, `platform_admin`) are always exempt.
+  They are the recovery path if the tenant is misconfigured or Entra is
+  unavailable.
+- **Field technicians' SMS OTP login** ([`routes/field-auth.js`](../server/routes/field-auth.js))
+  is unchanged.
+- **Existing sessions** are not logged out. They expire naturally (session
+  JWT lifetime, currently 7 days). To cut someone off immediately, deactivate
+  the account (Part 2).
+- **API tokens, SCIM tokens, Entra Service Principals and device auth** are
+  unaffected.
+
+**Not verified without a real tenant.** The tests use self-signed id_tokens
+and a faked JWKS (see *What this does and doesn't prove*). An end-to-end run
+against a real Entra tenant has not been done: enabling the mode while
+signed in through real Microsoft SSO, checking that a member's password login
+is refused, and checking that an existing password account links on its first
+real Microsoft sign-in.
+
 ---
 
 ## Part 2 — Deactivation: instant, per-request revocation
