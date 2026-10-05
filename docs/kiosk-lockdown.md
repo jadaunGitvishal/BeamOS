@@ -29,6 +29,12 @@ decides which restrictions apply on which Android version.
 - **API:** `POST /api/devices/<id>/command` or `POST /api/groups/<id>/command` with
   `{"type": "enable_kiosk_lockdown"}` or `{"type": "disable_kiosk_lockdown"}`.
   API tokens need the `full` scope.
+- **Not over the dashboard socket.** The live dashboard socket
+  (`dashboard:device-command`) refuses both lockdown commands with reason
+  `use_rest`, so the admin-only REST routes are the only way to send them. The
+  socket also refuses any command type outside the set the device page sends
+  (reason `unsupported_command`), online or offline. Refused commands are logged
+  and never queued.
 
 The setting survives reboots. The app saves it and re-applies the policy and
 re-enters lock task mode every time it starts.
@@ -102,8 +108,5 @@ adb logcat -s KioskLockdown
 
 ## Known gaps
 
-- The admin-only rule is enforced on the REST command routes above. The
-  dashboard's socket command path (`dashboard:device-command`) doesn't check
-  command types yet. That is tracked as a separate security ticket.
 - Not yet verified on PMI hardware: the per-version table above, the power menu
   and notification shade below Android 9, and the recovery-menu wipe.

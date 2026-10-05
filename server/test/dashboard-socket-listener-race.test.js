@@ -112,7 +112,7 @@ function emitImmediatelyOnConnect(deviceId, type) {
 
 test('regression: dashboard:device-command emitted immediately on connect is NOT dropped, even with a slow accessibleWorkspaceIds()', async () => {
   accessibleWorkspacesDelayMs = 300; // stands in for a cold DB connection after inactivity
-  const result = await emitImmediatelyOnConnect('dev-1', 'test_type');
+  const result = await emitImmediatelyOnConnect('dev-1', 'screen_on');
   accessibleWorkspacesDelayMs = 0;
   assert.equal(result.timedOut, false, 'the event must not be silently dropped');
   assert.deepEqual(result.ack, { delivered: true }, 'a real device online in its room gets a real delivered ack');
@@ -120,14 +120,14 @@ test('regression: dashboard:device-command emitted immediately on connect is NOT
 
 test('regression: still correct with an even larger delay (registration has NO dependency on it at all)', async () => {
   accessibleWorkspacesDelayMs = 1500;
-  const result = await emitImmediatelyOnConnect('dev-1', 'test_type');
+  const result = await emitImmediatelyOnConnect('dev-1', 'screen_on');
   accessibleWorkspacesDelayMs = 0;
   assert.equal(result.timedOut, false);
   assert.deepEqual(result.ack, { delivered: true });
 });
 
 test('sanity: the normal (zero-delay) fast path still works', async () => {
-  const result = await emitImmediatelyOnConnect('dev-1', 'test_type');
+  const result = await emitImmediatelyOnConnect('dev-1', 'screen_on');
   assert.equal(result.timedOut, false);
   assert.deepEqual(result.ack, { delivered: true });
 });

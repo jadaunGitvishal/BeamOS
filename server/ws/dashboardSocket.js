@@ -4,6 +4,7 @@ const { db } = require('../db/database');
 const { accessContext, accessibleWorkspaceIds } = require('../lib/tenancy');
 const { workspaceRoom } = require('../lib/socket-rooms');
 const { protectSocket } = require('../lib/safe-socket');
+const { LOCKDOWN_COMMANDS, SOCKET_COMMANDS } = require('../lib/device-commands');
 
 // Phase 2.3: workspace-scoped socket rooms + per-command permission gates.
 // Replaces the previous flat dashboardNs.emit broadcast (which leaked every
@@ -124,6 +125,19 @@ module.exports = function setupDashboardSocket(io) {
       const { device_id, type, payload } = data;
       if (!await canActOnDevice(socket, device_id, 'write')) {
         if (typeof ack === 'function') ack({ delivered: false, reason: 'forbidden' });
+        return;
+      }
+      // Command-type allowlist, checked before BOTH the online emit and the offline
+      // queue. Kiosk lockdown is REST-only (POST /:id/command enforces workspace admin
+      // there); anything outside the main app's socket set (SOCKET_COMMANDS) is refused.
+      if (LOCKDOWN_COMMANDS.includes(type)) {
+        console.warn(`[dashboard-socket] refused command from user ${socket.userId} for device ${device_id}: ${type} - lockdown commands are REST-only`);
+        if (typeof ack === 'function') ack({ delivered: false, reason: 'use_rest' });
+        return;
+      }
+      if (!SOCKET_COMMANDS.includes(type)) {
+        console.warn(`[dashboard-socket] refused unsupported command from user ${socket.userId} for device ${device_id}: ${JSON.stringify(type)}`);
+        if (typeof ack === 'function') ack({ delivered: false, reason: 'unsupported_command' });
         return;
       }
       const room = deviceNs.adapter.rooms.get(device_id);
