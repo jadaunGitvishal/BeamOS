@@ -9,6 +9,8 @@ const MAP = {
   "/campaigns": "Campaigns",
   "/regions": "Regions",
   "/operations": "Operations",
+  "/reconciliation": "Reconciliation",
+  "/pending-installations": "Pending installs",
   "/issues": "Issues",
 };
 
