@@ -81,16 +81,83 @@ async function pruneActivityLog() {
     .run(config.auditLogRetentionDays);
 }
 
+// The audit-log path for a request: mount path + matched route PATTERN (e.g.
+// /api/workspaces/:id/members/export), never the concrete URL, so ids and query
+// strings stay out of `action`. Still populated when 'finish'/'close' fire.
+function routePath(req) {
+  return `${req.baseUrl || ''}${req.route?.path || req.path}`;
+}
+
+// Ref 20: format of a downloaded file - from the filename's extension, else
+// from Content-Type.
+const CONTENT_TYPE_FORMATS = {
+  'text/csv': 'csv',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/pdf': 'pdf',
+  'application/sql': 'sql',
+  'application/json': 'json',
+  'application/zip': 'zip',
+};
+function exportFormat(filename, contentType) {
+  const ext = /\.([a-z0-9]{1,8})$/i.exec(filename || '');
+  if (ext) return ext[1].toLowerCase();
+  const type = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_FORMATS[type] || 'unknown';
+}
+
+// Ref 20: record a completed or aborted file download. Called from the 'close'
+// listener activityLogger attaches to every request; only a successful response
+// carrying `Content-Disposition: attachment` counts, so a refused export (403
+// JSON) stays the ACCESS_DENIED entry alone. Details hold the file name, format,
+// the query-parameter KEY names and the outcome - never query values, request
+// bodies or response data.
+function logExport(req, res, ip) {
+  if (res.statusCode >= 400) return;
+  const disposition = String(res.getHeader('Content-Disposition') || '');
+  if (!/attachment/i.test(disposition)) return;
+  const m = /filename\*?=(?:"([^"]*)"|([^;]*))/i.exec(disposition);
+  const file = ((m && (m[1] ?? m[2])) || '').trim().slice(0, 200);
+  const format = exportFormat(file, res.getHeader('Content-Type'));
+  const filters = Object.keys(req.query || {}).map((k) => k.slice(0, 64)).sort().join(',');
+  const outcome = res.writableFinished ? 'completed' : 'aborted';
+  const details = `file=${file}, format=${format}, filters=[${filters}], outcome=${outcome}`;
+  // device_id only from an explicit :deviceId param - a generic :id here is an
+  // org/workspace/resource id, not a device.
+  logActivity(req.user?.id || null, `EXPORT ${routePath(req)}`, details, req.params?.deviceId || null, ip, req.workspaceId || null).catch(() => {});
+}
+
+// Ref 20: per-route middleware for the fixed set of sensitive reads (audit log,
+// user lists, membership rosters). Mount AFTER the route's auth/permission
+// middleware. Logs on 'finish' - i.e. after the response has been written, so a
+// READ of /verify-integrity can never be part of the chain that request walked -
+// and only for status < 400 (refusals stay ACCESS_DENIED only). No details: no
+// response data, no query values.
+function auditRead(req, res, next) {
+  const ip = getClientIp(req);
+  res.once('finish', () => {
+    if (res.statusCode >= 400) return;
+    logActivity(req.user?.id || null, `READ ${routePath(req)}`, null, req.params?.deviceId || null, ip, req.workspaceId || null).catch(() => {});
+  });
+  next();
+}
+
 // Express middleware to auto-log API mutations + authorization failures.
 // Fire-and-forget throughout: logActivity catches its own errors, and res.json()
 // must stay synchronous (it's a monkey-patched override called by every route
 // handler) - the write landing after the response is sent is fine, this is
 // best-effort audit logging, not part of the request's correctness.
+//
+// Ref 20: also logs every file download (any method - POST /api/reports/custom/export
+// is one) centrally via a single 'close' listener; see logExport above.
 function activityLogger(req, res, next) {
+  // IP captured now: by 'close' on an aborted download the socket is already
+  // destroyed and req.ip is gone.
+  const ip = getClientIp(req);
+  res.once('close', () => logExport(req, res, ip));
   const originalJson = res.json.bind(res);
   res.json = function(data) {
     const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
-    const path = `${req.baseUrl || ''}${req.route?.path || req.path}`;
+    const path = routePath(req);
 
     if (isMutation && res.statusCode < 400) {
       // Successful mutation — the audit trail of what changed.
@@ -119,4 +186,4 @@ function summarizeAction(req) {
   return parts.join(', ') || null;
 }
 
-module.exports = { logActivity, getActivity, pruneActivityLog, activityLogger, getClientIp };
+module.exports = { logActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp };

@@ -25,7 +25,7 @@ const {
 } = require("../lib/ticket-query");
 const { campaignStatus, todayStr } = require("../lib/campaign-status");
 const { computeCampaignDelivery } = require("../lib/campaign-delivery");
-const { logActivity, getClientIp } = require("../services/activity");
+const { logActivity, getClientIp, auditRead } = require("../services/activity");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
@@ -264,6 +264,7 @@ function buildInviteEmail({
 // GET /:id/members - any member (or org-level/platform admin) of the workspace
 router.get(
   "/:id/members",
+  auditRead,
   asyncHandler(async (req, res) => {
     const ws = await loadWorkspace(req, res, false);
     if (!ws) return;

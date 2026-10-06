@@ -5,7 +5,7 @@ const { v4: uuidv4 } = require("uuid");
 const { db } = require("../db/database");
 const { canAdminWorkspace } = require("../lib/permissions");
 const { requirePlatformAdmin } = require("../middleware/auth");
-const { logActivity, getClientIp } = require("../services/activity");
+const { logActivity, getClientIp, auditRead } = require("../services/activity");
 const {
   deleteWorkspaceCascade,
   deleteOrgCascade,
@@ -399,7 +399,7 @@ async function userMembershipList(userId) {
 }
 
 // GET - list every workspace the user belongs to (with role + org/workspace name).
-router.get("/users/:id/workspaces", requirePlatformAdmin, asyncHandler(async (req, res) => {
+router.get("/users/:id/workspaces", requirePlatformAdmin, auditRead, asyncHandler(async (req, res) => {
   const target = await db
     .prepare("SELECT id FROM users WHERE id = ?")
     .get(req.params.id);

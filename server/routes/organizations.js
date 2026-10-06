@@ -6,7 +6,7 @@ const { canAdminOrg, canAccessOrg, canManageOrgRegions } = require("../lib/permi
 const { accessibleWorkspaceIds } = require("../lib/tenancy");
 const { isoDate, slaUptimeTarget, deviceAvailabilityRows, meanAvailability, slaStatus } = require("../lib/sla");
 const { isPlatformRole } = require("../middleware/auth");
-const { logActivity, getClientIp } = require("../services/activity");
+const { logActivity, getClientIp, auditRead } = require("../services/activity");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
@@ -82,6 +82,7 @@ function callerMayGrantRole(req, role) {
 // GET /:id/members - any org member (org_owner/org_admin) or platform staff.
 router.get(
   "/:id/members",
+  auditRead,
   asyncHandler(async (req, res) => {
     const org = await loadOrg(req, res, false);
     if (!org) return;

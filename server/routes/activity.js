@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { db } = require("../db/database");
-const { getActivity, pruneActivityLog } = require("../services/activity");
+const { getActivity, pruneActivityLog, auditRead } = require("../services/activity");
 const { verifyChain } = require("../lib/activity-chain");
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require("../middleware/auth");
 const { asyncHandler } = require("../lib/async-handler");
@@ -14,7 +14,7 @@ function formatTimestamp(epochSeconds) {
 }
 
 // Get activity log
-router.get("/", async (req, res) => {
+router.get("/", auditRead, async (req, res) => {
   const { device_id, limit, offset } = req.query;
   const isAdmin = PLATFORM_ROLES.includes(req.user.role);
 
@@ -116,6 +116,7 @@ router.delete("/prune", (req, res) => {
 // (tail-truncation) and the row count.
 router.get(
   "/verify-integrity",
+  auditRead,
   asyncHandler(async (req, res) => {
     if (!ELEVATED_ROLES.includes(req.user.role))
       return res.status(403).json({ error: "Admin only" });

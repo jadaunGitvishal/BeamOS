@@ -18,7 +18,7 @@ const {
   ACCOUNT_DEACTIVATED_MESSAGE,
 } = require("../middleware/auth");
 const { resolveTenancy } = require("../lib/tenancy");
-const { logActivity, getClientIp } = require("../services/activity");
+const { logActivity, getClientIp, auditRead } = require("../services/activity");
 const totp = require("../lib/totp");
 const totpLockout = require("../lib/totp-lockout");
 const { sendSignupEmails } = require("../services/signupEmails");
@@ -1026,7 +1026,7 @@ router.put("/me", requireAuth, asyncHandler(async (req, res) => {
 }));
 
 // List users - platform admins see all, admins see team members only
-router.get("/users", requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+router.get("/users", requireAuth, requireAdmin, auditRead, asyncHandler(async (req, res) => {
   if (PLATFORM_ROLES.includes(req.user.role)) {
     // One aggregate query (no N+1): each user carries workspace_count, and for
     // an exactly-one membership the single workspace id/name + org name (used by
