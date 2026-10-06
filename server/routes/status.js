@@ -69,6 +69,14 @@ function formatUptime(seconds) {
 // db/database.js's pre-migration snapshotDatabase()).
 router.get("/backup", requireAuth, requirePlatformAdmin, asyncHandler(async (req, res) => {
   const { spawn } = require("child_process");
+  // Ref 2: same verified TLS as the app's pool ([] when MYSQL_SSL=off).
+  let tlsArgs;
+  try {
+    tlsArgs = await require("../lib/mysql-tls").resolveMysqldumpTlsArgs(config);
+  } catch (e) {
+    console.error("[backup] mysqldump TLS setup failed:", e.message);
+    return res.status(500).json({ error: "Backup failed" });
+  }
   const dateStr = new Date().toISOString().split("T")[0];
   res.setHeader("Content-Type", "application/sql");
   res.setHeader(
@@ -81,6 +89,7 @@ router.get("/backup", requireAuth, requirePlatformAdmin, asyncHandler(async (req
       `--host=${config.mysqlHost}`,
       `--port=${config.mysqlPort}`,
       `--user=${config.mysqlUser}`,
+      ...tlsArgs,
       "--single-transaction",
       "--routines",
       "--triggers",

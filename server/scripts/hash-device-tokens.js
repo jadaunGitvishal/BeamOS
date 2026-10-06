@@ -34,6 +34,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 const { hashDeviceToken, isHashed } = require('../lib/device-token');
+const mysqlTls = require('../lib/mysql-tls');
 
 // Pure core, exported for tests. `db` is db/database.js's { prepare } wrapper.
 async function backfillDeviceTokens(db, { dryRun }) {
@@ -59,8 +60,15 @@ async function snapshotDevices(config) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const outPath = path.join(dir, `${config.mysqlDatabase}.devices.pre-device-token-hash-${ts}.sql`);
+  // Ref 2: verified TLS when MYSQL_SSL is on ([] when off).
+  let tlsArgs;
+  try {
+    tlsArgs = await mysqlTls.resolveMysqldumpTlsArgs(config);
+  } catch (e) {
+    throw new Error(`mysqldump failed: ${e.message} (use --no-snapshot only if you have your own backup)`);
+  }
   const args = [
-    `--host=${config.mysqlHost}`, `--port=${config.mysqlPort}`, `--user=${config.mysqlUser}`,
+    `--host=${config.mysqlHost}`, `--port=${config.mysqlPort}`, `--user=${config.mysqlUser}`, ...tlsArgs,
     `--result-file=${outPath}`, '--single-transaction', config.mysqlDatabase, 'devices',
   ];
   await new Promise((resolve, reject) => {
@@ -88,6 +96,13 @@ async function main(argv) {
     return 0;
   }
   const config = require('../config');
+  // Ref 2: refuse an invalid MYSQL_SSL setup before anything connects.
+  try {
+    mysqlTls.validateMysqlTls(config);
+  } catch (e) {
+    console.error(`ERROR: ${e.message}`);
+    return 1;
+  }
   const { initDb, db } = require('../db/database');
   console.log(`Target (MySQL): ${config.mysqlHost}:${config.mysqlPort}/${config.mysqlDatabase}`);
   console.log(args.dryRun ? 'Mode: DRY RUN (no writes)\n' : 'Mode: LIVE (will hash plaintext device tokens - irreversible)\n');

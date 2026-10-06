@@ -25,7 +25,7 @@ const path = require('node:path');
 const CLEARED_ENV = [
   'DATA_DIR', 'UPLOADS_DIR', 'CERTS_DIR',
   'MYSQL_HOST', 'MYSQL_PORT', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DATABASE',
-  'MYSQL_SOCKET_PATH', 'MYSQL_POOL_SIZE',
+  'MYSQL_SOCKET_PATH', 'MYSQL_POOL_SIZE', 'MYSQL_SSL', 'MYSQL_SSL_CA',
 ];
 const serverDir = path.join(__dirname, '..'); // config.js lives in server/
 
@@ -74,6 +74,9 @@ test('MYSQL_* UNSET -> the real connection defaults (host/port/user/database/poo
   assert.strictEqual(c.mysqlDatabase, 'beamos');
   assert.strictEqual(c.mysqlSocketPath, '');
   assert.strictEqual(c.mysqlPoolSize, 10);
+  // Ref 2: TLS to MySQL is OFF unless asked for - zero change for existing installs.
+  assert.strictEqual(c.mysqlSsl, 'off');
+  assert.strictEqual(c.mysqlSslCa, '');
 });
 
 test('MYSQL_* env vars are read correctly when set (self-hosted custom DB)', () => {
@@ -94,4 +97,15 @@ test('MYSQL_* env vars are read correctly when set (self-hosted custom DB)', () 
 test('MYSQL_SOCKET_PATH is read correctly when set (managed-MySQL Unix socket case)', () => {
   const c = loadConfig({ MYSQL_SOCKET_PATH: '/var/run/mysqld/mysqld.sock' });
   assert.strictEqual(c.mysqlSocketPath, '/var/run/mysqld/mysqld.sock');
+});
+
+// Ref 2: MYSQL_SSL / MYSQL_SSL_CA are read (trimmed + lower-cased mode; the path
+// verbatim). Validation is lib/mysql-tls.js's job, so config passes even a bad
+// value through for it to refuse at boot.
+test('MYSQL_SSL / MYSQL_SSL_CA are read correctly when set', () => {
+  const c = loadConfig({ MYSQL_SSL: ' Verify-Full ', MYSQL_SSL_CA: '/etc/beamos/DigiCertGlobalRootG2.crt.pem' });
+  assert.strictEqual(c.mysqlSsl, 'verify-full');
+  assert.strictEqual(c.mysqlSslCa, '/etc/beamos/DigiCertGlobalRootG2.crt.pem');
+  assert.strictEqual(loadConfig({ MYSQL_SSL: 'verify-ca' }).mysqlSsl, 'verify-ca');
+  assert.strictEqual(loadConfig({ MYSQL_SSL: 'bogus' }).mysqlSsl, 'bogus');
 });

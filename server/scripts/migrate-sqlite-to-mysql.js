@@ -43,6 +43,15 @@ const fs = require('fs');
 const Database = require('better-sqlite3');
 const mysql = require('mysql2/promise');
 const config = require('../config');
+const mysqlTls = require('../lib/mysql-tls');
+// Ref 2: refuse an invalid MYSQL_SSL setup with a clear message before anything
+// connects (db/database.js would also refuse it, with a stack trace).
+try {
+  mysqlTls.validateMysqlTls(config);
+} catch (e) {
+  console.error(`ERROR: ${e.message}`);
+  process.exit(1);
+}
 const { initDb } = require('../db/database');
 
 function parseArgs(argv) {
@@ -190,10 +199,14 @@ async function snapshotTarget(label) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const outPath = path.join(dir, `${config.mysqlDatabase}.${label}-${ts}.sql`);
+  // Ref 2: verified TLS when MYSQL_SSL is on; throws (aborting the run) if the
+  // dump can't be done over verified TLS.
+  const tlsArgs = await mysqlTls.resolveMysqldumpTlsArgs(config);
   const args = [
     `--host=${config.mysqlHost}`,
     `--port=${config.mysqlPort}`,
     `--user=${config.mysqlUser}`,
+    ...tlsArgs,
     `--result-file=${outPath}`,
     '--single-transaction',
     '--routines',
@@ -257,6 +270,7 @@ async function main() {
     password: config.mysqlPassword,
     database: config.mysqlDatabase,
     socketPath: config.mysqlSocketPath || undefined,
+    ssl: mysqlTls.mysqlSslOptions(config), // Ref 2: undefined when MYSQL_SSL=off
     decimalNumbers: true,
   });
 

@@ -8,6 +8,13 @@ const {
   yieldTick,
   currentBand,
 } = require("../lib/chunked-prune"); // #146 non-blocking sweeps
+const mysqlTls = require("../lib/mysql-tls");
+
+// Ref 2: refuse to start on an invalid MYSQL_SSL / missing CA / TLS+socket combo,
+// BEFORE any connection exists. A no-op with MYSQL_SSL unset (off).
+mysqlTls.validateMysqlTls(config);
+const _plaintextWarning = mysqlTls.plaintextRemoteWarning(config);
+if (_plaintextWarning) console.warn(_plaintextWarning);
 
 const poolConfig = {
   host: config.mysqlHost,
@@ -20,6 +27,8 @@ const poolConfig = {
   decimalNumbers: true, // return DECIMAL/DOUBLE columns as JS numbers, not strings
 };
 if (config.mysqlSocketPath) poolConfig.socketPath = config.mysqlSocketPath;
+const _sslOptions = mysqlTls.mysqlSslOptions(config);
+if (_sslOptions) poolConfig.ssl = _sslOptions;
 
 const pool = mysql.createPool(poolConfig);
 
@@ -187,10 +196,21 @@ async function snapshotDatabase(label) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const outPath = path.join(dir, `${config.mysqlDatabase}.${label}-${ts}.sql`);
+  // Ref 2: same verified TLS as the pool ([] when MYSQL_SSL=off).
+  let tlsArgs;
+  try {
+    tlsArgs = await mysqlTls.resolveMysqldumpTlsArgs(config);
+  } catch (e) {
+    console.error(
+      `[snapshot] mysqldump skipped (continuing anyway): ${e.message}`,
+    );
+    return;
+  }
   const args = [
     `--host=${config.mysqlHost}`,
     `--port=${config.mysqlPort}`,
     `--user=${config.mysqlUser}`,
+    ...tlsArgs,
     `--result-file=${outPath}`,
     "--single-transaction",
     "--routines",
@@ -275,6 +295,11 @@ let _initialized = false;
 // schema is still missing something the code requires.
 async function initDb() {
   if (_initialized) return db;
+
+  // Ref 2: start-up proof that the pool really negotiated TLS (null when off).
+  // Runs before anything else touches the DB, and before server.js listens.
+  const cipher = await mysqlTls.assertMysqlTlsActive(pool, config);
+  if (cipher) console.log(`[db] MySQL TLS active: ${cipher} (${config.mysqlSsl})`);
 
   await applySchema();
   await applyMigrations();

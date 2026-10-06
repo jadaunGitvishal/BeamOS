@@ -127,6 +127,8 @@ Schema is applied automatically on first boot — no manual migration commands.
 | `MYSQL_DATABASE` | MySQL database name | beamos |
 | `MYSQL_SOCKET_PATH` | Unix socket path (alternative to host/port) | (none) |
 | `MYSQL_POOL_SIZE` | Connection pool size | 10 |
+| `MYSQL_SSL` | TLS to MySQL: `off`, `verify-ca` (CA checked, hostname not) or `verify-full` (CA + hostname). See [docs/encryption.md](docs/encryption.md) §3d | off |
+| `MYSQL_SSL_CA` | Path to the CA certificate PEM; required when `MYSQL_SSL` is not `off` | (none) |
 | `SSL_CERT` | Path to SSL certificate | server/certs/cert.pem |
 | `SSL_KEY` | Path to SSL private key | server/certs/key.pem |
 

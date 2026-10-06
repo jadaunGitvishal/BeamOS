@@ -44,6 +44,11 @@ module.exports = {
   mysqlDatabase: process.env.MYSQL_DATABASE || "beamos",
   mysqlSocketPath: process.env.MYSQL_SOCKET_PATH || "",
   mysqlPoolSize: parseInt(process.env.MYSQL_POOL_SIZE) || 10,
+  // Ref 2: verified TLS to MySQL. MYSQL_SSL is off (default) | verify-ca |
+  // verify-full; MYSQL_SSL_CA is the CA PEM path. Validated (and refused at
+  // boot when invalid) by lib/mysql-tls.js, not here.
+  mysqlSsl: (process.env.MYSQL_SSL || "off").trim().toLowerCase(),
+  mysqlSslCa: process.env.MYSQL_SSL_CA || "",
   uploadsDir,
   contentDir: path.join(uploadsDir, "content"),
   screenshotsDir: path.join(uploadsDir, "screenshots"),

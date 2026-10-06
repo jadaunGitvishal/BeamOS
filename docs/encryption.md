@@ -24,7 +24,7 @@ them, but does not try to answer them.
 | Requirement | State |
 |---|---|
 | AES-256 at rest | ✅ **For secrets the app must read back** (TOTP seeds, customer AI keys): AES-256-GCM. ✅ **Verify-only secrets** are one-way hashed instead: passwords (bcrypt); API, SCIM and device tokens and recovery codes (SHA-256). ⚠️ **All other data** (content, telemetry, tickets, proof-of-play, user profiles) is **not** encrypted by the application. It relies on database/disk encryption, which is an infrastructure control. |
-| TLS 1.2+ in transit | ✅ **Whenever BeamOS terminates TLS itself**, TLS 1.0/1.1 are refused and HSTS is sent. ⚠️ **Plain HTTP remains possible by design** for self-hosted LANs. ❌ **The app-to-MySQL connection has no TLS option today.** |
+| TLS 1.2+ in transit | ✅ **Whenever BeamOS terminates TLS itself**, TLS 1.0/1.1 are refused and HSTS is sent. ⚠️ **Plain HTTP remains possible by design** for self-hosted LANs. ✅ **App-to-MySQL TLS is available and verified** (`MYSQL_SSL=verify-ca` / `verify-full`, TLS 1.2+, §3d). ⚠️ It is **off by default**, and a remote DB without it logs a start-up warning. |
 | Keys in a certified KMS/HSM | ⚠️ **BeamOS has no built-in KMS/HSM integration.** It accepts an **externally supplied** key (`DATA_ENCRYPTION_KEY`), which a deployment can load from Key Vault, Secrets Manager or similar at start-up. The key is then held in process memory. That is not HSM-resident or envelope encryption. |
 
 ---
@@ -241,10 +241,112 @@ encrypted. The player uses whatever URL it was provisioned with.
 
 | Hop | Transport | Notes |
 |---|---|---|
-| BeamOS ↔ **MySQL** | ❌ **No TLS option** | [`db/database.js`](../server/db/database.js)'s pool config has no `ssl` setting, and there is no env var to turn it on. That is fine for a DB on the same host or a Unix socket (`MYSQL_SOCKET_PATH`). **It is a gap for a DB on another host**: the traffic is cleartext. A managed MySQL that requires secure transport, such as Azure Database for MySQL Flexible Server's default `require_secure_transport=ON`, would likely refuse the connection. Until that's added, use a private network or a local socket. |
+| BeamOS ↔ **MySQL** | ✅ **Verified TLS 1.2+ when `MYSQL_SSL` is set**. ⚠️ Plaintext when it is off (the default) | Covers the app's connection pool, the migration script's connection, and every `mysqldump` the app runs. Off is fine for a DB on the same host or a Unix socket (`MYSQL_SOCKET_PATH`). For a DB on another host, turn it on. See §3d. |
 | BeamOS → Microsoft Graph (email), Entra JWKS (SSO / Service Principal / SCIM login checks), Stripe | HTTPS | Fixed `https://` endpoints inside the SDKs (`@azure/msal-node`, `jose`'s remote JWKS, `stripe`) |
 | BeamOS → S3 (data-platform export, Ref 28) | HTTPS by default | AWS SDK v3. A custom `DATA_PLATFORM_S3_ENDPOINT` (MinIO, R2) uses whatever scheme it's given. Give it `https://`. |
 | BeamOS → customer's AI provider | ⚠️ HTTP or HTTPS | `endpointAllowed()` ([`routes/ai.js`](../server/routes/ai.js)) accepts both `http:` and `https:`, because self-hosted setups point at a local model server ([docs/local-ai-setup.md](local-ai-setup.md)). An `http://` endpoint sends the workspace's AI API key and prompts **in cleartext**. Use `https://` for anything off the host. |
+
+### 3d. TLS to MySQL (`MYSQL_SSL`)
+
+BeamOS can encrypt and **verify** every connection it makes to MySQL. That
+covers the connection pool in [`db/database.js`](../server/db/database.js),
+the direct connection in `scripts/migrate-sqlite-to-mysql.js`, and every
+`mysqldump`: the pre-migration snapshot, `GET /api/status/backup`, and both
+scripts' snapshots. The policy lives in
+[`lib/mysql-tls.js`](../server/lib/mysql-tls.js).
+
+| `MYSQL_SSL` | What it guarantees | Use it for |
+|---|---|---|
+| `off` (default) | No TLS. Behaviour is identical to before this option existed | A DB on the same host, or a Unix socket |
+| `verify-ca` | TLS 1.2+. The server's certificate must chain to `MYSQL_SSL_CA`. The hostname is **not** checked | Self-hosted MySQL with its auto-generated certificates, which name `MySQL_Server_<version>_Auto_Generated_Server_Certificate` rather than the host |
+| `verify-full` | `verify-ca`, **plus** the certificate must name `MYSQL_HOST` | Managed databases: Azure Database for MySQL Flexible Server, Amazon RDS, and similar |
+
+`MYSQL_SSL_CA` is the path to the CA certificate (PEM). It is **required**
+whenever `MYSQL_SSL` is not `off`. There is deliberately **no
+"encrypt but don't verify" mode**: TLS without verification doesn't stop an
+active man-in-the-middle.
+
+**Setup: Azure Database for MySQL (or another managed DB).**
+
+1. Download the provider's CA bundle as PEM. Azure publishes its root CAs
+   (DigiCert Global Root G2, plus Microsoft RSA Root CA 2017 for newer
+   servers); combine them into one `.pem` file if the provider says to.
+   RDS publishes a per-region bundle.
+2. Set `MYSQL_HOST` to the server's **DNS name** (for example,
+   `myserver.mysql.database.azure.com`), `MYSQL_SSL=verify-full`, and
+   `MYSQL_SSL_CA=/path/to/ca.pem`.
+3. Leave `MYSQL_SOCKET_PATH` unset.
+
+**Setup: self-hosted MySQL.**
+
+1. Copy the server's `ca.pem` somewhere the BeamOS process can read it. It
+   is in the data directory; find it with `SELECT @@ssl_ca, @@datadir;`. On
+   Windows, the data directory is readable only by administrators, so copy
+   the file from an elevated shell. It is a public certificate, not a key.
+2. Set `MYSQL_SSL=verify-ca` and `MYSQL_SSL_CA=/path/to/ca.pem`. Use
+   `verify-full` only if you've issued the server a certificate that names
+   the host BeamOS connects to.
+
+**Evidence at start-up.** With TLS on, after the pool is created and before
+the server accepts any traffic, BeamOS asks MySQL for that session's cipher
+(`SHOW SESSION STATUS LIKE 'Ssl_cipher'`) and logs it:
+
+```
+[db] MySQL TLS active: TLS_AES_256_GCM_SHA384 (verify-ca)
+```
+
+If the cipher is empty, BeamOS refuses to start.
+
+**Refusing to start.** BeamOS exits with a clear message instead of
+connecting when:
+
+- `MYSQL_SSL` is not one of `off`, `verify-ca` or `verify-full`;
+- `MYSQL_SSL_CA` is unset, missing or unreadable;
+- `MYSQL_SSL` is on together with `MYSQL_SOCKET_PATH`. TLS over a local
+  socket is meaningless, so unset one of them;
+- `MYSQL_SSL=verify-full` with an **IP address** as `MYSQL_HOST`. The MySQL
+  driver (mysql2) can't check a certificate against an IP. For an IP host,
+  it passes no server name, and Node then checks the certificate against
+  `localhost`. Use the DNS name on the certificate, or `verify-ca`;
+- the certificate doesn't verify: wrong CA, or (for `verify-full`) a name
+  that doesn't match.
+
+**Warning when it's off.** If `MYSQL_SSL=off`, no socket is used, and
+`MYSQL_HOST` is not `localhost`, `127.0.0.1` or `::1`, BeamOS logs one
+warning at start-up that DB traffic is unencrypted. It still starts.
+
+**`mysqldump` and the MariaDB client.** The dump runs with the same mode.
+With the MySQL client tools (which BeamOS detects from `mysqldump --version`),
+`verify-ca` maps to `--ssl-mode=VERIFY_CA` and `verify-full` to
+`--ssl-mode=VERIFY_IDENTITY`. The **MariaDB** client can verify the CA only
+together with the hostname (`--ssl-verify-server-cert`). So with a MariaDB
+`mysqldump`, `verify-full` works and `verify-ca` **fails the dump with a
+clear error**. BeamOS never quietly downgrades to an unverified dump. A
+failed pre-migration snapshot is logged and boot continues, as before. The
+backup endpoint returns an error.
+
+**How the hostname check is enforced.** mysql2 checks the hostname **only**
+when its `ssl.verifyIdentity` option is `true`, and ignores a
+`checkServerIdentity` passed to it (`startTLS()` in
+`node_modules/mysql2/lib/base/connection.js`). `verify-full` sets
+`verifyIdentity: true`. `verify-ca` leaves it out.
+
+**Tests.** [`server/test/mysql-tls.test.js`](../server/test/mysql-tls.test.js)
+covers the option shapes, the dump arguments for both client flavours, and
+every refusal case. With `BEAMOS_TEST_MYSQL_CA` pointing at a local MySQL
+server's CA, it also proves against a real server that:
+
+- `verify-ca` connects with a non-empty cipher;
+- `verify-full` against the auto-generated certificate is **refused** on
+  the hostname, for both `127.0.0.1` and `localhost`;
+- a wrong CA is refused;
+- `off` connects exactly as before.
+
+Removing `verifyIdentity` makes the `verify-full` cases fail. Setting
+`rejectUnauthorized: false` makes the wrong-CA case fail.
+
+**At-rest encryption is unchanged.** This section covers the wire only.
+Encrypting the database's files remains an infrastructure control (§2c).
 
 ---
 
@@ -359,9 +461,10 @@ so no plaintext was printed). The results were identical.
    supplied from outside and held in memory (§4b).
 3. **No key rotation tooling.** A key change needs a maintenance event
    (§4c).
-4. **The app-to-MySQL connection has no TLS option.** Keep the DB local or on
-   a private network (§3c). **Recommended next change:** a small
-   `MYSQL_SSL` / CA option on the pool.
+4. **App-to-MySQL TLS is opt-in.** It is off by default, so a remote DB
+   stays plaintext until `MYSQL_SSL` is set. BeamOS warns at start-up when
+   that happens (§3d). `verify-full` needs a DNS name, not an IP, and a
+   MariaDB `mysqldump` supports only `verify-full`.
 5. **Plain HTTP is allowed** for LAN self-hosting (§3b). Internet-facing
    deployments must enable TLS.
 6. **The TLS floor on the proxy hop is the proxy's responsibility** when a
@@ -384,6 +487,6 @@ so no plaintext was printed). The results were identical.
 | **Encryption policy** | [§2b](#2b-one-way-hashing-verify-only-secrets): hash what is verified, encrypt only what must be read back. [§3b](#3b-plain-http-is-still-possible-on-purpose): production MUST use TLS. [§4b](#4b-connecting-a-kms-secret-store-or-hsm)–[§4c](#4c-rotation): key custody and rotation |
 | **Data flow** | [§3](#3-encryption-in-transit): every hop, including browser, API client, SCIM and screen ↔ BeamOS, BeamOS ↔ MySQL, Graph, Entra, Stripe, S3 and AI provider, each with its transport |
 | **AES-256+ at rest** | [§2a](#2a-reversible-encryption-libsecretboxjs) (AES-256-GCM, for application secrets). Everything else relies on infrastructure ([§2c](#2c-what-the-application-does-not-encrypt)) |
-| **TLS 1.2+ in transit** | [§3a](#3a-what-beamos-guarantees-ref-2-stage-1) (guaranteed when BeamOS terminates TLS), [§3b](#3b-plain-http-is-still-possible-on-purpose) (proxy hop), [§3c](#3c-outbound-connections) (MySQL gap) |
+| **TLS 1.2+ in transit** | [§3a](#3a-what-beamos-guarantees-ref-2-stage-1) (guaranteed when BeamOS terminates TLS), [§3b](#3b-plain-http-is-still-possible-on-purpose) (proxy hop), [§3c](#3c-outbound-connections) (outbound hops), [§3d](#3d-tls-to-mysql-mysql_ssl) (verified TLS to MySQL) |
 | **Keys in a certified KMS/HSM** | [§4b](#4b-connecting-a-kms-secret-store-or-hsm): supported by supplying the key from the vault. **Not** HSM-resident; see the limits stated there |
 | **Server / hosting (Azure) controls** | Out of scope here. Database encryption, disk encryption, networking and backup storage belong to the hosting and infrastructure evidence |
