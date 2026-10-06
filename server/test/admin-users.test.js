@@ -59,6 +59,7 @@ db.exec(`
     role TEXT NOT NULL DEFAULT 'org_admin',
     invited_by TEXT,
     joined_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    source TEXT,
     UNIQUE(organization_id, user_id)
   );
   CREATE TABLE workspace_members (
@@ -68,6 +69,7 @@ db.exec(`
     role TEXT NOT NULL DEFAULT 'workspace_viewer',
     invited_by TEXT,
     joined_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    source TEXT,
     UNIQUE(workspace_id, user_id)
   );
   CREATE TABLE organizations (

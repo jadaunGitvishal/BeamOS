@@ -537,9 +537,11 @@ router.put(
         return res.status(409).json({ error: "Cannot demote the last admin" });
       }
     }
+    // Ref 7: a manual role change makes the membership manual (source NULL), so
+    // the Entra role sync never changes or removes it afterwards.
     await db
       .prepare(
-        "UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?",
+        "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
       )
       .run(newRole, ws.id, req.params.userId);
     res.json({ user_id: req.params.userId, role: newRole });

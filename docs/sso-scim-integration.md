@@ -17,6 +17,7 @@ the user's **very next request**, not at their next login.
 | 2 — prerequisite | `0040311` | `users.deactivated_at` and per-request revocation on every path that trusts a user's identity |
 | 3 — Ref 8 | `9dbdc09` | SCIM 2.0 endpoint at `/scim/v2`, `scim_tokens`, platform-admin token API |
 | 4 | this doc | Setup, operations and evidence |
+| 5 — Ref 7 | (uncommitted) | Entra app roles mapped to org/workspace roles at verified sign-in (Part 4) |
 
 ## The four Microsoft-integration surfaces
 
@@ -348,6 +349,138 @@ than a guess. Both are exercised in tests.
 
 ---
 
+## Part 4 — Ref 7: Entra app roles to BeamOS roles
+
+Ref 8 provisions **accounts**. Ref 7 sets their **roles**: an Entra ID app role
+(assigned to Entra groups) maps to a BeamOS org or workspace role, and the
+mapping is applied each time the user signs in with Microsoft.
+
+### What is read
+
+Only the `roles` claim of the user's **verified** `id_token`, the one Part 1
+checks against `SSO_TENANT_ID`. Entra fills it with the values of the app
+roles assigned to the user, either directly or through a group. The `groups`
+claim is never read, and SCIM `/Groups` is still `501`.
+
+The sync needs `SSO_TENANT_ID`. Without it, the Microsoft login uses the old
+Graph flow, there is no verified token, and **no sync runs**. Password,
+Google, field-technician OTP, API tokens, SCIM tokens and service principals
+never sync.
+
+### Mapping roles in BeamOS
+
+An org owner or org admin (or a platform admin) opens *Settings → Entra role
+mappings*. Each row maps an **app role value** to a **target** and a **role**:
+
+| Role | Target |
+|---|---|
+| `org_admin` | the organization itself |
+| `workspace_admin`, `workspace_editor`, `workspace_viewer` | one workspace of this organization |
+
+The role list in the form changes with the target. The same API:
+
+```bash
+curl -s https://signage.example.com/api/organizations/<org id>/entra-role-mappings \
+  -H "Authorization: Bearer $SESSION_JWT"
+
+curl -s -X POST https://signage.example.com/api/organizations/<org id>/entra-role-mappings \
+  -H "Authorization: Bearer $SESSION_JWT" -H "content-type: application/json" \
+  -d '{"claim_value": "BeamOS.Editors", "role": "workspace_editor", "workspace_id": "<workspace id>"}'
+
+curl -s -X DELETE https://signage.example.com/api/organizations/<org id>/entra-role-mappings/<mapping id> \
+  -H "Authorization: Bearer $SESSION_JWT"
+```
+
+| Rule | Result |
+|---|---|
+| `claim_value` empty, over 255 characters, or containing control characters | `400` |
+| `role` not one of the four above (`org_owner`, `field_technician`, platform roles…) | `400` |
+| `org_admin` with a `workspace_id`, or a workspace role without one | `400` |
+| `workspace_id` not a workspace of this organization | `400` |
+| The same app role value already mapped to the same target | `409` (one role per value and target) |
+| Deleting a mapping of another organization | `404` |
+| Caller not org owner/admin of this org | `403` |
+
+The value is matched **exactly**, case included. Deleting a workspace or
+organization deletes its mappings. Deleting the user who created a mapping
+keeps the mapping. Every add/remove is audit-logged.
+
+### What happens at sign-in
+
+After the token is verified and the deactivated and account-link checks pass,
+and **before** the session is issued, the sync brings the user's memberships in
+line with their `roles` claim in one database transaction
+([`lib/entra-role-sync.js`](../server/lib/entra-role-sync.js)):
+
+- Each membership has a `source`: `NULL` = manual (added by hand, by invite,
+  by SCIM, by org bootstrap) or `'entra'` = created by the sync.
+- **No membership yet** where a mapping points → created with `source = 'entra'`.
+- **An `'entra'` membership with a different role** → its role is updated.
+  If several mappings point at the same workspace, the highest role wins
+  (admin > editor > viewer).
+- **A manual membership** where a mapping points → **left exactly as it is**
+  (role and source). Manual wins.
+- **An `'entra'` membership no mapping points at any more** (the user left the
+  group, the app role was unassigned, or the mapping was deleted, including an
+  org's last mapping) → removed.
+- One audit entry, `entra_role_sync`, lists what was added, updated, removed
+  or skipped, as org/workspace ids and roles only. It never contains the
+  token, the claim values, the email or the `oid`. Nothing is written when
+  nothing changed.
+
+**Manual takeover.** When an admin changes the role of an `'entra'`
+membership by hand (org or workspace member role change, or re-adding it from
+the platform Users page), it becomes manual (`source = NULL`), and the sync
+never changes or removes it again.
+
+**Removing a mapped member by hand doesn't stick.** If an admin deletes an
+`'entra'` membership while the user's group still maps to it, the sync creates
+it again at their next Microsoft sign-in. To remove access, remove the user
+from the Entra group (or unassign the group from the app role), or delete the
+mapping.
+
+**Fail closed.** If the sync fails (for example, the database is
+unavailable), its transaction is rolled back and the sign-in is refused with
+`503 {"code":"ROLE_SYNC_FAILED","error":"Sign-in could not complete; please try again."}`.
+No session is issued with roles that weren't applied. The error is logged on
+the server. A brand-new user's account row was already created at that point;
+their next attempt signs in normally.
+
+### Timing
+
+- Changes apply at the user's **next Microsoft sign-in**, not immediately.
+- An existing BeamOS session stays valid for up to **7 days** (the session
+  JWT lifetime) with the memberships it had. Membership checks read the
+  database on each request, so a removal or role change takes effect as soon
+  as the user signs in again.
+- For leavers, don't wait for the next sign-in: deactivate them through SCIM
+  (Part 3). That cuts off every session on the next request (Part 2).
+
+### Entra setup
+
+Needs **Microsoft Entra ID P1 or higher** to assign **groups** to app roles
+(Free tier only allows assigning individual users).
+
+1. **App registrations → your BeamOS login app (`MICROSOFT_CLIENT_ID`) → App
+   roles → Create app role.** Allowed member types: *Users/Groups*. The
+   **Value** (for example `BeamOS.Editors`) is what you map in BeamOS. Create
+   one app role per BeamOS role you want to grant.
+2. **Enterprise applications → the same app → Users and groups → Add
+   user/group.** Pick a group and the app role. Repeat for each group.
+3. Nothing needs adding under *Token configuration*: Entra includes the
+   `roles` claim in the `id_token` automatically once the user has an app role
+   assignment.
+4. In BeamOS, add the matching rows under *Settings → Entra role mappings*.
+5. Make sure `SSO_TENANT_ID` is set (Part 1).
+
+**Not verified without a real tenant.** The tests sign their own `id_token`s
+with a `roles` claim shaped per Microsoft's documentation. A real Entra
+tenant has not been used to check the portal steps, that group-assigned app
+roles arrive in the `roles` claim of an MSAL SPA `id_token`, or how a user in
+many groups is handled.
+
+---
+
 ## Setup
 
 ### Is it one Entra registration or two?
@@ -411,6 +544,11 @@ and no real tenant was available to try it.
 5. **Users and groups:** assign the people who should have BeamOS accounts.
    Scope = *Sync only assigned users and groups*.
 6. **Start provisioning.**
+
+### C. App roles for role mapping (Ref 7)
+
+Optional. Define app roles on the login app registration (A) and assign groups
+to them on its enterprise app. See [Part 4 → Entra setup](#entra-setup).
 
 ### Environment
 
@@ -623,12 +761,12 @@ sending.
 
 ## Known gaps (honest list)
 
-- **Still no Entra group-to-role mapping.** SCIM provisions **accounts**. It
-  does not map Entra security groups to BeamOS roles. Every provisioned user
-  gets the one `SCIM_DEFAULT_ORG_ROLE`, `/Groups` is `501`, and real
-  workspace/org roles are still assigned by a human. The
-  [docs/rbac.md gap](rbac.md#known-gap-no-azure-ad--entra-id-group-to-role-mapping)
-  is **not** closed by this work.
+- **Role mapping is sign-in time only (Ref 7).** SCIM still provisions
+  **accounts** with the one `SCIM_DEFAULT_ORG_ROLE` and `/Groups` is `501`.
+  Org/workspace roles from Entra app roles (Part 4) are applied at the user's
+  next Microsoft sign-in, not when the group changes in Entra, and need
+  `SSO_TENANT_ID`. `org_owner`, `field_technician` and platform roles can't be
+  mapped. The sync doesn't apply the manual routes' "last admin" guards.
 - **No UI** for SCIM tokens or for deactivating/reactivating a user by hand.
   Both are API/SCIM only (`setUserDeactivated` is ready for an admin toggle).
 - **First SSO login of a provisioned user can mint a personal org.**

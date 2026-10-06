@@ -27,6 +27,26 @@ const REQUIRED_TABLES = [
   'sim_inventory', // Ref 65: physical SIM stock ledger (in_stock/assigned/active/retired)
   'ticket_escalations', // Ref 58: ticket response-time SLA breach escalation dedup
   'scim_tokens', // Ref 8: SCIM provisioning bearer secrets (hashed)
+  'entra_role_mappings', // Ref 7: Entra app role -> org/workspace role (repairable, below)
+];
+
+// Ref 7: tables the repair below may CREATE when missing (same DDL as schema.sql,
+// which normally creates them first). [table, createSQL].
+const REPAIRABLE_TABLES = [
+  ['entra_role_mappings', `CREATE TABLE IF NOT EXISTS entra_role_mappings (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    organization_id VARCHAR(64) NOT NULL,
+    claim_value     VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    workspace_id    VARCHAR(64) NULL,
+    role            VARCHAR(50) NOT NULL,
+    created_by      VARCHAR(64) NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    workspace_key   VARCHAR(64) AS (COALESCE(workspace_id, '')) VIRTUAL,
+    UNIQUE KEY uniq_entra_role_mapping (organization_id, claim_value, workspace_key),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`],
 ];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
@@ -56,6 +76,11 @@ const REQUIRED_COLUMNS = [
   // login, so an un-migrated DB would 500 every login. Default 0 = every existing
   // org keeps today's behaviour after the repair.
   ['organizations', 'sso_only', "ALTER TABLE organizations ADD COLUMN sso_only TINYINT(1) NOT NULL DEFAULT 0"],
+  // Ref 7: membership provenance. NULL = manual (every pre-existing row stays
+  // manual after the repair, so the Entra role sync never touches it); 'entra' =
+  // managed by lib/entra-role-sync.js. The manual member routes write NULL.
+  ['organization_members', 'source', "ALTER TABLE organization_members ADD COLUMN source VARCHAR(16) NULL"],
+  ['workspace_members', 'source', "ALTER TABLE workspace_members ADD COLUMN source VARCHAR(16) NULL"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
   // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)
   // always lists these columns now, so an un-migrated DB would fail every telemetry
@@ -187,6 +212,17 @@ async function verifyAndRepairSchema(db, opts = {}) {
   };
 
   const missing = [];
+  for (const [t, create] of REPAIRABLE_TABLES) {
+    if (tableSet.has(t)) continue;
+    try {
+      console.warn(`[schema-check] required table ${t} is missing — creating it...`);
+      await db.exec(create);
+      tableSet.add(t);
+      console.warn(`[schema-check] created table ${t}`);
+    } catch (e) {
+      console.error(`[schema-check] creating table ${t} FAILED: ${e.message}`);
+    }
+  }
   for (const t of REQUIRED_TABLES) if (!tableSet.has(t)) missing.push(`table "${t}"`);
 
   for (const [t, c, repair] of REQUIRED_COLUMNS) {
@@ -218,4 +254,4 @@ async function verifyAndRepairSchema(db, opts = {}) {
   return missing;
 }
 
-module.exports = { verifyAndRepairSchema, dropUserForeignKeys, REQUIRED_TABLES, REQUIRED_COLUMNS };
+module.exports = { verifyAndRepairSchema, dropUserForeignKeys, REQUIRED_TABLES, REQUIRED_COLUMNS, REPAIRABLE_TABLES };

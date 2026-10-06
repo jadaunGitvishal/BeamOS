@@ -561,6 +561,26 @@ export default {
   "authpolicy.enabled_toast": "SSO-only mode enabled",
   "authpolicy.disabled_toast": "SSO-only mode disabled",
 
+  // Ref 7: Entra ID app role -> org/workspace role mappings
+  "entraroles.title": "Entra role mappings",
+  "entraroles.desc":
+    "Map an Entra ID app role (assigned to Entra groups in your enterprise app) to a role in this organization or one of its workspaces.",
+  "entraroles.note":
+    "Applied at each user's next Microsoft sign-in. Memberships added by hand are never changed.",
+  "entraroles.col_value": "App role value",
+  "entraroles.col_target": "Target",
+  "entraroles.col_role": "Role",
+  "entraroles.col_actions": "Actions",
+  "entraroles.value_placeholder": "e.g. BeamOS.Editors",
+  "entraroles.target_org": "{name} (organization)",
+  "entraroles.add": "Add mapping",
+  "entraroles.remove": "Remove",
+  "entraroles.remove_confirm":
+    "Remove this mapping? Users who got access only through it lose that access at their next Microsoft sign-in.",
+  "entraroles.none": "No mappings yet.",
+  "entraroles.added_toast": "Mapping added",
+  "entraroles.removed_toast": "Mapping removed",
+
   "settings.save_profile": "Save Profile",
   "settings.email_alerts": "Email me when devices go offline",
   "settings.change_password": "Change Password",

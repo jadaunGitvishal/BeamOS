@@ -208,58 +208,59 @@ fully deleted via the real `deleteUserCascade` admin path (`DELETE
 post-delete lookup. The demo ticket used earlier was closed. Nothing in
 this section is live production data.)*
 
-## Known gap: no Azure AD / Entra ID group-to-role mapping
+<a id="known-gap-no-azure-ad--entra-id-group-to-role-mapping"></a>
 
-**This is a real, confirmed gap — not a vague disclaimer.** Two genuinely
-different things live under "Microsoft" in this codebase, and only one of
-them exists:
+## Entra ID role mapping (Ref 7)
 
-- **Microsoft SSO login** (`POST /api/auth/microsoft` in
-  [`server/routes/auth.js`](../server/routes/auth.js)) — real, built, and
-  working. A user authenticates via Microsoft/Entra, and BeamOS verifies
-  their identity through Microsoft Graph (or, with `SSO_TENANT_ID` set,
-  by validating their OIDC `id_token` against that one tenant, optionally
-  requiring MFA — Ref 5, [docs/sso-scim-integration.md](sso-scim-integration.md)).
-  On first login it creates a
-  BeamOS account with the default `user` role and drops them into a default
-  organization/workspace (`ensureDefaultOrgForUser`) — from there, a human
-  admin assigns their real workspace/org role by hand, the same as any
-  other user.
-- **Azure AD / Entra ID *group*-to-*role* mapping** — reading a user's
-  Entra security-group memberships and automatically assigning/updating
-  their BeamOS role (e.g. "member of `IT-Regional-Managers`" →
-  `org_admin`) — **does not exist anywhere in this codebase.** There is no
-  group-claims parsing, no mapping configuration, and no code path that
-  ever sets a role from anything other than a human calling the
-  admin/invite/member-management endpoints.
+This used to be listed here as a known gap. Ref 7 closes it: Entra ID app
+roles can now set a user's BeamOS org and workspace roles automatically at
+Microsoft sign-in. Setup, timing and the full rules are in
+[docs/sso-scim-integration.md, Part 4](sso-scim-integration.md#part-4--ref-7-entra-app-roles-to-beamos-roles).
 
-This is correctly scoped as a **conditional, "if the host requires it"
-enterprise integration** — distinct from, and not a prerequisite for, the
-core RBAC system documented above, which is fully built, enforced
-server-side on every route, and proven by the test suite and live sessions
-in this document. If Entra group-to-role provisioning is a hard requirement,
-it is new work: parsing group claims from the Microsoft token exchange, a
-mapping configuration surface (which groups map to which role, per org),
-and a sync path that keeps role assignments current as group membership
-changes.
+**How it works.**
 
-Note: this gap is about *human* sign-in. [`docs/entra-auth.md`](entra-auth.md)
-(Ref 9) documents a separate, since-built capability — Entra ID Service
-Principal (machine-to-machine, OAuth 2.0 client-credentials) API
-authentication for non-human callers — which does **not** close this gap
-and isn't intended to.
+1. In Entra, the app registration defines **app roles** (for example
+   `BeamOS.Editors`), and the enterprise app assigns **groups** to those
+   roles. Entra then puts the user's app roles in the `roles` claim of their
+   `id_token`. BeamOS reads only that claim, never the `groups` claim.
+2. An org owner or org admin maps each app role value to a BeamOS role in
+   *Settings → Entra role mappings* (`/api/organizations/:orgId/entra-role-mappings`).
+   Only four roles can be mapped:
 
-**SCIM provisioning (Ref 8) does not close it either.**
-[`docs/sso-scim-integration.md`](sso-scim-integration.md) adds a SCIM 2.0
-endpoint through which Entra ID creates, updates and **deactivates**
-BeamOS *accounts* — but it provisions accounts, not roles. Every
-provisioned user receives the same single, configured organization role
-(`SCIM_DEFAULT_ORG_ROLE`, default `field_technician`); Entra security
-groups are not read (`/scim/v2/Groups` returns 501) and nothing maps a
-group to a role. Assigning real org/workspace roles is still the manual
-admin step described above. What Ref 8 *does* add on the RBAC side is
-revocation: a user deactivated from Entra loses every session, API token
-and login path on their next request.
+   | BeamOS role | Target |
+   |---|---|
+   | `org_admin` | the organization |
+   | `workspace_admin`, `workspace_editor`, `workspace_viewer` | one workspace of that organization |
+
+   `org_owner`, `field_technician`, platform roles and anything else are
+   refused. A workspace from another organization is refused.
+3. At each Microsoft sign-in whose `id_token` was verified against
+   `SSO_TENANT_ID`, [`lib/entra-role-sync.js`](../server/lib/entra-role-sync.js)
+   brings the user's memberships in line with their `roles` claim, in one
+   transaction, before the session is issued. Without `SSO_TENANT_ID` there is
+   no verified claim and no sync. Password, Google, field-technician OTP,
+   API-token and service-principal sign-ins never sync.
+
+**Manual memberships win.** Every `organization_members` /
+`workspace_members` row has a `source`: `NULL` (manual: added by hand, by
+invite, by SCIM or by org bootstrap) or `'entra'` (created by the sync). The
+sync only creates, changes and removes `'entra'` rows. If the user already has
+a manual row where a mapping points, that row is left exactly as it is. When an
+admin changes the role of an `'entra'` membership by hand (or re-adds it from
+the platform Users page), it becomes manual and the sync leaves it alone from
+then on.
+
+**What the sync does not do.** It does not map `org_owner`,
+`field_technician` or platform roles. It does not read SCIM groups
+(`/scim/v2/Groups` is still `501`). It does not run for API tokens or service
+principals. It does not apply the "last admin" guards that the manual member
+routes apply, so an Entra change can remove the last `'entra'`
+`workspace_admin` of a workspace.
+
+Note: [`docs/entra-auth.md`](entra-auth.md) (Ref 9) is a separate feature:
+Entra ID service principal (machine-to-machine) API authentication. SCIM
+provisioning (Ref 8) still provisions accounts with one configured org role;
+role mapping is this section's sync, not SCIM.
 
 ## Secondary finding: billing actions were not role-gated (now fixed)
 

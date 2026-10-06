@@ -24,11 +24,11 @@ acts **as** the admin who registered it (`created_by`), so if that admin is
 deactivated (e.g. by SCIM), the registration is refused with 401 — exactly
 as it already was if they were deleted — until an active admin
 re-registers it ([details](sso-scim-integration.md#part-2--deactivation-instant-per-request-revocation)).
-This doc's feature also does **not** close
-the ["no Azure AD / Entra ID group-to-role mapping" gap](rbac.md#known-gap-no-azure-ad--entra-id-group-to-role-mapping)
-documented in `docs/rbac.md` — that's about mapping a *human's* Entra group
-memberships to a BeamOS role, which remains unbuilt. This is unrelated:
-machine-to-machine access for a non-human caller.
+Mapping a *human's* Entra app roles (assigned to groups) to BeamOS org and
+workspace roles is a separate feature (Ref 7): see
+[docs/rbac.md](rbac.md#entra-id-role-mapping-ref-7) and
+[docs/sso-scim-integration.md, Part 4](sso-scim-integration.md#part-4--ref-7-entra-app-roles-to-beamos-roles).
+This doc's feature is unrelated: machine-to-machine access for a non-human caller.
 
 ## Why `jose`, not `@azure/msal-node` or `passport-azure-ad` — the research
 

@@ -96,6 +96,13 @@ export const api = {
     method: 'PATCH',
     body: JSON.stringify({ sso_only }),
   }),
+  // Ref 7: Entra app role -> org/workspace role mappings. Same org-admin gate.
+  getEntraRoleMappings: (orgId) => request(`/organizations/${encodeURIComponent(orgId)}/entra-role-mappings`),
+  createEntraRoleMapping: (orgId, { claim_value, role, workspace_id }) => request(`/organizations/${encodeURIComponent(orgId)}/entra-role-mappings`, {
+    method: 'POST',
+    body: JSON.stringify({ claim_value, role, workspace_id: workspace_id || null }),
+  }),
+  deleteEntraRoleMapping: (orgId, id) => request(`/organizations/${encodeURIComponent(orgId)}/entra-role-mappings/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // region_id: a region id, or null to unassign.
   setWorkspaceRegion: (workspaceId, region_id) => request(`/workspaces/${encodeURIComponent(workspaceId)}/region`, {
     method: 'PATCH',

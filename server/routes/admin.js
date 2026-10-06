@@ -435,8 +435,9 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, asyncHandler(async (r
     )
     .get(ws.id, target.id);
   if (existing) {
+    // Ref 7: manual re-add takes the membership over from the Entra role sync.
     await db.prepare(
-      "UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?",
+      "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
     ).run(role, ws.id, target.id);
   } else {
     await db.prepare(
@@ -480,8 +481,9 @@ router.put(
       )
       .get(req.params.workspaceId, req.params.id);
     if (!member) return res.status(404).json({ error: "Membership not found" });
+    // Ref 7: manual role change takes the membership over from the Entra role sync.
     await db.prepare(
-      "UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?",
+      "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
     ).run(role, req.params.workspaceId, req.params.id);
     req.workspaceId = req.params.workspaceId;
     const target = await db

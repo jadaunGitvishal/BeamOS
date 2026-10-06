@@ -12,6 +12,8 @@ const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
 const { parseLifetimeDays } = require("../lib/token-lifetime"); // Ref 34
 const config = require("../config"); // Ref 5: ssoTenantId gates SSO-only mode
+const { MAPPABLE_ROLES, MAX_CLAIM_LENGTH } = require("../lib/entra-role-sync"); // Ref 7
+const { isDuplicateKeyError } = require("../lib/outage-format");
 
 function formatTimestamp(epochSeconds) {
   if (epochSeconds === null || epochSeconds === undefined) return "";
@@ -275,9 +277,11 @@ router.put(
       }
     }
 
+    // Ref 7: a manual role change makes the membership manual (source NULL), so
+    // the Entra role sync never changes or removes it afterwards.
     await db
       .prepare(
-        "UPDATE organization_members SET role = ? WHERE organization_id = ? AND user_id = ?",
+        "UPDATE organization_members SET role = ?, source = NULL WHERE organization_id = ? AND user_id = ?",
       )
       .run(newRole, org.id, req.params.userId);
 
@@ -720,6 +724,121 @@ router.patch(
       );
     }
     res.json(authPolicyView({ ...org, sso_only: next ? 1 : 0 }, req.user));
+  }),
+);
+
+// ---- Ref 7: Entra ID app role -> org/workspace role mappings ----
+// Same gate as auth-policy (loadOrgForRegions: org_owner / org_admin of THIS org,
+// or a platform owner-role). Applied by lib/entra-role-sync.js at each user's next
+// verified Microsoft sign-in. Mutations are audit-logged by activityLogger.
+// claim_value is the Entra app role VALUE (the `roles` claim), matched exactly.
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
+// GET /:orgId/entra-role-mappings
+router.get(
+  "/:orgId/entra-role-mappings",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const rows = await db
+      .prepare(
+        `SELECT m.id, m.claim_value, m.workspace_id, w.name AS workspace_name, m.role, m.created_at
+         FROM entra_role_mappings m
+         LEFT JOIN workspaces w ON w.id = m.workspace_id
+         WHERE m.organization_id = ?
+         ORDER BY m.claim_value, m.workspace_id IS NOT NULL, w.name, m.id`,
+      )
+      .all(org.id);
+    res.json(rows);
+  }),
+);
+
+// POST /:orgId/entra-role-mappings  { claim_value, role, workspace_id? }
+router.post(
+  "/:orgId/entra-role-mappings",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const body = req.body || {};
+
+    const claimValue = typeof body.claim_value === "string" ? body.claim_value.trim() : "";
+    if (!claimValue || claimValue.length > MAX_CLAIM_LENGTH || CONTROL_CHARS.test(claimValue)) {
+      return res.status(400).json({
+        error: `claim_value must be the Entra app role value: 1-${MAX_CLAIM_LENGTH} characters, no control characters`,
+      });
+    }
+
+    const role = typeof body.role === "string" ? body.role : "";
+    const level = Object.prototype.hasOwnProperty.call(MAPPABLE_ROLES, role) ? MAPPABLE_ROLES[role] : null;
+    if (!level) {
+      return res.status(400).json({ error: `role must be one of: ${Object.keys(MAPPABLE_ROLES).join(", ")}` });
+    }
+
+    const rawWs = body.workspace_id;
+    const hasWs = rawWs !== undefined && rawWs !== null && rawWs !== "";
+    if (hasWs && typeof rawWs !== "string") {
+      return res.status(400).json({ error: "workspace_id must be a string" });
+    }
+    if (level === "org" && hasWs) {
+      return res.status(400).json({ error: "org_admin is an organization role - omit workspace_id" });
+    }
+    if (level === "workspace" && !hasWs) {
+      return res.status(400).json({ error: `${role} needs a workspace_id` });
+    }
+
+    let ws = null;
+    if (hasWs) {
+      ws = await db
+        .prepare("SELECT id, name FROM workspaces WHERE id = ? AND organization_id = ?")
+        .get(rawWs, org.id);
+      if (!ws) return res.status(400).json({ error: "workspace_id is not a workspace of this organization" });
+    }
+
+    const dup = await db
+      .prepare(
+        "SELECT 1 FROM entra_role_mappings WHERE organization_id = ? AND claim_value = ? AND workspace_key = ?",
+      )
+      .get(org.id, claimValue, ws ? ws.id : "");
+    if (dup) return res.status(409).json({ error: "A mapping for this app role and target already exists" });
+
+    let result;
+    try {
+      result = await db
+        .prepare(
+          "INSERT INTO entra_role_mappings (organization_id, claim_value, workspace_id, role, created_by) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(org.id, claimValue, ws ? ws.id : null, role, req.user.id);
+    } catch (e) {
+      if (isDuplicateKeyError(e)) {
+        return res.status(409).json({ error: "A mapping for this app role and target already exists" });
+      }
+      throw e;
+    }
+    res.status(201).json({
+      id: result.lastInsertRowid,
+      claim_value: claimValue,
+      workspace_id: ws ? ws.id : null,
+      workspace_name: ws ? ws.name : null,
+      role,
+    });
+  }),
+);
+
+// DELETE /:orgId/entra-role-mappings/:id - the mapping must belong to :orgId.
+router.delete(
+  "/:orgId/entra-role-mappings/:id",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const id = /^\d{1,10}$/.test(req.params.id) ? Number(req.params.id) : null;
+    const mapping =
+      id &&
+      (await db
+        .prepare("SELECT id FROM entra_role_mappings WHERE id = ? AND organization_id = ?")
+        .get(id, org.id));
+    if (!mapping) return res.status(404).json({ error: "Mapping not found" });
+    await db.prepare("DELETE FROM entra_role_mappings WHERE id = ? AND organization_id = ?").run(mapping.id, org.id);
+    res.json({ success: true });
   }),
 );
 

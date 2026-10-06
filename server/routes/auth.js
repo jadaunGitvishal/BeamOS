@@ -41,6 +41,13 @@ const SSO_REQUIRED = {
   code: "SSO_REQUIRED",
   error: "Your organization requires Microsoft sign-in.",
 };
+// Ref 7: Entra app roles -> org/workspace roles, synced at verified Microsoft
+// sign-in. Called through the module object (not destructured).
+const entraRoleSync = require("../lib/entra-role-sync");
+const ROLE_SYNC_FAILED = {
+  code: "ROLE_SYNC_FAILED",
+  error: "Sign-in could not complete; please try again.",
+};
 
 // Phase 2.1: find or create the user's default org+workspace. Returns the
 // workspace_id to embed in the JWT. Idempotent: if the user already has
@@ -656,6 +663,9 @@ router.post("/microsoft", async (req, res) => {
 
   try {
     let email, name, microsoftId;
+    // Ref 7: the verified id_token claims - always set on the tenant-restricted
+    // path (verifyEntraIdToken either succeeded or the route already returned 401).
+    let verifiedClaims = null;
     if (tenantRestricted) {
       let identity;
       try {
@@ -683,6 +693,7 @@ router.post("/microsoft", async (req, res) => {
       }
       name = identity.name;
       microsoftId = identity.oid; // == Graph user `id`, what provider_id always held
+      verifiedClaims = identity.payload;
     } else {
       // Use the access token to get user profile from Microsoft Graph
       const profile = await getMicrosoftProfile(access_token);
@@ -764,6 +775,20 @@ router.post("/microsoft", async (req, res) => {
           "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
         ).run("microsoft", microsoftId, user.id);
         user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+      }
+    }
+
+    // Ref 7: apply the verified `roles` claim to the user's 'entra' memberships -
+    // only when the id_token was verified against SSO_TENANT_ID. Every success path
+    // (existing, new, linked user) reaches here after the deactivated / link checks
+    // and before the session is issued. Fail closed: a sync error (already rolled
+    // back) refuses the sign-in rather than issuing a session with stale roles.
+    if (tenantRestricted) {
+      try {
+        await entraRoleSync.syncEntraRoles(db, user.id, verifiedClaims?.roles, { ip: getClientIp(req) });
+      } catch (err) {
+        console.error(`[entra-role-sync] sync failed for user ${user.id}: ${err.message}`);
+        return res.status(503).json(ROLE_SYNC_FAILED);
       }
     }
 

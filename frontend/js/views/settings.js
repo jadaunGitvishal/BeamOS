@@ -202,6 +202,31 @@ export async function render(container) {
       <div class="form-group"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ssoOnlyToggle" disabled> ${t("authpolicy.sso_only_label")}</label></div>
       <p id="ssoOnlyNote" style="color:var(--text-muted);font-size:12px;display:none"></p>
     </div>
+
+    <div class="settings-section" id="entraRolesSection">
+      <h3>${t("entraroles.title")}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:8px">${esc(t("entraroles.desc"))}</p>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px">${esc(t("entraroles.note"))}</p>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
+        <div class="form-group" style="margin-bottom:0;flex:1;min-width:180px">
+          <label>${t("entraroles.col_value")}</label>
+          <input type="text" id="entraRoleValue" class="input" placeholder="${esc(t("entraroles.value_placeholder"))}" maxlength="255">
+        </div>
+        <div class="form-group" style="margin-bottom:0;min-width:180px">
+          <label>${t("entraroles.col_target")}</label>
+          <select id="entraRoleTarget" class="input" style="background:var(--bg-input)">
+            <option value="">${esc(t("entraroles.target_org", { name: regionOrg.name || regionOrg.id }))}</option>
+            ${regionOrgWorkspaces.map((w) => `<option value="${esc(w.id)}">${esc(w.name || w.id)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;min-width:140px">
+          <label>${t("entraroles.col_role")}</label>
+          <select id="entraRoleRole" class="input" style="background:var(--bg-input)"></select>
+        </div>
+        <button class="btn btn-primary btn-sm" id="entraRoleAddBtn">${t("entraroles.add")}</button>
+      </div>
+      <div id="entraRoleList"><p style="color:var(--text-muted);font-size:13px">${t("settings.loading_users")}</p></div>
+    </div>
     `
         : ""
     }
@@ -1066,6 +1091,101 @@ export async function render(container) {
     });
 
     loadAuthPolicy();
+
+    // ---- Ref 7: Entra role mappings (same org-admin gate as Regions) ----
+    const entraList = document.getElementById("entraRoleList");
+    const entraTarget = document.getElementById("entraRoleTarget");
+    const entraRole = document.getElementById("entraRoleRole");
+    const ORG_TARGET_ROLES = ["org_admin"];
+    const WS_TARGET_ROLES = ["workspace_admin", "workspace_editor", "workspace_viewer"];
+    const roleLabel = (r) => t(`members.role.${r}`);
+
+    function renderEntraRoleOptions() {
+      const roles = entraTarget.value ? WS_TARGET_ROLES : ORG_TARGET_ROLES;
+      entraRole.innerHTML = roles
+        .map((r) => `<option value="${esc(r)}">${esc(roleLabel(r))}</option>`)
+        .join("");
+    }
+
+    async function loadEntraMappings() {
+      let rows;
+      try {
+        rows = await api.getEntraRoleMappings(orgId);
+      } catch (err) {
+        entraList.innerHTML = `<p style="color:var(--danger);font-size:13px">${esc(err.message)}</p>`;
+        return;
+      }
+      if (!rows.length) {
+        entraList.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t("entraroles.none")}</p>`;
+        return;
+      }
+      const orgName = regionOrg.name || regionOrg.id;
+      entraList.innerHTML = `
+        <div class="table-wrap">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:480px">
+          <thead><tr style="border-bottom:1px solid var(--border);text-align:left">
+            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("entraroles.col_value")}</th>
+            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("entraroles.col_target")}</th>
+            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("entraroles.col_role")}</th>
+            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("entraroles.col_actions")}</th>
+          </tr></thead>
+          <tbody>
+            ${rows
+              .map(
+                (m) => `
+              <tr style="border-bottom:1px solid var(--border)">
+                <td style="padding:8px 12px;font-family:monospace">${esc(m.claim_value)}</td>
+                <td style="padding:8px 12px">${esc(m.workspace_id ? m.workspace_name || m.workspace_id : t("entraroles.target_org", { name: orgName }))}</td>
+                <td style="padding:8px 12px">${esc(roleLabel(m.role))}</td>
+                <td style="padding:8px 12px">
+                  <button class="btn btn-danger btn-sm entra-role-del-btn" data-id="${esc(String(m.id))}">${t("entraroles.remove")}</button>
+                </td>
+              </tr>`,
+              )
+              .join("")}
+          </tbody>
+        </table></div>`;
+      entraList.querySelectorAll(".entra-role-del-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!confirm(t("entraroles.remove_confirm"))) return;
+          btn.disabled = true;
+          try {
+            await api.deleteEntraRoleMapping(orgId, btn.dataset.id);
+            showToast(t("entraroles.removed_toast"), "success");
+            await loadEntraMappings();
+          } catch (err) {
+            showToast(err.message, "error");
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+
+    entraTarget.addEventListener("change", renderEntraRoleOptions);
+    document.getElementById("entraRoleAddBtn").addEventListener("click", async () => {
+      const input = document.getElementById("entraRoleValue");
+      const claimValue = input.value.trim();
+      if (!claimValue) return;
+      const btn = document.getElementById("entraRoleAddBtn");
+      btn.disabled = true;
+      try {
+        await api.createEntraRoleMapping(orgId, {
+          claim_value: claimValue,
+          role: entraRole.value,
+          workspace_id: entraTarget.value || null,
+        });
+        input.value = "";
+        showToast(t("entraroles.added_toast"), "success");
+        await loadEntraMappings();
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    renderEntraRoleOptions();
+    loadEntraMappings();
   }
 
   // #73: agency scope reveals a playlist picker (the token's allowlist). Loaded lazily once.

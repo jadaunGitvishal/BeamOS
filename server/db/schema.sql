@@ -170,6 +170,9 @@ CREATE TABLE IF NOT EXISTS organization_members (
     role            VARCHAR(50) NOT NULL DEFAULT 'org_admin',
     invited_by      VARCHAR(64),
     joined_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    -- Ref 7: NULL = added by hand; 'entra' = created/managed by the Entra
+    -- app-role sync (lib/entra-role-sync.js), which never touches a NULL row.
+    source          VARCHAR(16) NULL,
     UNIQUE(organization_id, user_id),
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -225,12 +228,37 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     role            VARCHAR(50) NOT NULL DEFAULT 'workspace_viewer',
     invited_by      VARCHAR(64),
     joined_at       BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    -- Ref 7: NULL = manual, 'entra' = managed by the Entra app-role sync.
+    source          VARCHAR(16) NULL,
     UNIQUE(workspace_id, user_id),
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (invited_by) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_workspace_members_user ON workspace_members(user_id);
+
+-- Ref 7: Entra ID app role (the verified id_token `roles` claim) -> BeamOS role.
+-- workspace_id NULL = org-level target (org_admin only); set = workspace target
+-- (workspace_admin/editor/viewer). Applied at each verified Microsoft sign-in by
+-- lib/entra-role-sync.js. claim_value is utf8mb4_bin: matching is exact, so the
+-- uniqueness check is case-sensitive too. UNIQUE(org, claim, workspace) must also
+-- hold for the NULL (org-level) target, which a plain UNIQUE ignores, so it is
+-- keyed on workspace_key = COALESCE(workspace_id, ''). VIRTUAL, not STORED: MySQL
+-- refuses ON DELETE CASCADE on the base column of a STORED generated column.
+CREATE TABLE IF NOT EXISTS entra_role_mappings (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    organization_id VARCHAR(64) NOT NULL,
+    claim_value     VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    workspace_id    VARCHAR(64) NULL,
+    role            VARCHAR(50) NOT NULL,
+    created_by      VARCHAR(64) NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    workspace_key   VARCHAR(64) AS (COALESCE(workspace_id, '')) VIRTUAL,
+    UNIQUE KEY uniq_entra_role_mapping (organization_id, claim_value, workspace_key),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS workspace_invites (
     id              VARCHAR(64) PRIMARY KEY,
