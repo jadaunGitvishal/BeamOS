@@ -132,6 +132,30 @@ const REQUIRED_COLUMNS = [
   ['devices', 'warranty_expiry_date', "ALTER TABLE devices ADD COLUMN warranty_expiry_date VARCHAR(10) NULL"],
 ];
 
+// Audit-chain fix (Refs 17/20): activity_log rows must keep user_id /
+// acting_user_id after the user is deleted - user_id is part of each row's hash,
+// so nulling it breaks the chain. schema.sql no longer declares these FKs; this
+// drops them from DBs created before that. Found by lookup (MySQL's generated
+// names, e.g. activity_log_ibfk_1, aren't guaranteed), never hard-coded. Indexes
+// are left in place. Idempotent: a no-op once none remain. `table` is a
+// parameter only so tests can run it on a scratch table. Returns dropped names.
+async function dropUserForeignKeys(db, table = 'activity_log') {
+  if (!/^[A-Za-z0-9_]+$/.test(table)) throw new Error(`dropUserForeignKeys: invalid table name "${table}"`);
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT CONSTRAINT_NAME AS name FROM information_schema.KEY_COLUMN_USAGE
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME = 'users'`,
+    )
+    .all(table);
+  const dropped = [];
+  for (const { name } of rows) {
+    await db.exec(`ALTER TABLE \`${table}\` DROP FOREIGN KEY \`${String(name).replace(/`/g, '``')}\``);
+    console.warn(`[schema-check] dropped foreign key ${table}.${name} -> users (audit rows keep the user id after deletion)`);
+    dropped.push(name);
+  }
+  return dropped;
+}
+
 function defaultOnMissing(missing) {
   const bar = '='.repeat(72);
   console.error(`\n${bar}`);
@@ -182,8 +206,16 @@ async function verifyAndRepairSchema(db, opts = {}) {
     if (!cols.has(c)) missing.push(`column "${t}.${c}"`);
   }
 
+  if (tableSet.has('activity_log')) {
+    try {
+      await dropUserForeignKeys(db);
+    } catch (e) {
+      console.error(`[schema-check] dropping activity_log -> users foreign keys FAILED: ${e.message}`);
+    }
+  }
+
   if (missing.length) onMissing(missing);
   return missing;
 }
 
-module.exports = { verifyAndRepairSchema, REQUIRED_TABLES, REQUIRED_COLUMNS };
+module.exports = { verifyAndRepairSchema, dropUserForeignKeys, REQUIRED_TABLES, REQUIRED_COLUMNS };

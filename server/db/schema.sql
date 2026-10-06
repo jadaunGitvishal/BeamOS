@@ -770,10 +770,12 @@ CREATE TABLE IF NOT EXISTS activity_log (
     -- lib/activity-chain.js appendEntry(), inside a row-locked transaction.
     prev_hash       CHAR(64),
     entry_hash      CHAR(64),
-    FOREIGN KEY (user_id) REFERENCES users(id),
+    -- No FOREIGN KEY on user_id / acting_user_id: audit rows keep the user id
+    -- after the user is deleted, because user_id is part of entry_hash and
+    -- nulling it would break the hash chain (see lib/user-deletion.js).
+    -- Existing DBs have those two FKs dropped at boot by lib/schema-check.js.
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL,
-    FOREIGN KEY (acting_user_id) REFERENCES users(id)
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE INDEX idx_activity_log_time ON activity_log(created_at DESC);

@@ -57,7 +57,13 @@ async function logActivity(userId, action, details = null, deviceId = null, ipAd
 
 async function getActivity(options = {}) {
   const { userId, deviceId, limit = 50, offset = 0 } = options;
-  let sql = `SELECT al.*, u.name as user_name, u.email as user_email
+  // Audit rows keep user_id after the user is deleted (it is hashed - see
+  // lib/user-deletion.js), so a row whose user no longer exists is labelled
+  // 'Deleted user'; user_email is then NULL (no users row). Rows with no user
+  // (system events) and rows for existing users are unchanged.
+  let sql = `SELECT al.*,
+      CASE WHEN al.user_id IS NOT NULL AND u.id IS NULL THEN 'Deleted user' ELSE u.name END as user_name,
+      u.email as user_email
     FROM activity_log al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`;
   const params = [];
 

@@ -53,7 +53,10 @@ const NULLABLE_USER_REFS = [
   ['content', 'user_id'], ['devices', 'user_id'], ['layouts', 'user_id'], ['widgets', 'user_id'],
   ['workspaces', 'created_by'], ['organization_members', 'invited_by'], ['workspace_members', 'invited_by'],
   ['team_members', 'invited_by'], ['device_fingerprints', 'user_id'],
-  ['activity_log', 'user_id'], ['activity_log', 'acting_user_id'],
+  // activity_log.user_id / acting_user_id are deliberately NOT here: user_id is
+  // part of each audit row's hash (lib/activity-chain.js), so nulling it would
+  // break the tamper-evident chain. Audit rows keep the deleted user's id (the
+  // FKs to users were dropped for this); the audit view labels them "Deleted user".
 ];
 // NOT NULL legacy creator columns on workspace-scoped resources -> reassign to
 // the resource's org owner (fallback: the acting admin) so the row survives.

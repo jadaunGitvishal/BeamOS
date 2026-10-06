@@ -140,33 +140,76 @@ before it. `GET /api/activity/verify-integrity` (optionally with
 `?start_id=&end_id=`) walks the chain and reports altered, unlinked or missing
 rows. See `lib/activity-chain.js` for the exact serialization.
 
+## User deletion
+
+Deleting a user does not change any of their audit rows' hashed columns.
+`user_id` and `acting_user_id` keep the deleted user's id, so the hash chain
+stays valid. What is deleted with the user is their `users` row, which holds
+their name and email. The audit view (`GET /api/activity`, its export, and the
+Activity page) labels those rows **"Deleted user"**, and the email comes back
+empty.
+
+How this works:
+
+- `activity_log` has no foreign keys to `users`, which is what lets a row
+  reference a user who no longer exists. `schema.sql` doesn't declare them.
+  On an existing database, the startup schema check
+  (`dropUserForeignKeys` in
+  [`server/lib/schema-check.js`](../server/lib/schema-check.js)) looks up any
+  `activity_log` foreign keys that reference `users` in `information_schema`
+  and drops them. It logs each one it drops, keeps the indexes, and does
+  nothing once none are left.
+- `deleteUserCascade`
+  ([`server/lib/user-deletion.js`](../server/lib/user-deletion.js)) no longer
+  sets `activity_log.user_id` / `acting_user_id` to `NULL`.
+- Deleting an organization or workspace still sets `workspace_id` /
+  `organization_id` to `NULL` on audit rows. Those columns are not hashed, so
+  the chain is unaffected.
+
+**Limitation: rows damaged before this fix can't be repaired.** Before the fix,
+deleting a user nulled `user_id` on their rows. Those rows will keep failing
+verification as `content_altered`, because the original id is gone and
+re-hashing them would defeat the point of the chain. Production has no data
+yet, so it isn't affected. A local or test database can be reset. A local
+development database checked on 2026-10-06 had about 3,000 such rows from test
+cleanups, so a whole-chain verification there reports `ok: false`.
+
+**Privacy note.** Some `details` strings contain email addresses. Examples are
+`auth:login_failed`, `auth:login_success`, `account_linked_microsoft`, SCIM
+provisioning events, and `delete_user` (which records the deleted user's
+email). `details` is part of the row hash, so these can't be scrubbed when a
+user is deleted without breaking the chain. They are removed only when
+retention pruning deletes the row.
+
 ## Known issues
 
 These are documented here and not fixed.
 
-1. **Deleting a user breaks the chain for that user's rows.**
-   `deleteUserCascade` sets `activity_log.user_id` to `NULL`
-   ([`server/lib/user-deletion.js:56`](../server/lib/user-deletion.js)), but
-   `user_id` is part of the row hash. Every row belonging to a deleted user then
-   fails verification as `content_altered`. This happens in production and also
-   in every test that cleans up a user with audit rows. A local development
-   database checked on 2026-10-06 had 3,029 such rows, so whole-chain
-   verification there reports `ok: false`. That is why
-   `test/audit-data-access.test.js` verifies only the range of rows it wrote
-   itself, before its cleanup runs.
-2. **Refused `/api/auth/*` requests are not logged.** `/api/auth` is mounted
+1. **Refused `/api/auth/*` requests are not logged.** `/api/auth` is mounted
    before `activityLogger` in `server.js`, so a `403` there (for example a
    non-admin calling `GET /api/auth/users`) produces no `ACCESS_DENIED` entry.
    Successful `GET /api/auth/users` reads are still logged, because `auditRead`
    is attached to that route directly. Login failures have their own
    `auth:login_failed` entries.
-3. **A mysqldump that fails mid-stream is logged as completed.**
+2. **A mysqldump that fails mid-stream is logged as completed.**
    `/api/status/backup` pipes mysqldump's stdout into the response. If
    mysqldump exits non-zero after the headers are sent (bad credentials, a
    lost connection), stdout simply ends: the response still finishes with
    status `200`, so the entry says `outcome=completed` even though the file is
    empty or truncated. The failure appears only in the server console
    (`[backup] mysqldump exited …`).
+3. **Pruning makes the chain fail verification.** `pruneActivityLog`
+   (`DELETE /api/activity/prune`) deletes the oldest rows but leaves
+   `activity_log_chain` untouched. After a prune, a whole-chain
+   `verify-integrity` reports two failures:
+   - `broken_link` on the first remaining row. Its `prev_hash` points at a
+     deleted row, while the verifier expects the genesis hash.
+   - `count_mismatch`. `entry_count` still counts the deleted rows.
+
+   A ranged check that starts at the first remaining row fails the same way;
+   one that starts any later passes. This was confirmed with the real
+   `verifyChain` over a simulated prune. Retention pruning and verification
+   need to be reconciled (tracked separately).
 
 ## Tests
 
@@ -184,3 +227,14 @@ uses the real app in-process against real MySQL. It covers:
 - a refused read;
 - ordinary `GET`s producing no entry;
 - a chain verification over the rows the test wrote.
+
+[`server/test/audit-user-deletion.test.js`](../server/test/audit-user-deletion.test.js)
+covers:
+
+- deleting a user through the real admin route: their rows keep `user_id` and
+  `acting_user_id`, and the chain over those rows verifies;
+- the "Deleted user" label in the audit list and export;
+- organization and workspace deletion still nulling `workspace_id` /
+  `organization_id` without breaking the chain;
+- the foreign-key repair on a scratch table (and that a second run is a no-op);
+- the startup repair's result on the real `activity_log`.
