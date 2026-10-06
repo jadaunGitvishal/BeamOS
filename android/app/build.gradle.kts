@@ -97,7 +97,10 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-rtsp:1.2.1")
 
     // Socket.IO client
-    implementation("io.socket:socket.io-client:2.1.0")
+    implementation("io.socket:socket.io-client:2.1.0") {
+        // Android provides org.json on the platform classpath and always loads it first, so the bundled copy (via engine.io-client) was never used at runtime; excluded to clear DuplicatePlatformClasses.
+        exclude(group = "org.json", module = "json")
+    }
 
     // WorkManager for background downloads
     implementation("androidx.work:work-runtime-ktx:2.9.0")
