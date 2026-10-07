@@ -50,6 +50,30 @@ Someone covering two areas gets both. A regional viewer with no regions sees
 nothing. Change their regions any time with the **Regions** button on their
 row.
 
+## Reports you'll receive
+
+Regional viewers get screen-runtime reports by email. Each email has a summary
+in the body and attaches an Excel file listing every screen, plus a PDF
+listing every screen that was never online and the 50 with the lowest uptime.
+
+| Scope | Reports |
+|---|---|
+| A territory or area (TSE, ASM) | Daily, for yesterday |
+| A cluster or region (CM, RTMM) | Weekly (Monday to Sunday) and monthly |
+
+- Someone with both kinds of scope gets all three. Each report covers all of
+  their regions in that organization.
+- **Days are UTC.** In India, a day runs from 05:30 IST to 05:30 IST the next
+  day, so the daily report arrives after 05:30 IST.
+- Reports always use the person's regions **at the time of sending**, so scope
+  changes apply to the next report.
+- Deactivated accounts and people whose regions contain no workspaces don't
+  get reports. A report that fails to send isn't retried.
+- Admins and owners keep their existing proof-of-play reports.
+
+Details, including how a zero-runtime screen is defined, are in
+[regional-reports.md](regional-reports.md).
+
 ## Good to know
 
 - **Read-only.** Regional viewers can view and export everything in their

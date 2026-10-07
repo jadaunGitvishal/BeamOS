@@ -27,6 +27,9 @@ const defaultEmail = require('./email');
 const config = require('../config');
 const { getProofOfPlaySummary } = require('../lib/proof-of-play');
 const { renderSectionedPdf, renderSectionedXlsx } = require('../lib/report-export');
+// PMI Ref 66: regional runtime reports ride on the same tick (called through the module
+// object, after the digests, in their own try/catch).
+const regionalReport = require('./regional-report');
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -328,7 +331,17 @@ async function runReportDigests(db = defaultDb, email = defaultEmail, opts = {})
   const part = (r) => (r.error ? `error (${r.error})` : r.ran ? `sent ${r.sent} (pdf+xlsx)` : 'skipped');
   console.log(`[report-digest] tick: daily ${part(daily)}, monthly ${part(monthly)}`);
 
-  return { daily, monthly };
+  // PMI Ref 66: regional runtime reports. Run after the digests and isolated, so a
+  // failure here can't affect them; it logs its own `[regional-report] tick:` line.
+  let regional;
+  try {
+    regional = await regionalReport.runRegionalReports(db, email, { now });
+  } catch (e) {
+    console.error(`[report-digest] regional runtime reports failed: ${e.stack || e.message}`);
+    regional = { error: e.message };
+  }
+
+  return { daily, monthly, regional };
 }
 
 function startReportDigests() {
