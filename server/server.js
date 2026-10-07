@@ -1018,6 +1018,13 @@ async function boot() {
         return res.status(403).json({
           error: "No workspace context. Switch to a workspace before pairing.",
         });
+      // Pairing claims a device into this workspace - a write. Refuse read-only
+      // callers (workspace_viewer, or a synthetic viewer such as an org-wide
+      // field_technician) with the standard write-gate check, BEFORE the code is
+      // looked up, so the code stays unclaimed and can't be probed.
+      if (!req.actingAs && req.workspaceRole === "workspace_viewer") {
+        return res.status(403).json({ error: "Read-only access" });
+      }
 
       const device = await db
         .prepare("SELECT * FROM devices WHERE pairing_code = ?")

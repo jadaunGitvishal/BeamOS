@@ -82,8 +82,19 @@ function summarize(results) {
   return { sent, offline, total: results.length, results };
 }
 
+// Showing or clearing an overlay changes what a screen displays - a write. Refuse a
+// read-only caller (workspace_viewer, or a synthetic viewer such as an org-wide
+// field_technician) with the standard write-gate check, before any device/group
+// lookup or emit. Runs after requireScope, which still gates API tokens as before.
+function denyReadOnly(req, res, next) {
+  if (!req.actingAs && req.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
+  next();
+}
+
 // POST /api/pip — show an overlay on a device or group.
-router.post('/', requireScope('full'), asyncHandler(async (req, res) => {
+router.post('/', requireScope('full'), denyReadOnly, asyncHandler(async (req, res) => {
   const b = req.body || {};
 
   if (!b.device_id) return res.status(400).json({ error: 'device_id required (device or group id)' });
@@ -158,7 +169,7 @@ const handleClear = asyncHandler(async (req, res) => {
   res.json({ success: true, target: targets.kind, ...summary });
 });
 
-router.post('/clear', requireScope('full'), handleClear);
-router.delete('/', requireScope('full'), handleClear);
+router.post('/clear', requireScope('full'), denyReadOnly, handleClear);
+router.delete('/', requireScope('full'), denyReadOnly, handleClear);
 
 module.exports = router;

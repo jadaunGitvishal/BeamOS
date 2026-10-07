@@ -314,6 +314,13 @@ router.delete('/:id/zones/:zoneId', asyncHandler(async (req, res) => {
 // destination lands in the caller's current workspace.
 router.post('/:id/duplicate', asyncHandler(async (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before duplicating a layout.' });
+  // The copy is CREATED in the caller's workspace, so this is a write there - the
+  // same viewer guard as POST / (create). The source only needs read access
+  // (checkLayoutRead): "Use template" duplicates a platform template, which
+  // checkLayoutWrite would reserve for platform admins.
+  if (!req.actingAs && req.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
   const source = await checkLayoutRead(req, res);
   if (!source) return;
 

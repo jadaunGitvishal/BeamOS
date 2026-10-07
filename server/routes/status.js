@@ -325,7 +325,19 @@ const importUpload = multer({
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 }); // 2GB max
 
-router.post("/import", requireAuth, resolveTenancy, importUpload.single("file"), async (req, res) => {
+// The import writes devices/content/widgets/playlists/... into the resolved
+// workspace, so a read-only caller (workspace_viewer, or a synthetic viewer such as
+// an org-wide field_technician) is refused with the same check every other write
+// route uses. Runs as middleware BEFORE multer, so a refused upload is never
+// stored in the import temp dir.
+function denyReadOnlyImport(req, res, next) {
+  if (req.workspaceId && !req.actingAs && req.workspaceRole === "workspace_viewer") {
+    return res.status(403).json({ error: "Read-only access" });
+  }
+  next();
+}
+
+router.post("/import", requireAuth, resolveTenancy, denyReadOnlyImport, importUpload.single("file"), async (req, res) => {
   const userId = req.user.id;
   // resolveTenancy already re-validates any candidate workspace against live
   // membership/accessContext (and applies the same first-accessible-workspace
