@@ -166,10 +166,16 @@ Two caveats, documented rather than changed:
 
 - **Field-technician OTP (Ref 43) stores nothing, but it is a fixed
   placeholder code (`000999`) in [`routes/field-auth.js`](../server/routes/field-auth.js).**
-  This isn't an encryption issue. It's an authentication placeholder the
-  Ref 43 docs already call out. It must be replaced with a real per-request
-  code before field login is exposed. It is listed here so the audit doesn't
-  look as if it missed it.
+  This isn't an encryption issue. It's an authentication placeholder, now
+  contained: the route is dev/test only, **disabled by default**
+  (`FIELD_OTP_ENABLED`, not mounted unless set), **refused in production**
+  (the server won't start with it set under `NODE_ENV=production`), and it
+  only issues sessions to technician-only accounts (no other org role, no
+  workspace membership, no TOTP). It must be replaced with a real
+  per-request SMS code (Stage 2) before field phone login is used in
+  production. Until then, technicians sign in with email and password, and
+  technicians in an SSO-only org have no production sign-in. It is listed
+  here so the audit doesn't look as if it missed it.
 - **Everything else in the database is plaintext at the application layer**:
   content metadata, telemetry, tickets, proof-of-play, users' names, emails
   and phones. Protecting it relies on database or disk encryption, an

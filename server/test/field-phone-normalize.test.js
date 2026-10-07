@@ -13,6 +13,8 @@ const Database = require('better-sqlite3');
 
 process.env.JWT_SECRET = 'test-secret-field-phone';
 process.env.FIELD_AUTH_DEFAULT_CC = '91';
+// PMI: the placeholder OTP route is off unless FIELD_OTP_ENABLED (dev/test only).
+process.env.FIELD_OTP_ENABLED = 'true';
 
 // ---------------- pure unit: normalizePhone ----------------
 const { normalizePhone } = require('../lib/field-phone');
@@ -65,7 +67,7 @@ db.exec(`
     password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
     role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
     must_change_password INTEGER NOT NULL DEFAULT 0, phone TEXT UNIQUE, last_login INTEGER,
-    updated_at INTEGER DEFAULT 0, deactivated_at INTEGER
+    updated_at INTEGER DEFAULT 0, deactivated_at INTEGER, totp_enabled INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE workspace_members (
     id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT, user_id TEXT, role TEXT, joined_at INTEGER DEFAULT 0
@@ -81,6 +83,8 @@ const express = require('express');
 const { generateToken, requireAuth } = require('../middleware/auth');
 
 db.prepare("INSERT INTO users (id,email,role) VALUES ('u-tech','tech@t.test','user')").run();
+// PMI: field OTP is technician-only - u-tech holds just an org-wide field_technician row.
+db.prepare("INSERT INTO organization_members (organization_id,user_id,role) VALUES ('org-x','u-tech','field_technician')").run();
 db.prepare("INSERT INTO users (id,email,role,phone) VALUES ('u-other','other@t.test','user','+919999900000')").run();
 
 const app = express();

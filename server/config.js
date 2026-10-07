@@ -250,6 +250,13 @@ module.exports = {
   disableRegistration: ["true", "1"].includes(
     String(process.env.DISABLE_REGISTRATION || "").toLowerCase(),
   ),
+  // PMI security fix: the field-technician phone OTP (routes/field-auth.js) is a
+  // dev/test PLACEHOLDER that accepts one fixed code. Default OFF: /api/field-auth
+  // is not mounted at all. server.js refuses to start with this set when
+  // NODE_ENV=production. Only "true"/"1" (any case) enable it.
+  fieldOtpEnabled: ["true", "1"].includes(
+    String(process.env.FIELD_OTP_ENABLED || "").trim().toLowerCase(),
+  ),
   // Redirect / -> /app instead of serving the marketing landing page.
   // For self-hosted internal deployments that don't want the public homepage.
   disableHomepage: ["true", "1"].includes(

@@ -30,15 +30,19 @@ const { generateToken: generateApiToken, hashToken, displayPrefix } = require('.
 
 let app;
 const created = [];
+// PMI: the placeholder OTP route is off unless FIELD_OTP_ENABLED (dev/test only).
+const savedFieldOtp = config.fieldOtpEnabled;
 
 test.before(async () => {
   await initDb(); // applies schema.sql + schema-check repair (adds users.deactivated_at on an existing DB)
+  config.fieldOtpEnabled = true;
   app = await startInProcessApp({ only: ['/api/devices'] });
   // field-tech OTP login isn't in the helper's mount list (server.js mounts it
   // directly) - mount the real router here the same way.
   app.app.use('/api/field-auth', require('../routes/field-auth'));
 });
 test.after(async () => {
+  config.fieldOtpEnabled = savedFieldOtp;
   await cleanupUsers(app.db, created);
   await app.stop();
 });
@@ -133,6 +137,10 @@ test('field-tech OTP login: a deactivated technician gets 403 (after the code ch
   const u = await register();
   const phone = `+9199${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
   await app.db.prepare('UPDATE users SET phone = ? WHERE id = ?').run(phone, u.id);
+  // PMI: field OTP is technician-only - turn the registered owner into one (the org
+  // row keeps owner_user_id, so cleanupUsers still cascades it).
+  await app.db.prepare('DELETE FROM workspace_members WHERE user_id = ?').run(u.id);
+  await app.db.prepare("UPDATE organization_members SET role = 'field_technician' WHERE user_id = ?").run(u.id);
   await setUserDeactivated(app.db, u.id, true, { via: 'test' });
   const ok = await post('/api/field-auth/verify-otp', { phone, code: '000999' });
   assert.equal(ok.status, 403);

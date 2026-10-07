@@ -503,9 +503,14 @@ app.use("/api/auth", require("./routes/auth"));
 // The OTP is a hardcoded dev stub (see routes/field-auth.js) - the per-IP rate
 // limit here is the only brute-force control, so keep it tight. verify-otp is
 // the 6-digit-guess surface; send-otp just logs.
-app.use("/api/field-auth/verify-otp", rateLimit(60000, 10));
-app.use("/api/field-auth/send-otp", rateLimit(60000, 5));
-app.use("/api/field-auth", require("./routes/field-auth"));
+// PMI security fix: mounted ONLY when FIELD_OTP_ENABLED (default off) - otherwise
+// nothing is registered and both routes fall through to the ordinary 404. boot()
+// refuses to start with the flag set under NODE_ENV=production.
+if (config.fieldOtpEnabled) {
+  app.use("/api/field-auth/verify-otp", rateLimit(60000, 10));
+  app.use("/api/field-auth/send-otp", rateLimit(60000, 5));
+  app.use("/api/field-auth", require("./routes/field-auth"));
+}
 // Rate limit pairing to prevent brute force (5 attempts per minute per IP).
 // #88: bind this to the whole /api/provision surface, not just /pair - the bare
 // POST /api/provision (routes/provisioning.js) is a second pairing endpoint that
@@ -907,6 +912,13 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 // /api/branding, etc.) already happened synchronously, and the process can't receive any HTTP
 // traffic until server.listen() inside boot() actually runs.
 async function boot() {
+  // PMI security fix: the field OTP accepts one fixed, publicly known code. Never
+  // allow it in production - fail startup (non-zero exit via boot().catch below).
+  if (isProd && config.fieldOtpEnabled) {
+    throw new Error(
+      "FIELD_OTP_ENABLED cannot be used in production: the field OTP is a development/test placeholder",
+    );
+  }
   const { db, initDb } = require("./db/database");
   await initDb();
 

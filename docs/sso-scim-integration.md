@@ -194,8 +194,20 @@ works, because password login only accepts `auth_provider = 'local'` accounts.
 - **Platform admins** (`superadmin`, `platform_admin`) are always exempt.
   They are the recovery path if the tenant is misconfigured or Entra is
   unavailable.
-- **Field technicians' SMS OTP login** ([`routes/field-auth.js`](../server/routes/field-auth.js))
-  is unchanged.
+- **Field technicians' phone OTP login** ([`routes/field-auth.js`](../server/routes/field-auth.js))
+  is not subject to the SSO-only check, but it is no longer a way around it.
+  The route is a dev/test placeholder that is **off by default**
+  (`FIELD_OTP_ENABLED`, not mounted unless set) and **impossible in
+  production** (the server refuses to start with it set under
+  `NODE_ENV=production`) until a real SMS OTP ships (Stage 2). It only ever
+  issues a session to **technician-only** accounts: `users.role = 'user'`,
+  only `field_technician` org memberships, no workspace membership, no TOTP.
+  Everyone else, including an org admin or owner of an SSO-only org who has a
+  phone on file, gets the same generic `401` as a wrong code. Consequence:
+  **technicians in an SSO-only org have no production sign-in until Stage 2**,
+  because password login refuses them (`SSO_REQUIRED`) and the OTP route is
+  off in production. (Earlier versions of this note said the OTP login was
+  "unchanged"; that was the bypass fixed here.)
 - **Existing sessions** are not logged out. They expire naturally (session
   JWT lifetime, currently 7 days). To cut someone off immediately, deactivate
   the account (Part 2).

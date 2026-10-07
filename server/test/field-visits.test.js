@@ -23,6 +23,8 @@ const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
 
 process.env.JWT_SECRET = 'test-secret-field-visits';
+// PMI: the placeholder OTP route is off unless FIELD_OTP_ENABLED (dev/test only).
+process.env.FIELD_OTP_ENABLED = 'true';
 const PHOTO_DIR = path.join(os.tmpdir(), 'beamos-fv-test-' + crypto.randomBytes(4).toString('hex'));
 fs.mkdirSync(PHOTO_DIR, { recursive: true });
 process.env.UPLOADS_DIR = PHOTO_DIR; // config.fieldVisitPhotosDir = <this>/field-visit-photos
@@ -35,7 +37,8 @@ db.exec(`
     id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
     password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
     role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, phone TEXT UNIQUE, last_login INTEGER, deactivated_at INTEGER
+    must_change_password INTEGER NOT NULL DEFAULT 0, phone TEXT UNIQUE, last_login INTEGER, deactivated_at INTEGER,
+    totp_enabled INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL);
   CREATE TABLE organization_members (

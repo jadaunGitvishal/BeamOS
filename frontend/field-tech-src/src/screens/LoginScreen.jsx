@@ -14,6 +14,11 @@ import { normalizePhone } from "../lib/phone.js";
 // auth backend. Picking "Management sign-in" only swaps which form is shown;
 // the phone+OTP form and submitPhone/submitCode below are untouched.
 
+// PMI security fix: /api/field-auth is disabled by default (FIELD_OTP_ENABLED) and
+// never available in production, so both phone routes can answer 404. Then point
+// the user at the email/password form instead of showing a raw "Not found".
+const PHONE_UNAVAILABLE = "Phone login is currently unavailable. Please use email and password.";
+
 export default function LoginScreen({ onAuthed }) {
   // "phone" | "otp" | "email" — "email" is the new management path; "phone"
   // and "otp" are the original field-technician flow, unchanged.
@@ -34,6 +39,15 @@ export default function LoginScreen({ onAuthed }) {
     return fallback;
   }
 
+  // True (and the screen switched to the email form) when the phone route is absent.
+  function phoneLoginUnavailable(err) {
+    if (!(err instanceof ApiError) || err.status !== 404) return false;
+    setCode("");
+    setStep("email");
+    setError(PHONE_UNAVAILABLE);
+    return true;
+  }
+
   async function submitPhone(e) {
     e.preventDefault();
     if (busy) return;
@@ -51,6 +65,7 @@ export default function LoginScreen({ onAuthed }) {
       setCode("");
       setStep("otp");
     } catch (err) {
+      if (phoneLoginUnavailable(err)) return;
       setError(messageFor(err, "Could not send the code. Try again."));
     } finally {
       setBusy(false);
@@ -82,6 +97,7 @@ export default function LoginScreen({ onAuthed }) {
       }
       onAuthed(me, "technician");
     } catch (err) {
+      if (phoneLoginUnavailable(err)) return;
       setError(messageFor(err, "That code didn’t work. Try again."));
     } finally {
       setBusy(false);
