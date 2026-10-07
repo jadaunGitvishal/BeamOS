@@ -81,13 +81,16 @@ export const api = {
   // Regions (Phase 3 Stage A). Org-level: org_owner/org_admin (or platform admin)
   // of the org, enforced server-side (canManageOrgRegions).
   getOrgRegions: (orgId) => request(`/organizations/${encodeURIComponent(orgId)}/regions`),
-  createOrgRegion: (orgId, name) => request(`/organizations/${encodeURIComponent(orgId)}/regions`, {
+  // Refs 49/67: level (region > cluster > area > territory) and parent_id are
+  // optional; omitted = a top-level 'region'.
+  createOrgRegion: (orgId, name, level, parent_id) => request(`/organizations/${encodeURIComponent(orgId)}/regions`, {
     method: 'POST',
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, level: level || undefined, parent_id: parent_id || null }),
   }),
-  renameOrgRegion: (orgId, id, name) => request(`/organizations/${encodeURIComponent(orgId)}/regions/${encodeURIComponent(id)}`, {
+  // patch: any of { name, level, parent_id } (parent_id null = top level).
+  updateOrgRegion: (orgId, id, patch) => request(`/organizations/${encodeURIComponent(orgId)}/regions/${encodeURIComponent(id)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(patch),
   }),
   deleteOrgRegion: (orgId, id) => request(`/organizations/${encodeURIComponent(orgId)}/regions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // Ref 5: org SSO-only mode. Same org-admin gate as regions.
@@ -265,6 +268,12 @@ export const api = {
   addOrgMember: (orgId, email, role) => request(`/organizations/${orgId}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
   updateOrgMemberRole: (orgId, userId, role) => request(`/organizations/${orgId}/members/${userId}`, { method: 'PUT', body: JSON.stringify({ role }) }),
   removeOrgMember: (orgId, userId) => request(`/organizations/${orgId}/members/${userId}`, { method: 'DELETE' }),
+  // Refs 49/67: a regional_viewer's region scopes (org_owner/org_admin). PUT replaces the set.
+  getMemberRegionScopes: (orgId, userId) => request(`/organizations/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}/region-scopes`),
+  setMemberRegionScopes: (orgId, userId, region_ids) => request(`/organizations/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}/region-scopes`, {
+    method: 'PUT',
+    body: JSON.stringify({ region_ids }),
+  }),
 
   // Admin-provisioned user creation (#10). data: { email, name, password,
   // workspaceId, role, mustChangePassword }

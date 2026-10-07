@@ -22,6 +22,7 @@ import { api } from '../api.js';
 import { t } from '../i18n.js';
 import { showToast } from '../components/toast.js';
 import { openAddOrgMemberModal } from '../components/org-member-add-modal.js';
+import { openRegionScopeModal } from '../components/region-scope-modal.js'; // Refs 49/67
 import { isPlatformAdmin } from '../utils.js';
 
 export async function render(container, orgId) {
@@ -68,11 +69,27 @@ export async function render(container, orgId) {
     }
     return;
   }
+  // The router can start a second render of this view while this one awaits;
+  // a superseded render must stop here, or it would wire a second set of
+  // handlers onto the live page (or throw on its detached header).
+  if (!content.isConnected) return;
 
   const canAdmin =
     isPlatformAdmin(me) ||
     (me?.current_org_role === "org_owner" &&
       me?.current_organization?.id === orgId);
+  // Refs 49/67: a regional_viewer's region scopes are managed by org_owner OR
+  // org_admin (same tier as Settings -> Regions; the server re-checks).
+  const canScopes =
+    isPlatformAdmin(me) ||
+    (["org_owner", "org_admin"].includes(me?.current_org_role) &&
+      me?.current_organization?.id === orgId);
+  if (canScopes) {
+    await Promise.all(members.filter(m => m.role === 'regional_viewer').map(async (m) => {
+      try { m._scopes = (await api.getMemberRegionScopes(orgId, m.user_id)).regions; } catch { m._scopes = null; }
+    }));
+  }
+  if (!content.isConnected) return; // superseded while loading scopes (see above)
   // Org name isn't returned by /members (it's a members-only endpoint) - the
   // Admin panel passes it through as a hash query param so the modal title
   // can show it without an extra request. Falls back to empty if navigated
@@ -88,6 +105,13 @@ export async function render(container, orgId) {
         onSuccess: (result) => {
           showToast(t('org_members.success.member_added', { email: result.email }), 'success');
           render(container, orgId);
+          // Refs 49/67: a new regional viewer sees nothing until regions are chosen.
+          if (result.role === 'regional_viewer' && canScopes) {
+            showToast(t('org_members.scopes.added_hint', { email: result.email }), 'info');
+            openRegionScopeModal({ orgId, userId: result.user_id, name: result.email }, {
+              onSaved: () => { showToast(t('org_members.scopes.saved'), 'success'); render(container, orgId); },
+            });
+          }
         },
         mapError: mapMutationError,
       });
@@ -99,30 +123,55 @@ export async function render(container, orgId) {
       <h3 style="font-size:15px;margin-bottom:12px">${t('org_members.section.members')}${members.length > 0 ? ` <span style="color:var(--text-muted);font-weight:400;font-size:13px">(${members.length})</span>` : ''}</h3>
       ${members.length === 0
         ? `<p style="color:var(--text-muted);font-size:13px">${t('org_members.empty')}</p>`
-        : `<div class="members-list">${members.map(m => renderMemberRow(m, { canAdmin })).join('')}</div>`}
+        : `<div class="members-list">${members.map(m => renderMemberRow(m, { canAdmin, canScopes })).join('')}</div>`}
     </div>
   `;
 
   if (canAdmin) attachMutationHandlers(container, orgId);
+  if (canScopes) {
+    container.querySelectorAll('[data-region-scopes]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        openRegionScopeModal({ orgId, userId: btn.dataset.regionScopes, name: btn.dataset.memberName }, {
+          onSaved: () => { showToast(t('org_members.scopes.saved'), 'success'); render(container, orgId); },
+        });
+      });
+    });
+  }
 }
 
 function renderMemberRow(m, opts = {}) {
-  const { canAdmin = false } = opts;
+  const { canAdmin = false, canScopes = false } = opts;
   const initial = ((m.name || m.email || '?')[0] || '?').toUpperCase();
+  // A role this view doesn't offer (e.g. field_technician) still shows as itself.
+  const roleChoices = ORG_ROLES.includes(m.role) ? ORG_ROLES : [...ORG_ROLES, m.role];
 
   const roleCell = canAdmin
     ? `<select class="member-role-select" data-member-id="${esc(m.user_id)}" aria-label="${esc(t('org_members.col.role'))}">
-         ${ORG_ROLES.map(r => `<option value="${r}"${r === m.role ? ' selected' : ''}>${esc(t('members.role.' + r))}</option>`).join('')}
+         ${roleChoices.map(r => `<option value="${esc(r)}"${r === m.role ? ' selected' : ''}>${esc(t('members.role.' + r))}</option>`).join('')}
        </select>`
     : `<div class="member-role">${esc(t('members.role.' + m.role))}</div>`;
 
-  const actionsCell = canAdmin
+  // Refs 49/67: a regional viewer's regions, and the button that edits them.
+  const isRegional = m.role === 'regional_viewer';
+  const scopeLine = isRegional && Array.isArray(m._scopes)
+    ? `<div class="member-email" style="color:var(--text-muted)">${esc(m._scopes.length
+        ? t('org_members.scopes.summary', { list: m._scopes.map(r => r.name).join(', ') })
+        : t('org_members.scopes.none'))}</div>`
+    : '';
+  const scopeBtn = isRegional && canScopes
+    ? `<button class="member-action-btn" type="button" data-region-scopes="${esc(m.user_id)}"
+               data-member-name="${esc(m.name || m.email)}"
+               aria-label="${esc(t('org_members.scopes.button'))}" title="${esc(t('org_members.scopes.button'))}">${REGIONS_ICON}</button>`
+    : '';
+
+  const actionsCell = canAdmin || scopeBtn
     ? `<div class="member-actions">
-         <button class="member-action-btn member-action-btn--danger" type="button"
+         ${scopeBtn}
+         ${canAdmin ? `<button class="member-action-btn member-action-btn--danger" type="button"
                  data-remove-member="${esc(m.user_id)}"
                  data-member-name="${esc(m.name || m.email)}"
                  aria-label="${esc(t('org_members.button.remove'))}"
-                 title="${esc(t('org_members.button.remove'))}">${REMOVE_ICON}</button>
+                 title="${esc(t('org_members.button.remove'))}">${REMOVE_ICON}</button>` : ''}
        </div>`
     : '';
 
@@ -132,6 +181,7 @@ function renderMemberRow(m, opts = {}) {
       <div class="member-meta">
         <div class="member-name">${esc(m.name || m.email)}</div>
         <div class="member-email">${esc(m.email)}</div>
+        ${scopeLine}
       </div>
       ${roleCell}
       <div class="member-detail">${esc(formatDate(m.joined_at))}</div>
@@ -257,5 +307,8 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
-const ORG_ROLES = ['org_owner', 'org_admin'];
+const ORG_ROLES = ['org_owner', 'org_admin', 'regional_viewer'];
+// Refs 49/67: map-pin icon for a regional viewer's Regions button (icon-sized, like
+// the remove button, so the row still fits at phone widths).
+const REGIONS_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>';
 const REMOVE_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';

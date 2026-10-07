@@ -185,16 +185,55 @@ CREATE INDEX idx_organization_members_user ON organization_members(user_id);
 -- of regions; a workspace optionally belongs to one (workspaces.region_id, below,
 -- ON DELETE SET NULL — deleting a region unassigns its workspaces, never deletes
 -- them). Admin-managed via /api/organizations/:id/regions (org_admin+).
+-- Refs 49/67: regions form a tree per org. level is region > cluster > area >
+-- territory (PMI: RTMM, CM, ASM, TSE); a parent must be a strictly higher level
+-- (skipping levels is allowed), so depth is at most 4 and cycles are impossible.
+-- Existing flat rows become top-level 'region' nodes (lib/schema-check.js
+-- backfills level). The parent FK is composite (organization_id, parent_id) so a
+-- parent can only ever be in the same org; ON DELETE CASCADE lets org deletion
+-- work, while the API refuses to delete a region that still has children. Names
+-- are unique per parent: parent_key = COALESCE(parent_id, '') makes the top level
+-- one bucket too. VIRTUAL, not STORED: MySQL refuses a STORED generated column on
+-- the base column of a cascading FK.
 CREATE TABLE IF NOT EXISTS regions (
     id              VARCHAR(64) PRIMARY KEY,
     organization_id VARCHAR(64) NOT NULL,
     name            VARCHAR(255) NOT NULL,
+    level           VARCHAR(16) NULL,
+    parent_id       VARCHAR(64) NULL,
+    parent_key      VARCHAR(64) AS (COALESCE(parent_id, '')) VIRTUAL,
     created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
     updated_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
-    UNIQUE (organization_id, name),
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+    UNIQUE KEY uniq_regions_org_id (organization_id, id),
+    UNIQUE KEY uniq_regions_parent_name (organization_id, parent_key, name),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    CONSTRAINT fk_regions_parent FOREIGN KEY (organization_id, parent_id)
+        REFERENCES regions(organization_id, id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_regions_organization ON regions(organization_id);
+-- On a DB created before Refs 49/67 the CREATE TABLE above is a no-op; this gives it
+-- the (organization_id, id) key region_viewer_scopes' FK needs, before that table is
+-- created below ("duplicate key name" on a fresh DB is benign). The rest of the tree
+-- shape (level, parent_id, parent_key, per-parent names, parent FK) is added by the
+-- lib/schema-check.js startup repair.
+CREATE UNIQUE INDEX uniq_regions_org_id ON regions(organization_id, id);
+
+-- Refs 49/67: a regional_viewer's scopes (several per user). The user reads, read-
+-- only, every workspace whose region is a scope or below one (lib/region-scope.js).
+-- Both composite FKs keep a scope inside its org, and cascade it away when the
+-- region or the org membership goes (member removal, user deletion, org deletion).
+CREATE TABLE IF NOT EXISTS region_viewer_scopes (
+    organization_id VARCHAR(64) NOT NULL,
+    user_id         VARCHAR(64) NOT NULL,
+    region_id       VARCHAR(64) NOT NULL,
+    created_by      VARCHAR(64) NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (organization_id, user_id, region_id),
+    KEY idx_region_viewer_scopes_user (user_id),
+    FOREIGN KEY (organization_id, region_id) REFERENCES regions(organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, user_id) REFERENCES organization_members(organization_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS workspaces (
     id                    VARCHAR(64) PRIMARY KEY,

@@ -118,10 +118,13 @@ export function renderWorkspaceSwitcher(me) {
       ${sorted.map(w => {
         const countStr = formatResourceCount(w.device_count, 'switcher.devices_count', 'switcher.no_devices');
         const orgName = w.organization_name || '';
-        const subtitle = orgName && countStr ? esc(orgName) + ' · ' + esc(countStr)
-                       : orgName            ? esc(orgName)
-                       : countStr           ? esc(countStr)
-                                            : '';
+        const base = orgName && countStr ? esc(orgName) + ' · ' + esc(countStr)
+                   : orgName            ? esc(orgName)
+                   : countStr           ? esc(countStr)
+                                        : '';
+        // Refs 49/67: /me marks workspaces reached through a regional_viewer scope.
+        const regionalTag = w.access === 'regional' ? esc(t('switcher.regional_access')) : '';
+        const subtitle = base && regionalTag ? base + ' · ' + regionalTag : base || regionalTag;
         // Searchable haystack: org name + workspace name, lowercased.
         const haystack = `${orgName} ${w.name}`.toLowerCase();
         return `

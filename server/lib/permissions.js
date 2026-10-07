@@ -15,6 +15,7 @@
 'use strict';
 
 const { isPlatformRole, isPlatformStaff } = require('../middleware/auth');
+const { isWorkspaceInRegionalScope } = require('./region-scope'); // Refs 49/67
 
 // #13: platform staff (admin OR operator) get cross-org read/write. canRead and
 // canWrite include req.isPlatformStaff; canAdmin deliberately does NOT - it stays
@@ -131,7 +132,11 @@ async function canAccessWorkspace(db, user, workspace) {
   if (om && (om.role === 'org_owner' || om.role === 'org_admin')) return true;
   const wm = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(workspace.id, user.id);
-  return !!wm;
+  if (wm) return true;
+  // Refs 49/67: a regional_viewer reads workspaces inside their region scopes. Only
+  // this role - a field_technician still gets false here, exactly as before.
+  if (om && om.role === 'regional_viewer') return isWorkspaceInRegionalScope(db, user.id, workspace);
+  return false;
 }
 
 // Write-access companion sitting between canAccessWorkspace (any member) and

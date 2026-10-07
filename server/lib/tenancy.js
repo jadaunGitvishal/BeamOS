@@ -29,6 +29,8 @@
 const { db } = require('../db/database');
 const { isPlatformRole, isPlatformStaff } = require('../middleware/auth');
 const { asyncHandler } = require('./async-handler');
+// Refs 49/67: regional_viewer scope resolution (region tree + region_viewer_scopes).
+const { isWorkspaceInRegionalScope, regionalWorkspaceIds, firstRegionalWorkspace } = require('./region-scope');
 
 // Org roles that get cross-workspace ("acting as") access to every workspace
 // in their org, not just ones they're directly a member of. Single source of
@@ -108,6 +110,14 @@ async function accessContext(userId, role, workspace) {
   if (orgMembership && orgMembership.role === 'field_technician') {
     return { workspaceRole: 'workspace_viewer', actingAs: false };
   }
+  // Refs 49/67: a regional_viewer reads - read-only, exactly like the
+  // field_technician branch above - every workspace whose region is one of their
+  // scopes or below one (lib/region-scope.js). Out of scope, or a workspace with
+  // no region: no access. A direct workspace_members row (checked first) wins.
+  if (orgMembership && orgMembership.role === 'regional_viewer'
+      && await isWorkspaceInRegionalScope(db, userId, workspace)) {
+    return { workspaceRole: 'workspace_viewer', actingAs: false };
+  }
   return null;
 }
 
@@ -162,10 +172,17 @@ const resolveTenancy = asyncHandler(async function resolveTenancy(req, res, next
   if (!workspace) {
     // Fall back to the user's first workspace_members row.
     const first = await firstAccessibleWorkspace(req.user.id);
+    // Refs 49/67: a regional_viewer with no direct membership lands in their first
+    // in-scope workspace (resolved through accessContext like any other path).
+    const regional = first ? null : await firstRegionalWorkspace(db, req.user.id);
+    const regionalCtx = regional && await accessContext(req.user.id, req.user.role, regional);
     if (first) {
       workspace = first;
       const wm = await membershipOf(req.user.id, first.id);
       context = { workspaceRole: wm.role, actingAs: false };
+    } else if (regionalCtx) {
+      workspace = regional;
+      context = regionalCtx;
     } else if (isPlatformStaffUser) {
       // Platform staff (admin or operator) with no direct memberships: pick any
       // workspace (acting-as) so they land in a usable context. #13: operators
@@ -202,6 +219,7 @@ const resolveTenancy = asyncHandler(async function resolveTenancy(req, res, next
 // Enumerate every workspace_id the given user has any path into:
 //   - direct workspace_members rows
 //   - any workspace in an org where they are org_owner / org_admin / field_technician
+//   - Refs 49/67: as a regional_viewer, every workspace inside their region scopes
 //   - platform_admin / superadmin / operator: every workspace in the system
 // Used by socket.io rooms (Phase 2.3) to scope outbound broadcasts, and by
 // GET /organizations/:id/regions/sla-overview. /me's accessible_workspaces query
@@ -221,13 +239,15 @@ async function accessibleWorkspaceIds(userId, role) {
   if (isPlatformStaff(role)) {
     return (await db.prepare('SELECT id FROM workspaces').all()).map(r => r.id);
   }
-  return (await db.prepare(`
+  const ids = (await db.prepare(`
     SELECT workspace_id AS id FROM workspace_members WHERE user_id = ?
     UNION
     SELECT w.id FROM workspaces w
     JOIN organization_members om ON om.organization_id = w.organization_id
     WHERE om.user_id = ? AND om.role IN ('org_owner', 'org_admin', 'field_technician')
   `).all(userId, userId)).map(r => r.id);
+  const regional = await regionalWorkspaceIds(db, userId);
+  return regional.length ? [...new Set([...ids, ...regional])] : ids;
 }
 
 module.exports = {

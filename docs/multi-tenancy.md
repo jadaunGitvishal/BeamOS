@@ -54,7 +54,9 @@ access before it's accepted:
 2. `?workspace_id=` query param — same purpose, easier from a browser
 3. The JWT's `current_workspace_id` — the session's last-switched-to workspace
 4. The user's first `workspace_members` row (by `joined_at`)
-5. For `platform_admin` / `platform_operator` only, with no membership at
+5. (Refs 49/67) For a `regional_viewer` with no membership row: their first
+   workspace inside their region scopes
+6. For `platform_admin` / `platform_operator` only, with no membership at
    all: any workspace, so staff always land in a usable context
 
 An **explicit** candidate (steps 1–2 — the caller *named* a workspace on
@@ -67,8 +69,22 @@ candidate instead of 403ing the whole request.
 "No path into it" is checked by `accessContext()` — membership row, or
 org-wide access (`org_owner`/`org_admin` of the workspace's parent org), or
 platform staff, or (Ref 43) a `field_technician`'s org-wide *read-only*
-reach. Anything else returns `null`, and `resolveTenancy` treats that
-exactly like a missing workspace.
+reach, or (Refs 49/67) a `regional_viewer`'s *read-only* reach into the
+workspaces inside its region scopes. Anything else returns `null`, and
+`resolveTenancy` treats that exactly like a missing workspace.
+
+`/api/auth/me`'s `accessible_workspaces`, `POST /api/auth/switch-workspace`,
+the dashboard socket's room joins and the regions SLA rollup all take their
+answer from the same two functions, `accessContext()` and
+`accessibleWorkspaceIds()`, so they can't disagree. Each `/me` entry also
+carries `region_id` and `access`:
+
+| `access` | Meaning |
+|---|---|
+| `direct` | A `workspace_members` row |
+| `regional` | A region scope |
+| `org` | org_owner / org_admin / field_technician |
+| `platform` | Platform staff |
 
 ### The general pattern
 
@@ -209,6 +225,60 @@ not a re-implementation of the check:
   all return 403 across the org boundary
 - `RBAC: a workspace_admin (not an org member) cannot create a region`
 - `PATCH /workspaces/:id/region — RBAC + cross-org guard + unassign`
+
+#### Region tree and regional_viewer scopes (Refs 49/67)
+
+**Tree.** `regions` carries `level` (region > cluster > area > territory) and
+`parent_id`. A parent must be a strictly higher level. Levels can be skipped,
+and a node may sit at the top level at any level, so a tree is at most 4 deep
+and can't contain a cycle. The schema enforces the org boundary itself:
+
+- the parent foreign key is **composite**,
+  `(organization_id, parent_id) → regions(organization_id, id)`, so a parent
+  can only ever be in the same organization;
+- names are unique per parent, via
+  `UNIQUE(organization_id, parent_key, name)` with
+  `parent_key = COALESCE(parent_id, '')` (a VIRTUAL generated column).
+
+The API additionally refuses a cycle, a level change that would put a region
+at or below one of its children, and deleting a region that still has
+children.
+
+**Scopes.** `region_viewer_scopes (organization_id, user_id, region_id)` has
+two composite foreign keys:
+
+- to `regions(organization_id, id)`;
+- to `organization_members(organization_id, user_id)`.
+
+So a scope can't name another organization's region or a non-member, and it
+**cascades away** when:
+
+- the region is deleted;
+- the membership is removed (including by SCIM and by user deletion);
+- the organization is deleted.
+
+Changing a member's role away from `regional_viewer` deletes their scopes in
+the same transaction.
+
+**Resolution** ([`server/lib/region-scope.js`](../server/lib/region-scope.js)):
+
+- **Check one workspace:** walk up from the workspace's region with a
+  depth-limited recursive CTE.
+- **List all workspaces:** walk down from each scope.
+
+Every step matches `organization_id`, and the user's role must be
+`regional_viewer` in that org at query time, so a leftover scope grants
+nothing. A workspace with no region is never in scope. There is no cache:
+changes apply on the next request; socket rooms refresh on reconnect.
+
+**Tests:**
+
+| Test file | Covers |
+|---|---|
+| [`regions-hierarchy.test.js`](../server/test/regions-hierarchy.test.js) | The tree rules |
+| [`region-scopes-api.test.js`](../server/test/region-scopes-api.test.js) | Scope API, role change, audit |
+| [`regional-viewer-access.test.js`](../server/test/regional-viewer-access.test.js) | Exact visibility per scope across REST, switch-workspace, exports, `/me`, socket rooms, the SLA rollup, tokens and login; a deliberately inconsistent cross-org workspace; direct-membership-wins; cleanup |
+| [`viewer-write-denial.test.js`](../server/test/viewer-write-denial.test.js) | Every write route as a regional_viewer |
 
 ### 3.5 Reporting (Ref 48 / Ref 49)
 

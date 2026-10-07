@@ -185,9 +185,17 @@ export async function render(container) {
       <h3>${t("regions.title")}</h3>
       <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px">${esc(t("regions.desc"))}</p>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
-        <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px">
+        <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px">
           <label>${t("regions.col_name")}</label>
           <input type="text" id="regionName" class="input" placeholder="${esc(t("regions.name_placeholder"))}" maxlength="80">
+        </div>
+        <div class="form-group" style="margin-bottom:0;min-width:160px">
+          <label>${t("regions.col_level")}</label>
+          <select id="regionLevel" class="input" style="background:var(--bg-input)"></select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;min-width:200px">
+          <label>${t("regions.col_parent")}</label>
+          <select id="regionParent" class="input" style="background:var(--bg-input)"></select>
         </div>
         <button class="btn btn-primary btn-sm" id="regionCreateBtn">${t("regions.create")}</button>
       </div>
@@ -904,37 +912,131 @@ export async function render(container) {
     loadProvisioning();
   }
 
-  // ---- Phase 3 Stage A: Regions ----
+  // ---- Phase 3 Stage A: Regions (Refs 49/67: a tree) ----
   if (canManageRegions) {
     const regionsSection = document.getElementById("regionsSection");
     const orgId = regionsSection.dataset.orgId;
     const regionList = document.getElementById("regionList");
     const assignList = document.getElementById("regionAssignList");
+    const levelSel = document.getElementById("regionLevel");
+    const parentSel = document.getElementById("regionParent");
+    // Highest first. A parent must be a strictly higher level; levels can be skipped.
+    const REGION_LEVELS = ["region", "cluster", "area", "territory"];
+    const levelRank = (l) => REGION_LEVELS.indexOf(l || "region");
+    const levelLabel = (l) => t(`regions.level.${l || "region"}`);
     let regions = [];
+    let editingId = null;
+
+    const byId = () => new Map(regions.map((r) => [r.id, r]));
+    // "North › Central › Lahore" - the region's path from the top of its tree.
+    function regionPath(r, map = byId()) {
+      const names = [];
+      let cur = r;
+      for (let i = 0; cur && i < REGION_LEVELS.length; i++) {
+        names.unshift(cur.name);
+        cur = cur.parent_id ? map.get(cur.parent_id) : null;
+      }
+      return names.join(" › ");
+    }
+    // Depth-first, siblings by name: [{ r, depth }].
+    function treeOrder() {
+      const kids = new Map();
+      for (const r of regions) {
+        const k = r.parent_id || "";
+        if (!kids.has(k)) kids.set(k, []);
+        kids.get(k).push(r);
+      }
+      for (const list of kids.values()) list.sort((a, b) => a.name.localeCompare(b.name));
+      const out = [];
+      const walk = (pid, depth) => {
+        for (const r of kids.get(pid) || []) {
+          out.push({ r, depth });
+          if (depth < REGION_LEVELS.length) walk(r.id, depth + 1);
+        }
+      };
+      walk("", 0);
+      // anything unreachable (shouldn't happen) still gets listed
+      for (const r of regions) if (!out.some((x) => x.r.id === r.id)) out.push({ r, depth: 0 });
+      return out;
+    }
+    function descendantIds(id) {
+      const ids = new Set();
+      let frontier = [id];
+      while (frontier.length) {
+        const next = regions.filter((r) => frontier.includes(r.parent_id) && !ids.has(r.id)).map((r) => r.id);
+        next.forEach((x) => ids.add(x));
+        frontier = next;
+      }
+      return ids;
+    }
+    // <option>s for a parent picker: top level + every strictly-higher region,
+    // never the region itself or one of its descendants.
+    function parentOptions(level, selected, selfId) {
+      const exclude = selfId ? descendantIds(selfId).add(selfId) : new Set();
+      const map = byId();
+      const opts = regions
+        .filter((r) => !exclude.has(r.id) && levelRank(r.level) < levelRank(level))
+        .map((r) => ({ id: r.id, label: `${regionPath(r, map)} (${levelLabel(r.level)})` }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      return (
+        `<option value="">${esc(t("regions.parent_top"))}</option>` +
+        opts.map((o) => `<option value="${esc(o.id)}"${o.id === selected ? " selected" : ""}>${esc(o.label)}</option>`).join("")
+      );
+    }
+    const levelOptions = (selected) =>
+      REGION_LEVELS.map((l) => `<option value="${l}"${l === selected ? " selected" : ""}>${esc(levelLabel(l))}</option>`).join("");
+
+    function renderCreateForm() {
+      const level = levelSel.value || "region";
+      levelSel.innerHTML = levelOptions(level);
+      const parent = parentSel.value || "";
+      parentSel.innerHTML = parentOptions(level, parent, null);
+      if (![...parentSel.options].some((o) => o.value === parent)) parentSel.value = "";
+    }
+    levelSel.addEventListener("change", renderCreateForm);
 
     function renderRegionList() {
       if (!regions.length) {
         regionList.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t("regions.none")}</p>`;
         return;
       }
+      const cell = "padding:8px 12px";
       regionList.innerHTML = `
         <div class="table-wrap">
-        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:420px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:520px">
           <thead><tr style="border-bottom:1px solid var(--border);text-align:left">
-            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("regions.col_name")}</th>
-            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("regions.col_workspaces")}</th>
-            <th style="padding:8px 12px;color:var(--text-muted);font-weight:500">${t("regions.col_actions")}</th>
+            <th style="${cell};color:var(--text-muted);font-weight:500">${t("regions.col_name")}</th>
+            <th style="${cell};color:var(--text-muted);font-weight:500">${t("regions.col_level")}</th>
+            <th style="${cell};color:var(--text-muted);font-weight:500">${t("regions.col_workspaces")}</th>
+            <th style="${cell};color:var(--text-muted);font-weight:500">${t("regions.col_actions")}</th>
           </tr></thead>
           <tbody>
-            ${regions
-              .map(
-                (r) => `
+            ${treeOrder()
+              .map(({ r, depth }) =>
+                r.id === editingId
+                  ? `
+              <tr style="border-bottom:1px solid var(--border)" data-edit-row="${esc(r.id)}">
+                <td style="${cell}" colspan="2">
+                  <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <input type="text" class="input region-edit-name" value="${esc(r.name)}" maxlength="80" style="min-width:140px;flex:1">
+                    <select class="input region-edit-level" style="background:var(--bg-input)">${levelOptions(r.level || "region")}</select>
+                    <select class="input region-edit-parent" style="background:var(--bg-input);min-width:160px">${parentOptions(r.level || "region", r.parent_id || "", r.id)}</select>
+                  </div>
+                </td>
+                <td style="${cell}">${r.workspace_count}</td>
+                <td style="${cell};white-space:nowrap">
+                  <button class="btn btn-primary btn-sm region-save-btn" data-id="${esc(r.id)}">${t("regions.save")}</button>
+                  <button class="btn btn-secondary btn-sm region-cancel-btn">${t("regions.cancel")}</button>
+                </td>
+              </tr>`
+                  : `
               <tr style="border-bottom:1px solid var(--border)">
-                <td style="padding:8px 12px">${esc(r.name)}</td>
-                <td style="padding:8px 12px">${r.workspace_count}</td>
-                <td style="padding:8px 12px">
-                  <button class="btn btn-secondary btn-sm region-rename-btn" data-id="${esc(r.id)}" data-name="${esc(r.name)}">${t("regions.rename")}</button>
-                  <button class="btn btn-danger btn-sm region-del-btn" data-id="${esc(r.id)}" data-name="${esc(r.name)}" data-count="${r.workspace_count}">${t("regions.delete")}</button>
+                <td style="${cell};padding-left:${12 + depth * 20}px">${depth ? '<span style="color:var(--text-muted)">└ </span>' : ""}${esc(r.name)}</td>
+                <td style="${cell};color:var(--text-muted)">${esc(levelLabel(r.level))}</td>
+                <td style="${cell}">${r.workspace_count}</td>
+                <td style="${cell};white-space:nowrap">
+                  <button class="btn btn-secondary btn-sm region-edit-btn" data-id="${esc(r.id)}">${t("regions.edit")}</button>
+                  <button class="btn btn-danger btn-sm region-del-btn" data-id="${esc(r.id)}" data-count="${r.workspace_count}">${t("regions.delete")}</button>
                 </td>
               </tr>`,
               )
@@ -942,19 +1044,40 @@ export async function render(container) {
           </tbody>
         </table></div>`;
 
-      regionList.querySelectorAll(".region-rename-btn").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const next = prompt(t("regions.rename_prompt"), btn.dataset.name);
-          if (next == null || !next.trim() || next.trim() === btn.dataset.name) return;
+      regionList.querySelectorAll(".region-edit-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          editingId = btn.dataset.id;
+          renderRegionList();
+        });
+      });
+      regionList.querySelector(".region-cancel-btn")?.addEventListener("click", () => {
+        editingId = null;
+        renderRegionList();
+      });
+      const editRow = regionList.querySelector("[data-edit-row]");
+      if (editRow) {
+        const lvl = editRow.querySelector(".region-edit-level");
+        const par = editRow.querySelector(".region-edit-parent");
+        lvl.addEventListener("change", () => {
+          const keep = par.value;
+          par.innerHTML = parentOptions(lvl.value, keep, editingId);
+          if (![...par.options].some((o) => o.value === keep)) par.value = "";
+        });
+        editRow.querySelector(".region-save-btn").addEventListener("click", async (e) => {
+          const name = editRow.querySelector(".region-edit-name").value.trim();
+          if (!name) return;
+          e.currentTarget.disabled = true;
           try {
-            await api.renameOrgRegion(orgId, btn.dataset.id, next.trim());
-            showToast(t("regions.renamed_toast"), "success");
+            await api.updateOrgRegion(orgId, editingId, { name, level: lvl.value, parent_id: par.value || null });
+            editingId = null;
+            showToast(t("regions.updated_toast"), "success");
             await loadRegions();
           } catch (err) {
             showToast(err.message, "error");
+            e.currentTarget.disabled = false;
           }
         });
-      });
+      }
       regionList.querySelectorAll(".region-del-btn").forEach((btn) => {
         btn.addEventListener("click", async () => {
           if (!confirm(t("regions.delete_confirm", { count: btn.dataset.count }))) return;
@@ -964,22 +1087,26 @@ export async function render(container) {
             showToast(t("regions.deleted_toast"), "success");
             await loadRegions();
           } catch (err) {
-            showToast(err.message, "error");
+            showToast(/child regions/i.test(err.message || "") ? t("regions.delete_has_children") : err.message, "error");
             btn.disabled = false;
           }
         });
       });
     }
 
+    // Workspace -> region. The current value comes from /me (accessible_workspaces
+    // carries region_id since Refs 49/67).
     function renderAssignList() {
       if (!regionOrgWorkspaces.length) {
         assignList.innerHTML = `<p style="color:var(--text-muted);font-size:13px">—</p>`;
         return;
       }
+      const map = byId();
+      const choices = treeOrder().map(({ r }) => ({ id: r.id, label: regionPath(r, map) }));
       const opts = (selected) =>
         `<option value="">${esc(t("regions.unassigned"))}</option>` +
-        regions
-          .map((r) => `<option value="${esc(r.id)}"${r.id === selected ? " selected" : ""}>${esc(r.name)}</option>`)
+        choices
+          .map((c) => `<option value="${esc(c.id)}"${c.id === selected ? " selected" : ""}>${esc(c.label)}</option>`)
           .join("");
       assignList.innerHTML = `
         <div style="display:flex;flex-direction:column;gap:8px">
@@ -1022,6 +1149,8 @@ export async function render(container) {
         assignList.innerHTML = "";
         return;
       }
+      if (editingId && !regions.some((r) => r.id === editingId)) editingId = null;
+      renderCreateForm();
       renderRegionList();
       renderAssignList();
     }
@@ -1033,7 +1162,7 @@ export async function render(container) {
       const btn = document.getElementById("regionCreateBtn");
       btn.disabled = true;
       try {
-        await api.createOrgRegion(orgId, name);
+        await api.createOrgRegion(orgId, name, levelSel.value, parentSel.value || null);
         input.value = "";
         showToast(t("regions.created_toast"), "success");
         await loadRegions();
@@ -1044,6 +1173,7 @@ export async function render(container) {
       }
     });
 
+    renderCreateForm();
     loadRegions();
 
     // ---- Ref 5: SSO-only mode (same org-admin gate as Regions) ----

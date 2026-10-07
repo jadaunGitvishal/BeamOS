@@ -3,8 +3,9 @@
 // PMI security fix (found in the Ref 49/67 Step 1 investigation): read-only
 // callers must not be able to write. A read-only caller is a workspace_viewer, or
 // a "synthetic" viewer that lib/tenancy.accessContext resolves to
-// { workspaceRole: 'workspace_viewer', actingAs: false } - today an org-wide
-// field_technician, later a regional_viewer.
+// { workspaceRole: 'workspace_viewer', actingAs: false } - an org-wide
+// field_technician, or (Refs 49/67) a regional_viewer whose region scope covers
+// the workspace. All three roles are swept below.
 //
 //   A. Targeted: POST /api/status/import, POST /api/provision/pair, the PiP routes
 //      (POST /api/pip, POST /api/pip/clear, DELETE /api/pip) and
@@ -20,7 +21,7 @@
 //      own workspace, and must answer 403 - or be on ALLOWLIST / DENIED_WITH (each
 //      with a reason). A new write route that is on neither fails the test until
 //      it is gated or classified.
-//   C. Socket.IO: write-type dashboard events are refused for both roles and the
+//   C. Socket.IO: write-type dashboard events are refused for all three roles and the
 //      device receives nothing; the read event (request-screenshot) behaves as today.
 //
 // Runs against the REAL server.js, spawned on its own port (same pattern as
@@ -190,7 +191,7 @@ function allowFor(key, role) {
 
 // ---------------------------------------------------------------- fixtures
 
-let owner, editor, viewer, tech;
+let owner, editor, viewer, tech, regional;
 let W, O; // the workspace / org every swept role reads
 const F = {}; // real resource ids in W
 
@@ -229,6 +230,7 @@ async function buildFixtures() {
   editor = await register('vwdeditor', false);
   viewer = await register('vwdviewer', false);
   tech = await register('vwdtech', false);
+  regional = await register('vwdregional', false);
   W = owner.workspaceId;
   O = (await db.prepare('SELECT organization_id FROM workspaces WHERE id = ?').get(W)).organization_id;
   await db.prepare('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)').run(W, editor.id, 'workspace_editor');
@@ -260,6 +262,11 @@ async function buildFixtures() {
   F.campaign = (await ok('POST', `/api/workspaces/${W}/campaigns`, { token: T, body: { name: `vwd-${TAG}`, start_date: '2030-01-01', end_date: '2030-01-31' } })).id;
   F.visit = (await ok('POST', `/api/workspaces/${W}/field-visits`, { token: T, body: { device_id: F.device, visit_type: 'Routine check' } })).id;
   F.region = (await ok('POST', `/api/organizations/${O}/regions`, { token: T, body: { name: `vwd-${TAG}` } })).id;
+  // Refs 49/67: W sits in F.region, and the regional_viewer is scoped to it.
+  await ok('PATCH', `/api/workspaces/${W}/region`, { token: T, body: { region_id: F.region } });
+  await ok('POST', `/api/organizations/${O}/members`, { token: T, body: { email: regional.email, role: 'regional_viewer' } });
+  await ok('PUT', `/api/organizations/${O}/members/${regional.id}/region-scopes`, { token: T, body: { region_ids: [F.region] } });
+  await sessionIn(regional, W);
   F.mapping = (await ok('POST', `/api/organizations/${O}/entra-role-mappings`, { token: T, body: { claim_value: `vwd.${TAG}`, role: 'org_admin' } })).id;
   F.sim = (await ok('POST', '/api/sim-inventory', { token: T, body: { iccid: `8991${crypto.randomInt(1e9, 1e10)}` } })).id;
   F.code = (await ok('POST', '/api/provisioning/registration-codes', { token: T, body: { workspace_id: W } })).id;
@@ -333,7 +340,7 @@ async function snapshot() {
     if (VOLATILE_TABLE.test(t)) continue;
     queries.push([t, `SELECT * FROM \`${t}\` WHERE \`${c}\` = ?`, [c === 'workspace_id' ? W : O]]);
   }
-  const users = [owner.id, editor.id, viewer.id, tech.id];
+  const users = [owner.id, editor.id, viewer.id, tech.id, regional.id];
   const ph = users.map(() => '?').join(',');
   queries.push(
     ['users', `SELECT * FROM users WHERE id IN (${ph})`, users],
@@ -400,11 +407,11 @@ test.after(async () => {
 
 // =============================================================== A. targeted
 
-test('import: workspace_viewer and field_technician -> 403 (JSON and multipart); no rows, no temp files', async () => {
+test('import: workspace_viewer, field_technician and regional_viewer -> 403 (JSON and multipart); no rows, no temp files', async () => {
   const before = await importCounts();
   const tmpBefore = importTempEntries();
   const data = { format: 'screentinker-export-v2', widgets: [{ id: 'w1', widget_type: 'clock', name: `vwd-imp-${TAG}`, config: {} }] };
-  for (const u of [viewer, tech]) {
+  for (const u of [viewer, tech, regional]) {
     const r = await req('POST', '/api/status/import', { token: u.token, body: data });
     assert.equal(r.status, 403, JSON.stringify(r.body));
     assert.deepEqual(r.body, READ_ONLY);
@@ -436,14 +443,14 @@ test('import: an editor still imports as before (rows created)', async () => {
   assert.equal(after.playlists, before.playlists + 1);
 });
 
-test('pair: workspace_viewer and field_technician -> 403; the code stays unclaimed, the device row unchanged', async () => {
+test('pair: workspace_viewer, field_technician and regional_viewer -> 403; the code stays unclaimed, the device row unchanged', async () => {
   const code = String(crypto.randomInt(100000, 1000000));
   const dev = await provisionDevice(code);
   const rowBefore = await db.prepare('SELECT * FROM devices WHERE id = ?').get(dev.id);
   assert.equal(rowBefore.pairing_code, code);
   assert.equal(rowBefore.workspace_id, null);
   const devicesInW = await countIn('devices');
-  for (const u of [viewer, tech]) {
+  for (const u of [viewer, tech, regional]) {
     const r = await req('POST', '/api/provision/pair', { token: u.token, body: { pairing_code: code, name: 'nope' } });
     assert.equal(r.status, 403, JSON.stringify(r.body));
     assert.deepEqual(r.body, READ_ONLY);
@@ -461,7 +468,7 @@ test('pair: workspace_viewer and field_technician -> 403; the code stays unclaim
   F.pairedDevice = dev; // reused by the socket tests (a real device that can connect)
 });
 
-test('layout duplicate: workspace_viewer and field_technician -> 403, no layout/zone rows; an editor still duplicates (own layout and a template)', async () => {
+test('layout duplicate: workspace_viewer, field_technician and regional_viewer -> 403, no layout/zone rows; an editor still duplicates (own layout and a template)', async () => {
   const counts = async () => ({
     layouts: await countIn('layouts'),
     zones: (await db.prepare('SELECT COUNT(*) AS n FROM layout_zones z JOIN layouts l ON l.id = z.layout_id WHERE l.workspace_id = ?').get(W)).n,
@@ -475,7 +482,7 @@ test('layout duplicate: workspace_viewer and field_technician -> 403, no layout/
   const ownZones = (await db.prepare('SELECT COUNT(*) AS n FROM layout_zones WHERE layout_id = ?').get(F.layout)).n;
 
   const before = await counts();
-  for (const u of [viewer, tech]) {
+  for (const u of [viewer, tech, regional]) {
     for (const src of [F.layout, tpl.id]) {
       const r = await req('POST', `/api/layouts/${encodeURIComponent(src)}/duplicate`, { token: u.token, body: {} });
       assert.equal(r.status, 403, `${src}: ${JSON.stringify(r.body)}`);
@@ -495,14 +502,14 @@ test('layout duplicate: workspace_viewer and field_technician -> 403, no layout/
 // =================================================================== B. sweep
 
 const sweepResults = [];
-test('sweep: every mounted non-GET route is 403 for workspace_viewer and field_technician (or classified)', async () => {
+test('sweep: every mounted non-GET route is 403 for workspace_viewer, field_technician and regional_viewer (or classified)', async () => {
   const { routes, mountCount } = enumerateWriteRoutes();
   console.log(`[sweep] ${routes.length} non-GET routes across ${mountCount} router mounts + server.js inline routes`);
   assert.ok(routes.length >= 150, `enumerated ${routes.length}`);
   for (const key of [...Object.keys(ALLOWLIST), ...Object.keys(DENIED_WITH)]) {
     assert.ok(routes.some((r) => r.key === key), `classified route "${key}" no longer exists - update the lists`);
   }
-  const ROLES = [['workspace_viewer', viewer], ['field_technician', tech]];
+  const ROLES = [['workspace_viewer', viewer], ['field_technician', tech], ['regional_viewer', regional]];
   const send = (route, user) =>
     req(route.method === 'ALL' ? 'POST' : route.method, fillPath(route).replace(/\*$/, 'x'), { token: user.token, body: bodyFor(route) });
 
@@ -565,13 +572,13 @@ const emitAck = (s, ev, data) => new Promise((resolve) => {
 // The write-type dashboard events in ws/dashboardSocket.js (canActOnDevice 'write').
 const WRITE_EVENTS = ['dashboard:remote-touch', 'dashboard:remote-key', 'dashboard:remote-start', 'dashboard:remote-stop'];
 
-test('socket: write events from workspace_viewer / field_technician are refused; the device receives nothing', async () => {
+test('socket: write events from workspace_viewer / field_technician / regional_viewer are refused; the device receives nothing', async () => {
   assert.ok(F.pairedDevice, 'the pair test provided a real device');
   const device = deviceConn = await connectDevice(F.pairedDevice);
   await sleep(300);
   device.got.length = 0;
 
-  for (const user of [viewer, tech]) {
+  for (const user of [viewer, tech, regional]) {
     const dash = await connectDashboard(user);
     const ack = await emitAck(dash, 'dashboard:device-command', { device_id: F.pairedDevice.id, type: 'screen_on', payload: {} });
     assert.deepEqual(ack, { delivered: false, reason: 'forbidden' });
@@ -589,26 +596,26 @@ test('socket: write events from workspace_viewer / field_technician are refused;
   assert.deepEqual(device.got.map((g) => g.ev).sort(), ['device:command', 'device:remote-key']);
 });
 
-test('socket: the read event (request-screenshot) still works for both roles, as today', async () => {
+test('socket: the read event (request-screenshot) still works for all three roles, as today', async () => {
   const device = deviceConn;
   assert.ok(device, 'the previous socket test connected the device');
   device.got.length = 0;
-  for (const user of [viewer, tech]) {
+  for (const user of [viewer, tech, regional]) {
     const dash = await connectDashboard(user);
     dash.emit('dashboard:request-screenshot', { device_id: F.pairedDevice.id });
   }
   await sleep(800);
-  assert.equal(device.got.filter((g) => g.ev === 'device:screenshot-request').length, 2);
-  assert.equal(device.got.length, 2, 'and nothing else');
+  assert.equal(device.got.filter((g) => g.ev === 'device:screenshot-request').length, 3);
+  assert.equal(device.got.length, 3, 'and nothing else');
 });
 
-test('PiP: workspace_viewer and field_technician -> 403 and the device receives nothing; an editor\'s PiP reaches it', async () => {
+test('PiP: workspace_viewer, field_technician and regional_viewer -> 403 and the device receives nothing; an editor\'s PiP reaches it', async () => {
   const device = deviceConn;
   assert.ok(device, 'the socket tests connected the device');
   device.got.length = 0;
   const target = { device_id: F.pairedDevice.id };
   const show = { ...target, type: 'image', uri: 'https://example.com/vwd-pip.png' };
-  for (const u of [viewer, tech]) {
+  for (const u of [viewer, tech, regional]) {
     for (const [method, url, body] of [['POST', '/api/pip', show], ['POST', '/api/pip/clear', target], ['DELETE', '/api/pip', target]]) {
       const r = await req(method, url, { token: u.token, body });
       assert.equal(r.status, 403, `${method} ${url}: ${JSON.stringify(r.body)}`);

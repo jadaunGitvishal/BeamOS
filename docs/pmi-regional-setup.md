@@ -1,0 +1,69 @@
+# Setting up regional read-only access (PMI)
+
+For organization owners and admins. This sets up read-only, area-wide visibility
+for PMI's field hierarchy: RTMM, CM, ASM and TSE. How it works and what a
+regional viewer can and can't do is in [rbac.md](rbac.md#regional-viewer-geographic-read-only-access-refs-4967).
+
+## 1. Decide what a workspace is
+
+Visibility is granted **per workspace**, so the workspace is the smallest unit
+anyone can be given. Use **one workspace per territory**, or one per store
+cluster if a territory has too few screens to justify its own. Devices,
+content and schedules live inside workspaces as usual.
+
+## 2. Build the region tree
+
+*Settings → Regions.* Add nodes from the top down:
+
+| Level | PMI role | Typical parent |
+|---|---|---|
+| Region | RTMM | (top level) |
+| Cluster | CM | a Region |
+| Area | ASM | a Cluster |
+| Territory | TSE | an Area |
+
+A parent must be a higher level. You can skip a level (for example, a
+territory directly under a cluster) or place a node at the top level whatever
+its level. Names only need to be unique under the same parent. To remove a
+region, delete or move its children first.
+
+## 3. Put each workspace in its region
+
+*Settings → Regions → Workspace assignments*: pick the workspace's region, which
+is normally its territory. **A workspace with no region is invisible to every
+regional viewer**, so check that none are left unassigned.
+
+## 4. Add the people
+
+*Organization members → Add member*, role **Regional viewer** (the account must
+already exist). The region picker opens next: tick the node that matches the
+person's job, and everything below it is included.
+
+| Person | Scope |
+|---|---|
+| RTMM | their Region |
+| CM | their Cluster |
+| ASM | their Area |
+| TSE | their Territory |
+
+Someone covering two areas gets both. A regional viewer with no regions sees
+nothing. Change their regions any time with the **Regions** button on their
+row.
+
+## Good to know
+
+- **Read-only.** Regional viewers can view and export everything in their
+  workspaces, including member lists with email addresses, tickets, campaigns
+  and field visits. They can't change anything, can't log field visits, and
+  can't create API tokens.
+- **Direct membership wins.** To let one person edit a particular store, also
+  add them to that workspace as an editor. That workspace then follows the
+  editor role.
+- **Timing.** Changes to regions, assignments or scopes apply on the person's
+  next page load. An open live dashboard picks them up when it reconnects,
+  for example after a reload.
+- **No personal organization.** Regional viewers and field technicians
+  already belong to your organization, so signing in never creates a personal
+  organization for them. They land in their first reachable workspace.
+- **Leavers.** Removing someone from the organization, or changing their role,
+  removes their regions automatically.

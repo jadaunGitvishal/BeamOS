@@ -13,6 +13,7 @@ const { renderXlsx, renderPdf } = require("../lib/report-export");
 const { parseLifetimeDays } = require("../lib/token-lifetime"); // Ref 34
 const config = require("../config"); // Ref 5: ssoTenantId gates SSO-only mode
 const { MAPPABLE_ROLES, MAX_CLAIM_LENGTH } = require("../lib/entra-role-sync"); // Ref 7
+const { REGION_LEVELS, MAX_REGION_DEPTH, REGIONAL_VIEWER, levelRank } = require("../lib/region-scope"); // Refs 49/67
 const { isDuplicateKeyError } = require("../lib/outage-format");
 
 function formatTimestamp(epochSeconds) {
@@ -39,7 +40,10 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // else (canAccessOrg / canAdminOrg / canManageOrgRegions all still exclude it).
 // Grantable by an org_owner or platform_admin here, same as org_admin;
 // callerMayGrantRole only special-cases org_owner.
-const ORG_ROLES = ["org_owner", "org_admin", "field_technician"];
+// Refs 49/67: regional_viewer is likewise non-privileged - read-only access to
+// the workspaces inside its region scopes (GET/PUT .../region-scopes below), and
+// nothing org-wide (canAccessOrg / canAdminOrg / canManageOrgRegions exclude it).
+const ORG_ROLES = ["org_owner", "org_admin", "field_technician", "regional_viewer"];
 
 // Load org by req.params.id and verify caller has the required level of
 // access. Returns the org row on success. On failure, sends the appropriate
@@ -279,11 +283,24 @@ router.put(
 
     // Ref 7: a manual role change makes the membership manual (source NULL), so
     // the Entra role sync never changes or removes it afterwards.
-    await db
-      .prepare(
-        "UPDATE organization_members SET role = ?, source = NULL WHERE organization_id = ? AND user_id = ?",
-      )
-      .run(newRole, org.id, req.params.userId);
+    // Refs 49/67: leaving regional_viewer drops the member's region scopes in the
+    // same transaction, so old scopes can never come back with the role.
+    if (member.role === REGIONAL_VIEWER && newRole !== REGIONAL_VIEWER) {
+      await db.transaction(async (tx) => {
+        await tx
+          .prepare("UPDATE organization_members SET role = ?, source = NULL WHERE organization_id = ? AND user_id = ?")
+          .run(newRole, org.id, req.params.userId);
+        await tx
+          .prepare("DELETE FROM region_viewer_scopes WHERE organization_id = ? AND user_id = ?")
+          .run(org.id, req.params.userId);
+      })();
+    } else {
+      await db
+        .prepare(
+          "UPDATE organization_members SET role = ?, source = NULL WHERE organization_id = ? AND user_id = ?",
+        )
+        .run(newRole, org.id, req.params.userId);
+    }
 
     const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
     logActivity(
@@ -386,6 +403,7 @@ function validRegionName(res, raw) {
 }
 
 // GET /:orgId/regions — list this org's regions + how many workspaces each holds.
+// Refs 49/67: a flat list carrying level and parent_id; the UI builds the tree.
 router.get(
   "/:orgId/regions",
   asyncHandler(async (req, res) => {
@@ -393,9 +411,9 @@ router.get(
     if (!org) return;
     const regions = await db
       .prepare(
-        `SELECT r.id, r.name, r.created_at, r.updated_at,
+        `SELECT r.id, r.name, r.level, r.parent_id, r.created_at, r.updated_at,
                 (SELECT COUNT(*) FROM workspaces w WHERE w.region_id = r.id) AS workspace_count
-         FROM regions r WHERE r.organization_id = ? ORDER BY r.name`,
+         FROM regions r WHERE r.organization_id = ? ORDER BY r.name, r.id`,
       )
       .all(org.id);
     res.json(regions);
@@ -501,37 +519,91 @@ router.get(
   }),
 );
 
-// POST /:orgId/regions  { name }
+// ---- Refs 49/67: region tree ----
+// level: region > cluster > area > territory (PMI: RTMM, CM, ASM, TSE). A parent
+// must be a strictly HIGHER level (skipping levels is fine), so a tree is at most
+// four deep and a cycle can't be built. Names are unique among siblings (same
+// parent, same org). The checks below run in the app; the schema backs them up
+// (composite same-org parent FK, UNIQUE(organization_id, parent_key, name)).
+const isBlank = (v) => v === undefined || v === null || v === "";
+
+function validRegionLevel(res, raw) {
+  const level = isBlank(raw) ? "region" : raw;
+  if (!REGION_LEVELS.includes(level)) {
+    res.status(400).json({ error: `level must be one of: ${REGION_LEVELS.join(", ")}` });
+    return null;
+  }
+  return level;
+}
+
+function parentMustBeHigher(res, parent, level) {
+  if (levelRank(parent.level || "region") < levelRank(level)) return true;
+  res.status(400).json({
+    error: `A ${level} cannot sit under a ${parent.level || "region"}: the parent must be a higher level (${REGION_LEVELS.join(" > ")})`,
+  });
+  return false;
+}
+
+async function siblingNameTaken(orgId, parentId, name, exceptId = null) {
+  const row = await db
+    .prepare(
+      "SELECT 1 AS hit FROM regions WHERE organization_id = ? AND COALESCE(parent_id, '') = ? AND name = ? AND id <> ?",
+    )
+    .get(orgId, parentId || "", name, exceptId || "");
+  return !!row;
+}
+
+const DUP_REGION_NAME = "A region with that name already exists under this parent";
+
+// POST /:orgId/regions  { name, level?, parent_id? } - level defaults to 'region'
+// (top level), which keeps the original { name }-only callers working.
 router.post(
   "/:orgId/regions",
   asyncHandler(async (req, res) => {
     const org = await loadOrgForRegions(req, res);
     if (!org) return;
-    const name = validRegionName(res, req.body?.name);
+    const body = req.body || {};
+    const name = validRegionName(res, body.name);
     if (!name) return;
-
-    const dup = await db
-      .prepare("SELECT 1 FROM regions WHERE organization_id = ? AND name = ?")
-      .get(org.id, name);
-    if (dup) return res.status(409).json({ error: "A region with that name already exists" });
+    const level = validRegionLevel(res, body.level);
+    if (!level) return;
+    const parentId = isBlank(body.parent_id) ? null : body.parent_id;
+    if (parentId !== null && typeof parentId !== "string") {
+      return res.status(400).json({ error: "parent_id must be a region id or null" });
+    }
+    if (parentId) {
+      const parent = await db
+        .prepare("SELECT id, level FROM regions WHERE id = ? AND organization_id = ?")
+        .get(parentId, org.id);
+      if (!parent) return res.status(400).json({ error: "parent_id is not a region of this organization" });
+      if (!parentMustBeHigher(res, parent, level)) return;
+    }
+    if (await siblingNameTaken(org.id, parentId, name)) return res.status(409).json({ error: DUP_REGION_NAME });
 
     const id = crypto.randomUUID();
-    await db
-      .prepare("INSERT INTO regions (id, organization_id, name) VALUES (?, ?, ?)")
-      .run(id, org.id, name);
+    try {
+      await db
+        .prepare("INSERT INTO regions (id, organization_id, name, level, parent_id) VALUES (?, ?, ?, ?, ?)")
+        .run(id, org.id, name, level, parentId);
+    } catch (e) {
+      if (isDuplicateKeyError(e)) return res.status(409).json({ error: DUP_REGION_NAME });
+      throw e;
+    }
     logActivity(
       req.user.id,
       "region_created",
-      `org: ${org.name} (${org.id}), region: ${name}`,
+      `org: ${org.name} (${org.id}), region: ${name}, level: ${level}${parentId ? `, parent: ${parentId}` : ""}`,
       null,
       getClientIp(req),
       null,
     );
-    res.status(201).json({ id, organization_id: org.id, name, workspace_count: 0 });
+    res.status(201).json({ id, organization_id: org.id, name, level, parent_id: parentId, workspace_count: 0 });
   }),
 );
 
-// PATCH /:orgId/regions/:id  { name } — rename
+// PATCH /:orgId/regions/:id  { name?, level?, parent_id? } - rename and/or move.
+// Re-validated against the (new) parent, which must stay higher, and against every
+// child, which must stay lower. A region can't move under itself or a descendant.
 router.patch(
   "/:orgId/regions/:id",
   asyncHandler(async (req, res) => {
@@ -542,33 +614,101 @@ router.patch(
       .get(req.params.id, org.id);
     if (!region) return res.status(404).json({ error: "Region not found" });
 
-    const name = validRegionName(res, req.body?.name);
-    if (!name) return;
-    if (name !== region.name) {
-      const dup = await db
-        .prepare("SELECT 1 FROM regions WHERE organization_id = ? AND name = ? AND id <> ?")
-        .get(org.id, name, region.id);
-      if (dup) return res.status(409).json({ error: "A region with that name already exists" });
+    const body = req.body || {};
+    const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+    if (!has("name") && !has("level") && !has("parent_id")) {
+      return res.status(400).json({ error: "Nothing to update: send name, level and/or parent_id" });
+    }
+    let name = region.name;
+    if (has("name")) {
+      name = validRegionName(res, body.name);
+      if (!name) return;
+    }
+    let level = region.level || "region";
+    if (has("level")) {
+      level = validRegionLevel(res, body.level);
+      if (!level) return;
+    }
+    let parentId = region.parent_id || null;
+    if (has("parent_id")) {
+      parentId = isBlank(body.parent_id) ? null : body.parent_id;
+      if (parentId !== null && typeof parentId !== "string") {
+        return res.status(400).json({ error: "parent_id must be a region id or null" });
+      }
     }
 
-    await db
-      .prepare("UPDATE regions SET name = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
-      .run(name, region.id);
-    logActivity(
-      req.user.id,
-      "region_renamed",
-      `org: ${org.name} (${org.id}), region: ${region.name} -> ${name}`,
-      null,
-      getClientIp(req),
-      null,
-    );
-    res.json({ id: region.id, organization_id: org.id, name });
+    if (parentId) {
+      if (parentId === region.id) return res.status(400).json({ error: "A region cannot be its own parent" });
+      const parent = await db
+        .prepare("SELECT id, level FROM regions WHERE id = ? AND organization_id = ?")
+        .get(parentId, org.id);
+      if (!parent) return res.status(400).json({ error: "parent_id is not a region of this organization" });
+      const descendant = await db
+        .prepare(
+          `WITH RECURSIVE sub (id, depth) AS (
+             SELECT id, 1 FROM regions WHERE parent_id = ? AND organization_id = ?
+             UNION ALL
+             SELECT c.id, sub.depth + 1 FROM regions c JOIN sub ON c.parent_id = sub.id
+              WHERE c.organization_id = ? AND sub.depth < ${MAX_REGION_DEPTH}
+           )
+           SELECT 1 AS hit FROM sub WHERE id = ? LIMIT 1`,
+        )
+        .get(region.id, org.id, org.id, parentId);
+      if (descendant) return res.status(400).json({ error: "A region cannot move under one of its own descendants" });
+      if (!parentMustBeHigher(res, parent, level)) return;
+    }
+
+    const children = await db
+      .prepare("SELECT name, level FROM regions WHERE parent_id = ? AND organization_id = ?")
+      .all(region.id, org.id);
+    const blocking = children.find((c) => levelRank(c.level || "region") <= levelRank(level));
+    if (blocking) {
+      return res.status(400).json({
+        error: `A ${level} would not be above its child "${blocking.name}" (${blocking.level || "region"}): every child must stay a lower level`,
+      });
+    }
+
+    if ((name !== region.name || parentId !== (region.parent_id || null)) && (await siblingNameTaken(org.id, parentId, name, region.id))) {
+      return res.status(409).json({ error: DUP_REGION_NAME });
+    }
+
+    try {
+      await db
+        .prepare("UPDATE regions SET name = ?, level = ?, parent_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+        .run(name, level, parentId, region.id);
+    } catch (e) {
+      if (isDuplicateKeyError(e)) return res.status(409).json({ error: DUP_REGION_NAME });
+      throw e;
+    }
+    if (name !== region.name) {
+      logActivity(
+        req.user.id,
+        "region_renamed",
+        `org: ${org.name} (${org.id}), region: ${region.name} -> ${name}`,
+        null,
+        getClientIp(req),
+        null,
+      );
+    }
+    if (level !== (region.level || "region") || parentId !== (region.parent_id || null)) {
+      logActivity(
+        req.user.id,
+        "region_moved",
+        `org: ${org.name} (${org.id}), region: ${name} (${region.id}), level: ${region.level || "region"} -> ${level}, parent: ${region.parent_id || "none"} -> ${parentId || "none"}`,
+        null,
+        getClientIp(req),
+        null,
+      );
+    }
+    res.json({ id: region.id, organization_id: org.id, name, level, parent_id: parentId });
   }),
 );
 
-// DELETE /:orgId/regions/:id — workspaces assigned to it are UNASSIGNED
-// (region_id -> NULL), never deleted. The explicit UPDATE below is the contract;
-// the workspaces.region_id ON DELETE SET NULL FK is a backstop for other delete
+// DELETE /:orgId/regions/:id — refused (409) while the region has child regions.
+// Otherwise workspaces assigned to it are UNASSIGNED (region_id -> NULL), never
+// deleted, and any regional_viewer scope on it goes too (FK cascade - access
+// fails closed). The explicit UPDATE below is the contract; the
+// workspaces.region_id ON DELETE SET NULL FK is a backstop for other delete
 // paths (e.g. org cascade).
 router.delete(
   "/:orgId/regions/:id",
@@ -579,6 +719,12 @@ router.delete(
       .prepare("SELECT * FROM regions WHERE id = ? AND organization_id = ?")
       .get(req.params.id, org.id);
     if (!region) return res.status(404).json({ error: "Region not found" });
+    const child = await db
+      .prepare("SELECT 1 AS hit FROM regions WHERE parent_id = ? AND organization_id = ? LIMIT 1")
+      .get(region.id, org.id);
+    if (child) {
+      return res.status(409).json({ error: "This region has child regions. Delete or move them first." });
+    }
 
     const unassigned = (
       await db.prepare("SELECT COUNT(*) AS c FROM workspaces WHERE region_id = ?").get(region.id)
@@ -595,6 +741,99 @@ router.delete(
       null,
     );
     res.json({ success: true, workspaces_unassigned: unassigned });
+  }),
+);
+
+// ---- Refs 49/67: regional_viewer scopes ----
+// GET/PUT /:orgId/members/:userId/region-scopes. Same gate as regions (org_owner /
+// org_admin of THIS org, or a platform owner-role). PUT replaces the whole set in
+// one transaction; the member must hold regional_viewer in this org, and every
+// region must belong to this org. An empty list is allowed (no access).
+const MAX_REGION_SCOPES = 500;
+
+async function loadRegionalMember(req, res, org) {
+  const member = await db
+    .prepare(
+      `SELECT om.role, u.email FROM organization_members om JOIN users u ON u.id = om.user_id
+       WHERE om.organization_id = ? AND om.user_id = ?`,
+    )
+    .get(org.id, req.params.userId);
+  if (!member) {
+    res.status(404).json({ error: "Member not found" });
+    return null;
+  }
+  return member;
+}
+
+async function scopeView(orgId, userId, role) {
+  const regions = await db
+    .prepare(
+      `SELECT r.id, r.name, r.level, r.parent_id FROM region_viewer_scopes s
+       JOIN regions r ON r.id = s.region_id AND r.organization_id = s.organization_id
+       WHERE s.organization_id = ? AND s.user_id = ? ORDER BY r.name, r.id`,
+    )
+    .all(orgId, userId);
+  return { organization_id: orgId, user_id: userId, role, region_ids: regions.map((r) => r.id), regions };
+}
+
+router.get(
+  "/:orgId/members/:userId/region-scopes",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const member = await loadRegionalMember(req, res, org);
+    if (!member) return;
+    res.json(await scopeView(org.id, req.params.userId, member.role));
+  }),
+);
+
+router.put(
+  "/:orgId/members/:userId/region-scopes",
+  asyncHandler(async (req, res) => {
+    const org = await loadOrgForRegions(req, res);
+    if (!org) return;
+    const member = await loadRegionalMember(req, res, org);
+    if (!member) return;
+    if (member.role !== REGIONAL_VIEWER) {
+      return res.status(400).json({ error: "Region scopes apply only to members with the regional_viewer role" });
+    }
+    const raw = req.body?.region_ids;
+    if (!Array.isArray(raw) || raw.some((v) => typeof v !== "string" || !v)) {
+      return res.status(400).json({ error: "region_ids must be an array of region ids (it may be empty)" });
+    }
+    const regionIds = [...new Set(raw)];
+    if (regionIds.length > MAX_REGION_SCOPES) {
+      return res.status(400).json({ error: `At most ${MAX_REGION_SCOPES} region scopes per member` });
+    }
+    if (regionIds.length) {
+      const found = new Set(
+        (await db
+          .prepare(`SELECT id FROM regions WHERE organization_id = ? AND id IN (${regionIds.map(() => "?").join(",")})`)
+          .all(org.id, ...regionIds)).map((r) => r.id),
+      );
+      const foreign = regionIds.filter((id) => !found.has(id));
+      if (foreign.length) {
+        return res.status(400).json({ error: `Not regions of this organization: ${foreign.join(", ")}` });
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      await tx.prepare("DELETE FROM region_viewer_scopes WHERE organization_id = ? AND user_id = ?").run(org.id, req.params.userId);
+      const ins = tx.prepare(
+        "INSERT INTO region_viewer_scopes (organization_id, user_id, region_id, created_by) VALUES (?, ?, ?, ?)",
+      );
+      for (const id of regionIds) await ins.run(org.id, req.params.userId, id, req.user.id);
+    })();
+
+    logActivity(
+      req.user.id,
+      "region_scopes_set",
+      `org: ${org.name} (${org.id}), target: ${member.email}, regions: [${regionIds.join(", ")}]`,
+      null,
+      getClientIp(req),
+      null,
+    );
+    res.json(await scopeView(org.id, req.params.userId, member.role));
   }),
 );
 

@@ -37,6 +37,7 @@ db.exec(`
   );
   CREATE TABLE regions (
     id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL,
+    level TEXT, parent_id TEXT,
     created_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0, UNIQUE (organization_id, name)
   );
   CREATE TABLE activity_log (

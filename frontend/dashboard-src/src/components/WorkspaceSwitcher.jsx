@@ -9,14 +9,16 @@ export default function WorkspaceSwitcher() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // BeamOS's /api/auth/me returns accessible_workspaces (not workspaces),
-  // and marks org-wide access (reached via org_owner/org_admin rather than a
-  // direct workspace_members row) by workspace_role being null on that row -
-  // same LEFT JOIN semantics Dashboard's own now-retired /api/me used to
-  // expose as an explicit org_wide boolean.
+  // BeamOS's /api/auth/me returns accessible_workspaces (not workspaces). Each
+  // entry carries `access` (Refs 49/67): 'direct' (a workspace_members row),
+  // 'regional' (inside a regional_viewer's region scopes - read-only), 'org'
+  // (org-wide via org_owner / org_admin / field_technician) or 'platform'.
+  // Older servers without `access`: a null workspace_role meant org-wide.
   const workspaces = me?.accessible_workspaces || [];
-  const orgWide = workspaces.filter((w) => !w.workspace_role);
-  const direct = workspaces.filter((w) => w.workspace_role);
+  const accessOf = (w) => w.access || (w.workspace_role ? "direct" : "org");
+  const direct = workspaces.filter((w) => accessOf(w) === "direct");
+  const regional = workspaces.filter((w) => accessOf(w) === "regional");
+  const orgWide = workspaces.filter((w) => !["direct", "regional"].includes(accessOf(w)));
   const active = workspaces.find((w) => w.id === activeWorkspace) || null;
 
   // Custom dropdown, same shape as DevicesView's .export-menu: a ref'd wrapper,
@@ -127,16 +129,32 @@ export default function WorkspaceSwitcher() {
           ref={menuRef}
           onKeyDown={onMenuKeyDown}
         >
-          {orgWide.length ? (
+          {orgWide.length || regional.length ? (
             <>
-              <p className="wsw-group" role="presentation">
-                Your workspaces
-              </p>
-              {renderItems(direct)}
-              <p className="wsw-group" role="presentation">
-                Also in your org
-              </p>
-              {renderItems(orgWide)}
+              {direct.length > 0 && (
+                <>
+                  <p className="wsw-group" role="presentation">
+                    Your workspaces
+                  </p>
+                  {renderItems(direct)}
+                </>
+              )}
+              {regional.length > 0 && (
+                <>
+                  <p className="wsw-group" role="presentation">
+                    Your regions (read-only)
+                  </p>
+                  {renderItems(regional)}
+                </>
+              )}
+              {orgWide.length > 0 && (
+                <>
+                  <p className="wsw-group" role="presentation">
+                    Also in your org
+                  </p>
+                  {renderItems(orgWide)}
+                </>
+              )}
             </>
           ) : (
             renderItems(workspaces)

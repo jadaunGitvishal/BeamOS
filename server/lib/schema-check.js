@@ -28,6 +28,7 @@ const REQUIRED_TABLES = [
   'ticket_escalations', // Ref 58: ticket response-time SLA breach escalation dedup
   'scim_tokens', // Ref 8: SCIM provisioning bearer secrets (hashed)
   'entra_role_mappings', // Ref 7: Entra app role -> org/workspace role (repairable, below)
+  'region_viewer_scopes', // Refs 49/67: regional_viewer scopes (repairable, below)
 ];
 
 // Ref 7: tables the repair below may CREATE when missing (same DDL as schema.sql,
@@ -45,6 +46,19 @@ const REPAIRABLE_TABLES = [
     UNIQUE KEY uniq_entra_role_mapping (organization_id, claim_value, workspace_key),
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`],
+  // Refs 49/67. Needs regions(organization_id, id) unique - repairRegionTree() runs first.
+  ['region_viewer_scopes', `CREATE TABLE IF NOT EXISTS region_viewer_scopes (
+    organization_id VARCHAR(64) NOT NULL,
+    user_id         VARCHAR(64) NOT NULL,
+    region_id       VARCHAR(64) NOT NULL,
+    created_by      VARCHAR(64) NULL,
+    created_at      BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (organization_id, user_id, region_id),
+    KEY idx_region_viewer_scopes_user (user_id),
+    FOREIGN KEY (organization_id, region_id) REFERENCES regions(organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, user_id) REFERENCES organization_members(organization_id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`],
 ];
@@ -81,6 +95,10 @@ const REQUIRED_COLUMNS = [
   // managed by lib/entra-role-sync.js. The manual member routes write NULL.
   ['organization_members', 'source', "ALTER TABLE organization_members ADD COLUMN source VARCHAR(16) NULL"],
   ['workspace_members', 'source', "ALTER TABLE workspace_members ADD COLUMN source VARCHAR(16) NULL"],
+  // Refs 49/67: region tree. Added (with the rest of the tree shape) by
+  // repairRegionTree() below; listed here so their absence is still caught.
+  ['regions', 'level', "ALTER TABLE regions ADD COLUMN level VARCHAR(16) NULL"],
+  ['regions', 'parent_id', "ALTER TABLE regions ADD COLUMN parent_id VARCHAR(64) NULL"],
   ['play_logs', 'session_id', "ALTER TABLE play_logs ADD COLUMN session_id VARCHAR(64) NULL, ADD UNIQUE KEY uniq_play_logs_session (session_id)"],
   // Ref 32: GPS location on telemetry rows. The heartbeat INSERT (ws/deviceSocket.js)
   // always lists these columns now, so an un-migrated DB would fail every telemetry
@@ -181,6 +199,70 @@ async function dropUserForeignKeys(db, table = 'activity_log') {
   return dropped;
 }
 
+// Refs 49/67: bring a pre-tree `regions` table to the tree shape schema.sql now
+// declares. Each step checks first and logs what it changed, so a second run is a
+// no-op. Order matters: the per-parent name key is created BEFORE the old
+// UNIQUE(organization_id, name) is dropped, so names are never unguarded. Returns
+// the list of actions taken.
+async function repairRegionTree(db) {
+  const actions = [];
+  const run = async (label, sql) => {
+    await db.exec(sql);
+    actions.push(label);
+    console.warn(`[schema-check] regions: ${label}`);
+  };
+  const cols = new Set(
+    (await db
+      .prepare("SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'regions'")
+      .all()).map((r) => r.name),
+  );
+  if (!cols.has('level')) await run('added column level', 'ALTER TABLE regions ADD COLUMN level VARCHAR(16) NULL');
+  if (!cols.has('parent_id')) await run('added column parent_id', 'ALTER TABLE regions ADD COLUMN parent_id VARCHAR(64) NULL');
+  const backfilled = await db.prepare("UPDATE regions SET level = 'region' WHERE level IS NULL").run();
+  if (backfilled.changes) {
+    actions.push(`backfilled level='region' on ${backfilled.changes} row(s)`);
+    console.warn(`[schema-check] regions: backfilled level='region' on ${backfilled.changes} existing row(s) (now top-level)`);
+  }
+  if (!cols.has('parent_key')) {
+    // VIRTUAL: MySQL refuses STORED on the base column of a cascading FK.
+    await run('added generated column parent_key', "ALTER TABLE regions ADD COLUMN parent_key VARCHAR(64) AS (COALESCE(parent_id, '')) VIRTUAL");
+  }
+  const indexes = async () => (await db
+    .prepare(
+      `SELECT INDEX_NAME AS name, MIN(NON_UNIQUE) AS non_unique, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols
+       FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'regions'
+       GROUP BY INDEX_NAME`,
+    )
+    .all()).map((r) => ({ name: r.name, unique: Number(r.non_unique) === 0, cols: r.cols }));
+  let idx = await indexes();
+  const hasUnique = (c) => idx.some((i) => i.unique && i.cols === c);
+  if (!hasUnique('organization_id,id')) {
+    await run('added UNIQUE (organization_id, id)', 'ALTER TABLE regions ADD UNIQUE KEY uniq_regions_org_id (organization_id, id)');
+  }
+  if (!hasUnique('organization_id,parent_key,name')) {
+    await run('added UNIQUE (organization_id, parent_key, name)', 'ALTER TABLE regions ADD UNIQUE KEY uniq_regions_parent_name (organization_id, parent_key, name)');
+  }
+  idx = await indexes();
+  if (hasUnique('organization_id,parent_key,name')) {
+    for (const i of idx.filter((x) => x.unique && x.cols === 'organization_id,name')) {
+      await run(`dropped old UNIQUE (organization_id, name) "${i.name}"`, `ALTER TABLE regions DROP INDEX \`${String(i.name).replace(/`/g, '``')}\``);
+    }
+  }
+  const parentFk = await db
+    .prepare(
+      `SELECT CONSTRAINT_NAME AS name FROM information_schema.REFERENTIAL_CONSTRAINTS
+       WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'regions' AND REFERENCED_TABLE_NAME = 'regions'`,
+    )
+    .get();
+  if (!parentFk) {
+    await run(
+      'added FK (organization_id, parent_id) -> regions(organization_id, id) ON DELETE CASCADE',
+      'ALTER TABLE regions ADD CONSTRAINT fk_regions_parent FOREIGN KEY (organization_id, parent_id) REFERENCES regions(organization_id, id) ON DELETE CASCADE',
+    );
+  }
+  return actions;
+}
+
 function defaultOnMissing(missing) {
   const bar = '='.repeat(72);
   console.error(`\n${bar}`);
@@ -212,6 +294,13 @@ async function verifyAndRepairSchema(db, opts = {}) {
   };
 
   const missing = [];
+  if (tableSet.has('regions')) {
+    try {
+      await repairRegionTree(db);
+    } catch (e) {
+      console.error(`[schema-check] region tree repair FAILED: ${e.message}`);
+    }
+  }
   for (const [t, create] of REPAIRABLE_TABLES) {
     if (tableSet.has(t)) continue;
     try {
@@ -254,4 +343,4 @@ async function verifyAndRepairSchema(db, opts = {}) {
   return missing;
 }
 
-module.exports = { verifyAndRepairSchema, dropUserForeignKeys, REQUIRED_TABLES, REQUIRED_COLUMNS, REPAIRABLE_TABLES };
+module.exports = { verifyAndRepairSchema, dropUserForeignKeys, repairRegionTree, REQUIRED_TABLES, REQUIRED_COLUMNS, REPAIRABLE_TABLES };

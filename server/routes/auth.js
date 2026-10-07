@@ -17,7 +17,7 @@ const {
   PLATFORM_ROLES,
   ACCOUNT_DEACTIVATED_MESSAGE,
 } = require("../middleware/auth");
-const { resolveTenancy } = require("../lib/tenancy");
+const { resolveTenancy, accessContext, accessibleWorkspaceIds } = require("../lib/tenancy");
 const { logActivity, getClientIp, auditRead } = require("../services/activity");
 const totp = require("../lib/totp");
 const totpLockout = require("../lib/totp-lockout");
@@ -69,6 +69,21 @@ async function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
     )
     .get(user.id);
   if (existing) return existing.id;
+  // Refs 49/67: a user who already belongs to ANY organization (a regional_viewer,
+  // a field_technician, an org admin of someone else's org, ...) is never minted a
+  // personal org. They land in the first workspace they can reach - their own
+  // membership-based access, never platform-wide - or in none.
+  const anyOrg = await db
+    .prepare("SELECT 1 AS hit FROM organization_members WHERE user_id = ? LIMIT 1")
+    .get(user.id);
+  if (anyOrg) {
+    const ids = await accessibleWorkspaceIds(user.id, "user");
+    if (!ids.length) return null;
+    const first = await db
+      .prepare(`SELECT id FROM workspaces WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY name, id LIMIT 1`)
+      .get(...ids);
+    return first ? first.id : null;
+  }
   if (!allowCreate) return null;
 
   // No memberships -> mint a fresh org and Default workspace owned by user.
@@ -861,46 +876,48 @@ router.get("/me", requireAuth, resolveTenancy, asyncHandler(async (req, res) => 
   // operators see all workspaces but get can_admin:false on each.
   const isPlatformStaffUser = isPlatformStaff(req.user.role);
   const isPlatformAdmin = isPlatformRole(req.user.role);
-  const accessible = isPlatformStaffUser
-    ? await db
-        .prepare(
-          `
-        SELECT w.id, w.name, w.organization_id, o.name AS organization_name,
+  // Refs 49/67: which workspaces are listed comes from lib/tenancy's
+  // accessibleWorkspaceIds() - the same source as socket rooms, the regions rollup
+  // and (through accessContext) switch-workspace - instead of a separate SQL copy
+  // of the access rules. Platform staff still see every workspace.
+  const ids = isPlatformStaffUser ? null : await accessibleWorkspaceIds(req.user.id, req.user.role);
+  const accessible =
+    ids && !ids.length
+      ? []
+      : await db
+          .prepare(
+            `
+        SELECT w.id, w.name, w.organization_id, o.name AS organization_name, w.region_id,
                wm.role AS workspace_role, om.role AS org_role,
                (SELECT COUNT(*) FROM devices WHERE workspace_id = w.id) AS device_count
         FROM workspaces w
         JOIN organizations o ON o.id = w.organization_id
         LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = ?
         LEFT JOIN organization_members om ON om.organization_id = w.organization_id AND om.user_id = ?
+        ${ids ? `WHERE w.id IN (${ids.map(() => "?").join(",")})` : ""}
         ORDER BY o.name, w.name
       `,
-        )
-        .all(req.user.id, req.user.id)
-    : await db
-        .prepare(
-          `
-        SELECT w.id, w.name, w.organization_id, o.name AS organization_name,
-               wm.role AS workspace_role, om.role AS org_role,
-               (SELECT COUNT(*) FROM devices WHERE workspace_id = w.id) AS device_count
-        FROM workspaces w
-        JOIN organizations o ON o.id = w.organization_id
-        LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = ?
-        LEFT JOIN organization_members om ON om.organization_id = w.organization_id AND om.user_id = ?
-        WHERE wm.user_id IS NOT NULL
-           OR (om.user_id IS NOT NULL AND om.role IN ('org_owner', 'org_admin', 'field_technician'))
-        ORDER BY o.name, w.name
-      `,
-        )
-        .all(req.user.id, req.user.id);
+          )
+          .all(req.user.id, req.user.id, ...(ids || []));
 
   // Compute can_admin per workspace. Mirrors canAdminWorkspace() in lib/permissions.js
   // but uses already-joined org_role to avoid another N+1 query per workspace.
+  // Refs 49/67: `access` says how the workspace is reached - 'direct' (a
+  // workspace_members row; always wins), 'regional' (a regional_viewer scope),
+  // 'org' (org_owner / org_admin / field_technician, org-wide) or 'platform'.
   for (const w of accessible) {
     w.can_admin =
       isPlatformAdmin ||
       w.org_role === "org_owner" ||
       w.org_role === "org_admin" ||
       w.workspace_role === "workspace_admin";
+    w.access = w.workspace_role
+      ? "direct"
+      : w.org_role === "regional_viewer"
+        ? "regional"
+        : ["org_owner", "org_admin", "field_technician"].includes(w.org_role)
+          ? "org"
+          : "platform";
     delete w.org_role; // internal-only; don't leak to client
   }
 
@@ -943,32 +960,12 @@ router.post("/switch-workspace", requireAuth, asyncHandler(async (req, res) => {
     .get(workspace_id);
   if (!ws) return res.status(404).json({ error: "Workspace not found" });
 
-  // #13: platform staff (admin OR operator) can switch into any workspace.
-  const isPlatformStaffUser = isPlatformStaff(req.user.role);
-  const wsMember = await db
-    .prepare(
-      "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-    )
-    .get(ws.id, req.user.id);
-  const orgMember = await db
-    .prepare(
-      `
-    SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?
-  `,
-    )
-    .get(ws.organization_id, req.user.id);
-  // Ref 43: field_technician is org-wide (can log field visits in any workspace
-  // of the org), so it may switch into any of them - same additive, visibility-
-  // only pattern as accessibleWorkspaceIds()/accessible_workspaces above. The
-  // resulting session is still viewer-equivalent for non-field-visit actions
-  // (lib/tenancy.accessContext resolves it that way).
-  const canAct =
-    isPlatformStaffUser ||
-    !!wsMember ||
-    (orgMember &&
-      (orgMember.role === "org_owner" ||
-        orgMember.role === "org_admin" ||
-        orgMember.role === "field_technician"));
+  // Refs 49/67: the access decision is lib/tenancy.accessContext - the same rule
+  // resolveTenancy applies on every request - rather than a separate copy here.
+  // It admits platform staff (#13), direct members, org_owner / org_admin, an
+  // org-wide field_technician (Ref 43; viewer-equivalent) and a regional_viewer
+  // whose scopes cover this workspace (viewer-equivalent).
+  const canAct = !!(await accessContext(req.user.id, req.user.role, ws));
 
   if (!canAct)
     return res.status(403).json({ error: "Access denied to that workspace" });

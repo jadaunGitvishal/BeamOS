@@ -47,6 +47,7 @@ workspace_viewer), plus a **platform** tier that sits above both.
 | **workspace_admin** | One workspace | Everything workspace_editor can, **plus** manage that workspace's members, rename it, set branding, generate device registration codes | Manage org-level regions or org membership; touch other workspaces |
 | **workspace_editor** | One workspace | Create/edit content, playlists, layouts, schedules, tickets | Manage workspace members, rename the workspace, generate registration codes, touch other workspaces |
 | **workspace_viewer** | One workspace | Read everything — dashboards, content, playlists, tickets, devices | Any write action anywhere in that workspace |
+| **regional_viewer** (org role, Refs 49/67) | The workspaces inside its region scopes | Read everything in those workspaces, exactly like a workspace_viewer there, including exports | Any write action; field-visit logging; anything org-wide (members, regions, settings); workspaces outside its scopes or with no region |
 
 ## Capability matrix
 
@@ -209,6 +210,90 @@ post-delete lookup. The demo ticket used earlier was closed. Nothing in
 this section is live production data.)*
 
 <a id="known-gap-no-azure-ad--entra-id-group-to-role-mapping"></a>
+
+## Regional viewer: geographic read-only access (Refs 49/67)
+
+A **regional_viewer** is an organization role for people who oversee an area
+of the network rather than one store, such as an RTMM, CM, ASM or TSE at PMI.
+They can see every workspace in their area and change nothing.
+
+**Region tree.** An organization's regions form a tree with four levels,
+highest first:
+
+| Level | PMI role |
+|---|---|
+| Region | RTMM |
+| Cluster | CM |
+| Area | ASM |
+| Territory | TSE |
+
+A region's parent must be a **higher** level. Levels can be skipped (a
+territory can sit directly under a cluster), and a node can be placed at the
+top level whatever its level. So a tree is at most four deep. Names are
+unique among siblings. A region that still has child regions can't be
+deleted. Each **workspace** belongs to at most one region (Settings →
+Regions → Workspace assignments). Geography is per workspace, not per device.
+
+**Scopes.** An org owner or org admin gives a regional_viewer one or more
+regions (*Organization members* → **Regions**). The viewer can read every
+workspace whose region is one of those regions **or anywhere below one**. A
+scope on a cluster covers its areas, their territories, and any territory
+directly under the cluster.
+
+**What they get, in each in-scope workspace.** The same as a direct
+workspace_viewer:
+
+- dashboards, devices, content, playlists, schedules, reports
+- **member lists (including email addresses)**, tickets, campaigns and
+  field visits
+- exports (CSV / XLSX / PDF) of anything they can read
+- the Regions SLA rollup, limited to the regions of the workspaces they can see
+
+**What they never get.**
+
+- **Any write.** They resolve to a read-only `workspace_viewer` context
+  (`actingAs: false`), so every write route refuses them. The
+  `viewer-write-denial` test sweeps every write route as a regional_viewer.
+- **Field-visit logging.** That stays with field technicians and workspace
+  editors/admins.
+- **Org-wide settings.** Org members, regions, auth and token policy, Entra
+  mappings.
+- **API tokens.** They can't mint one. A token is refused for read-only
+  callers.
+- **Workspaces outside their scopes.** That includes sibling regions,
+  workspaces in another organization, and **workspaces with no region**,
+  which are never visible to a regional_viewer.
+
+**Direct membership wins.** If a regional_viewer also has a
+`workspace_members` row in a workspace (for example workspace_editor), that
+row applies there, so they can edit that one workspace. The regional scope
+only ever adds read access.
+
+**Timing.** Scope changes, role changes and moving a workspace to another
+region apply on the **next request**. Nothing is cached. An already-open
+dashboard's live socket keeps its rooms until it **reconnects** (switching
+workspace or reloading the page reconnects it).
+
+**Cleanup.** Scopes are removed automatically when:
+
+- the member is removed from the org, or their role changes away from
+  regional_viewer;
+- the user is deleted;
+- the organization is deleted;
+- the scoped region is deleted.
+
+When a region is deleted, its workspaces become unassigned. Nobody silently
+keeps access.
+
+**Sign-in.** A regional_viewer with no workspace membership of their own
+lands in their first in-scope workspace. Anyone who already belongs to an
+organization, field technicians and regional viewers included, is **never
+minted a personal organization** at sign-in. They land in the first workspace
+they can reach, or in none. Only a brand-new user with no organization at all
+still gets one (when `AUTO_CREATE_ORG_ON_SIGNUP` is on).
+
+**Not mappable from Entra.** The Ref 7 Entra app-role mapping can't grant
+regional_viewer; assign it by hand.
 
 ## Entra ID role mapping (Ref 7)
 

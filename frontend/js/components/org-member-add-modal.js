@@ -1,5 +1,5 @@
 // Add-Organization-Member modal. Adds an EXISTING user (by email) to an org
-// with an org_owner/org_admin role - no account creation, no email invite
+// with an org_owner/org_admin/regional_viewer role - no account creation, no email invite
 // (server 404s if the email has no BeamOS account). Styled like
 // admin-create-org-modal.js.
 import { api } from '../api.js';
@@ -9,7 +9,9 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Order = display order (least-privilege first, matching the workspace add-user
 // modal's convention). Server validates set membership and further scopes which
 // roles a non-platform-admin caller may grant (org_owner is platform-admin-only).
-const ORG_ROLES = ['org_admin', 'org_owner'];
+// Refs 49/67: regional_viewer (read-only, region-scoped) is the least privileged;
+// its regions are chosen right after adding (components/region-scope-modal.js).
+const ORG_ROLES = ['regional_viewer', 'org_admin', 'org_owner'];
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));

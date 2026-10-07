@@ -528,24 +528,34 @@ export default {
   // Regions (Phase 3 Stage A)
   "regions.title": "Regions",
   "regions.desc":
-    "Group this organization's workspaces into regions. Regions are managed per-organization; deleting one just unassigns its workspaces, it never deletes them.",
+    "Organize this organization's workspaces into a region tree: Region (RTMM) > Cluster (CM) > Area (ASM) > Territory (TSE). A parent must be a higher level; levels can be skipped. Deleting a region unassigns its workspaces, it never deletes them.",
   "regions.name_placeholder": "e.g. North America",
   "regions.create": "Add region",
   "regions.created_toast": "Region created",
-  "regions.renamed_toast": "Region renamed",
   "regions.deleted_toast": "Region deleted",
   "regions.none": "No regions yet. Add one above.",
   "regions.col_name": "Region",
   "regions.col_workspaces": "Workspaces",
   "regions.col_actions": "Actions",
-  "regions.rename": "Rename",
-  "regions.rename_prompt": "New name for this region:",
   "regions.delete": "Delete",
   "regions.delete_confirm":
     "Delete this region? Its {count} workspace(s) will become unassigned (not deleted).",
   "regions.assign_heading": "Workspace assignments",
   "regions.unassigned": "— No region —",
   "regions.assigned_toast": "Workspace region updated",
+  // Refs 49/67: region tree
+  "regions.level.region": "Region (RTMM)",
+  "regions.level.cluster": "Cluster (CM)",
+  "regions.level.area": "Area (ASM)",
+  "regions.level.territory": "Territory (TSE)",
+  "regions.col_level": "Level",
+  "regions.col_parent": "Parent",
+  "regions.parent_top": "— Top level —",
+  "regions.edit": "Edit",
+  "regions.save": "Save",
+  "regions.cancel": "Cancel",
+  "regions.updated_toast": "Region updated",
+  "regions.delete_has_children": "This region has child regions. Delete or move them first.",
 
   // Ref 5: per-organization SSO-only mode
   "authpolicy.title": "Authentication",
@@ -1537,6 +1547,7 @@ export default {
   // #16: searchable org/workspace switcher
   "switcher.search_placeholder": "Search organizations…",
   "switcher.no_matches": "No matches",
+  "switcher.regional_access": "Regional · read-only",
 
   // Workspace members (Slice 2A - read-only listing; 2B adds mutation keys).
   "members.title": "Workspace members",
@@ -1553,6 +1564,8 @@ export default {
   "members.role.workspace_viewer": "Viewer",
   "members.role.org_owner": "Org owner",
   "members.role.org_admin": "Org admin",
+  "members.role.field_technician": "Field technician",
+  "members.role.regional_viewer": "Regional viewer",
   "members.platform_role_tooltip": "Platform-wide role — not editable here, and workspace access has no effect on it",
   "members.org_role_tooltip": "Organization-wide role — not editable here, and workspace access has no effect on it",
   "members.via_org_label": "via organization",
@@ -1659,6 +1672,18 @@ export default {
   "org_members.success.member_added": "{email} added",
   "org_members.success.role_changed": "Role updated",
   "org_members.success.member_removed": "{name} removed",
+  // Refs 49/67: a regional viewer's region scopes
+  "org_members.scopes.button": "Regions",
+  "org_members.scopes.title": "Regions for {name}",
+  "org_members.scopes.help":
+    "{name} can read, but never change, every workspace in the selected regions and everything below them. Workspaces with no region are never visible.",
+  "org_members.scopes.summary": "Regions: {list}",
+  "org_members.scopes.none": "No regions selected - this member can't see any workspace yet.",
+  "org_members.scopes.empty_org": "This organization has no regions yet. Create them in Settings → Regions.",
+  "org_members.scopes.save": "Save",
+  "org_members.scopes.saving": "Saving...",
+  "org_members.scopes.saved": "Regions updated",
+  "org_members.scopes.added_hint": "Now choose the regions {email} can see.",
 
   // Forced first-login password change (#10). Shown when an admin-provisioned
   // user (must_change_password) is routed to #/change-password.
