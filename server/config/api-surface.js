@@ -105,6 +105,8 @@ const JWT_ONLY_ROUTERS = [
   { path: '/api/dashboard/content',  mod: './routes/dashboard-content',  tenancy: true },
   { path: '/api/dashboard/issues',   mod: './routes/dashboard-issues',   tenancy: true },
   { path: '/api/dashboard/devices',  mod: './routes/dashboard-devices',  tenancy: true },
+  // PMI Ref 71: Overview "Screen runtime" row. Same door as /overview (JWT-only).
+  { path: '/api/dashboard/runtime',  mod: './routes/dashboard-runtime',  tenancy: true },
 ];
 
 // #73: AGENCY_ROUTERS - capability-restricted ('agency' scope) surface. Mounted with

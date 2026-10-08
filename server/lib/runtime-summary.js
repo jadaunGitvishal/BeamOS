@@ -236,4 +236,53 @@ async function getRuntimeSummary(db, opts) {
   return { ...summary, workspaces_loaded: inputs.workspaces };
 }
 
-module.exports = { summarizeRuntime, loadRuntimeInputs, getRuntimeSummary, round1, DAY, NOT_A_SCREEN_STATUS, isBlockedScreen };
+// PMI Ref 71: average runtime as hours online per screen per day, i.e. the
+// time-weighted average uptime (total online seconds / total seconds the screens
+// existed in the period, as in `totals` above) x 24. Worked from the unrounded
+// seconds, capped at 24 and rounded half-up to 1 decimal. null when no screen
+// existed in the period (no denominator). `totals` is summarizeRuntime's `overall`
+// or one of its `workspaces` entries.
+function avgRuntimeHoursPerDay(totals) {
+  if (!totals || !(totals.available_seconds > 0)) return null;
+  return round1(Math.min(1, totals.runtime_seconds / totals.available_seconds) * 24);
+}
+
+// PMI Ref 71: the Overview dashboard's period selector (a day count: 1 "24h",
+// 7 "7d", 30 "30d"; the labels are accepted too) mapped to whole COMPLETE UTC days
+// ending at today's UTC midnight, so today (still accruing) is never included:
+// 1 -> yesterday, 7 -> the 7 days before today, 30 -> the 30 days before today.
+// A missing or unknown value falls back to 30 days, the window the other dashboard
+// routes use when no start is given (`defaulted: true` says so).
+// Returns { days, defaulted, startEpoch, endEpoch (exclusive), first_day, last_day, label }.
+const DASHBOARD_PERIOD_DAYS = { 1: 1, '24h': 1, 7: 7, '7d': 7, 30: 30, '30d': 30 };
+const DEFAULT_DASHBOARD_PERIOD_DAYS = 30;
+function completeUtcDays(period, now = new Date()) {
+  const key = String(period ?? '').trim().toLowerCase();
+  const known = Object.prototype.hasOwnProperty.call(DASHBOARD_PERIOD_DAYS, key);
+  const days = known ? DASHBOARD_PERIOD_DAYS[key] : DEFAULT_DASHBOARD_PERIOD_DAYS;
+  const endEpoch = Math.floor(now.getTime() / 1000 / DAY) * DAY;
+  const startEpoch = endEpoch - days * DAY;
+  const { firstDay, lastDay } = periodDays(startEpoch, endEpoch);
+  return {
+    days,
+    defaulted: !known,
+    startEpoch,
+    endEpoch,
+    first_day: firstDay,
+    last_day: lastDay,
+    label: days === 1 ? 'last complete day (UTC)' : `last ${days} complete days (UTC)`,
+  };
+}
+
+module.exports = {
+  summarizeRuntime,
+  loadRuntimeInputs,
+  getRuntimeSummary,
+  avgRuntimeHoursPerDay,
+  completeUtcDays,
+  DASHBOARD_PERIOD_DAYS,
+  round1,
+  DAY,
+  NOT_A_SCREEN_STATUS,
+  isBlockedScreen,
+};

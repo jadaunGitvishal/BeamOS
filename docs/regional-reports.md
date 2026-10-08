@@ -142,3 +142,55 @@ and it arrives after 05:30 IST on 7 October.
 - **A failed send is logged and not retried**, the same as Ref 46. One person's
   failure doesn't stop the others.
 - No database migration: only the three `app_settings` rows above.
+
+## Overview dashboard: screen runtime (PMI Ref 71)
+
+The React dashboard's Overview page has a **Screen runtime** row with the same
+figures as these reports, for the **active workspace**. It reads
+`GET /api/dashboard/runtime?period=<1|7|30>` (the global period selector's
+values; `24h`, `7d` and `30d` are accepted too). The endpoint takes every
+figure from `lib/runtime-summary.js`, so the dashboard and the reports can't
+disagree.
+
+**Who can read it:** the same callers as `GET /api/dashboard/overview`. It is
+mounted the same way (JWT session plus the active workspace; see
+`config/api-surface.js`). API tokens get 401. Someone with no workspace gets
+200 with every figure `n/a`.
+
+**Period: whole complete UTC days, never today.** Today is still accruing, so
+it is left out:
+
+| Selector | Days covered |
+|---|---|
+| 24h | Yesterday, 00:00 to 24:00 UTC (the daily report's day) |
+| 7d | The 7 complete UTC days before today |
+| 30d | The 30 complete UTC days before today |
+| Missing or unknown | 30 complete UTC days, the default window of the other dashboard routes |
+
+The response gives the day range (`first_day`, `last_day`) and a label such as
+`last 7 complete days (UTC)`. In India each day runs from 05:30 IST to 05:30 IST
+the next day, so "yesterday" ends at 05:30 IST today. This range can differ from
+the Overview header's rolling "Reporting period", which runs up to now.
+
+**KPIs** (the definitions above apply unchanged):
+
+- **Average runtime** = hours online per screen per day: the time-weighted
+  average uptime x 24. A screen registered during the period counts only for the
+  time since it was registered. It's worked from the unrounded seconds, capped
+  at 24 h and rounded half-up to one decimal. The row shows no uptime %, so the
+  SLA "Fleet uptime" gauge is the page's only uptime figure (the API still
+  returns the reports' average uptime as `avg_uptime_pct`, for parity checks).
+  The row's figures can differ from that gauge because they are time-weighted
+  across all eligible screens, including screens with no runtime, while the
+  gauge is a plain per-screen average of only the screens that reported usage
+  data.
+- **Zero-runtime screens** = the zero-runtime rule above: registered at or
+  before the period start, not blocked, not waiting to be paired, 0 online
+  seconds. Shown as "N of M" and a percentage, where M is the screens registered
+  at or before the period start (new screens are left out of both).
+- **Screens with no runtime**: up to 10 zero-runtime screens, sorted by name,
+  each linking to that screen's page, with "and N more" when there are more.
+- With no screens (or no eligible screens), the figure shows **n/a**.
+
+**RFS compliance is not shown yet.** It is waiting for PMI's definition of the
+RFS target. There is no RFS target setting or column.

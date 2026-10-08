@@ -13,6 +13,7 @@ import StatTile from "../components/StatTile";
 import ComplianceGauge from "../components/ComplianceGauge";
 import KpiCard from "../components/KpiCard";
 import ProgressBar from "../components/ProgressBar";
+import ScreenRuntime from "../components/ScreenRuntime";
 
 export default function OverviewView() {
   const { me, setDeviceCount, setIssueCount } = useSession();
@@ -330,6 +331,9 @@ export default function OverviewView() {
           </div>
         </div>
       </div>
+
+      {/* PMI Ref 71: screen runtime over complete UTC days (own fetch). */}
+      <ScreenRuntime />
 
       {/* SLA (left) + outages and Priority actions (right). Columns stretch to
           equal height; stacks on narrow screens. */}
