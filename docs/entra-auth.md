@@ -235,6 +235,15 @@ external application* may call the API on a workspace's behalf is an
 administrative trust decision. Revoking works the same way as revoking an
 `api_tokens` row: immediate, soft-deleted for the audit trail.
 
+A Service Principal is **pinned** to its registered workspace, exactly like an
+API token. It acts as the admin who registered it, so if that admin loses
+access to the workspace, every call returns
+`403 {"code":"TOKEN_WORKSPACE_ACCESS_LOST","error":"This API token's workspace is no longer accessible to its owner"}`.
+It never falls back to another workspace the admin can reach. The registration
+is **not revoked**: once the admin's access is restored, the integration works
+again. A refusal is recorded in the audit log as `ACCESS_DENIED` against the
+registering admin.
+
 ## Real evidence: automated test coverage
 
 Two test files, 27 tests, **0 failing**:

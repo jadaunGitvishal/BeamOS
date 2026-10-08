@@ -46,6 +46,15 @@ redirected to another workspace (`X-Work­space-Id` / `?workspace_id=` are both
 stripped for token callers — [`middleware/apiToken.js:68-72`](../server/middleware/apiToken.js#L68-L72)).
 One token per workspace you want to report on.
 
+The token is **pinned** to that workspace. It acts as its owner, so if the
+owner loses access to the workspace (removed from it, role changed, or for a
+regional viewer, the workspace leaves their region scope), every call returns
+`403 {"code":"TOKEN_WORKSPACE_ACCESS_LOST","error":"This API token's workspace is no longer accessible to its owner"}`.
+It never falls back to another workspace the owner can still reach. The
+token is **not revoked**: once the owner's access is restored, the same token
+works again. A refusal is recorded in the audit log as `ACCESS_DENIED`
+against the token's owner.
+
 ## 2. Power BI Desktop — Web connector
 
 1. **Get Data → Web**.

@@ -23,6 +23,9 @@
 //
 // Steps 1-3 are validated against access. If a stale value (e.g. user was
 // removed from the workspace) is found, it's discarded and we fall through.
+//
+// API tokens / Entra service principals (req.viaToken) skip all of the above:
+// their bound workspace is the only candidate, with no fallback (see below).
 
 'use strict';
 
@@ -137,38 +140,62 @@ const resolveTenancy = asyncHandler(async function resolveTenancy(req, res, next
   req.isPlatformOperator = isPlatformStaffUser && !isPlatformAdmin;
   req.isPlatformStaff = isPlatformStaffUser;
 
-  // Build the ordered candidate list of workspace_ids to try. header/query
-  // candidates are `explicit`: the caller named this workspace on purpose,
-  // as opposed to the JWT's current_workspace_id, which is just carried
-  // session state the caller didn't type anywhere on this request.
-  const candidates = [];
-  const headerWs = (req.headers['x-workspace-id'] || '').trim();
-  if (headerWs) candidates.push({ id: headerWs, explicit: true });
-  if (req.query && req.query.workspace_id) candidates.push({ id: String(req.query.workspace_id), explicit: true });
-  if (req.jwtWorkspaceId) candidates.push({ id: req.jwtWorkspaceId, explicit: false });
-
   let workspace = null;
   let context = null;
-  for (const candidate of candidates) {
-    const ws = await loadWorkspace(candidate.id);
-    if (!ws) continue;
-    const ctx = await accessContext(req.user.id, req.user.role, ws);
+
+  if (req.viaToken) {
+    // API token / Entra service principal: pinned to its bound workspace
+    // (req.jwtWorkspaceId, set by middleware/apiToken.js / entraToken.js), which
+    // is the ONLY candidate - never a fallback. A session's current workspace is
+    // just where the user last was, so landing them somewhere else is harmless;
+    // a token is a standing credential an integration reads and writes through
+    // unattended, so silently re-pointing it at another workspace its owner
+    // happens to reach would send that integration into a different tenant.
+    // Refuse instead. The token is not revoked: restore the owner's access and
+    // the same token works again.
+    const ws = await loadWorkspace(req.jwtWorkspaceId);
+    const ctx = ws && await accessContext(req.user.id, req.user.role, ws);
     if (!ctx) {
-      if (candidate.explicit) {
-        // Caller explicitly asked for this workspace via X-Workspace-Id or
-        // ?workspace_id= and has no path into it (not a member, not
-        // org-wide, not platform staff) - reject instead of silently
-        // substituting their own workspace. A stale JWT current_workspace_id
-        // (not explicit) still falls through to the fallbacks below.
-        return res.status(403).json({ error: 'Access denied to that workspace' });
-      }
-      continue;
+      return res.status(403).json({
+        code: 'TOKEN_WORKSPACE_ACCESS_LOST',
+        error: "This API token's workspace is no longer accessible to its owner",
+      });
     }
     workspace = ws;
     context = ctx;
-    break;
+  } else {
+    // Build the ordered candidate list of workspace_ids to try. header/query
+    // candidates are `explicit`: the caller named this workspace on purpose,
+    // as opposed to the JWT's current_workspace_id, which is just carried
+    // session state the caller didn't type anywhere on this request.
+    const candidates = [];
+    const headerWs = (req.headers['x-workspace-id'] || '').trim();
+    if (headerWs) candidates.push({ id: headerWs, explicit: true });
+    if (req.query && req.query.workspace_id) candidates.push({ id: String(req.query.workspace_id), explicit: true });
+    if (req.jwtWorkspaceId) candidates.push({ id: req.jwtWorkspaceId, explicit: false });
+
+    for (const candidate of candidates) {
+      const ws = await loadWorkspace(candidate.id);
+      if (!ws) continue;
+      const ctx = await accessContext(req.user.id, req.user.role, ws);
+      if (!ctx) {
+        if (candidate.explicit) {
+          // Caller explicitly asked for this workspace via X-Workspace-Id or
+          // ?workspace_id= and has no path into it (not a member, not
+          // org-wide, not platform staff) - reject instead of silently
+          // substituting their own workspace. A stale JWT current_workspace_id
+          // (not explicit) still falls through to the fallbacks below.
+          return res.status(403).json({ error: 'Access denied to that workspace' });
+        }
+        continue;
+      }
+      workspace = ws;
+      context = ctx;
+      break;
+    }
   }
 
+  // Session requests only: a token that got here has its workspace already.
   if (!workspace) {
     // Fall back to the user's first workspace_members row.
     const first = await firstAccessibleWorkspace(req.user.id);

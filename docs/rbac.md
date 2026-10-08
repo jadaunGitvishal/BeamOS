@@ -259,7 +259,11 @@ workspace_viewer:
 - **Org-wide settings.** Org members, regions, auth and token policy, Entra
   mappings.
 - **API tokens.** They can't mint one. A token is refused for read-only
-  callers.
+  callers. A token they minted earlier (for example while holding a direct
+  editor row) is pinned to its workspace: if a scope or region change takes
+  that workspace out of their reach, the token gets
+  `403 TOKEN_WORKSPACE_ACCESS_LOST` and never falls back to another in-scope
+  workspace.
 - **Workspaces outside their scopes.** That includes sibling regions,
   workspaces in another organization, and **workspaces with no region**,
   which are never visible to a regional_viewer.
