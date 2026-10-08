@@ -1,0 +1,47 @@
+# Android release-path check: runs release lint (lintVitalRelease) plus the
+# release build steps - resource processing, Kotlin compilation and dexing -
+# without packaging or signing. Catches failures that only show up in a release
+# build (e.g. lint's DuplicatePlatformClasses), which ci.yml's debug unit tests
+# never reach. No keystore or secrets are used here: signed APKs are still
+# produced manually with scripts/finalize-release.sh.
+name: Android release check
+
+on:
+  push:
+    branches: [main, version2]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-release-check.yml"
+  pull_request:
+    branches: [main, version2]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-release-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-check:
+    name: Release lint + build steps (unsigned)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      # An explicit task list rather than assembleRelease: excluding packageRelease
+      # from assembleRelease also skips dexing, and packaging is what pulls in
+      # signing (validateSigningRelease).
+      - name: Release lint + resources, Kotlin compile and dexing (no packaging/signing)
+        working-directory: android
+        run: ./gradlew :app:lintVitalRelease :app:processReleaseResources :app:compileReleaseKotlin :app:mergeDexRelease --no-daemon

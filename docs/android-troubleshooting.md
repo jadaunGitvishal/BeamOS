@@ -132,6 +132,29 @@ online to receive *Disable kiosk lockdown*).
 
 ---
 
+## CI: "Android release check" failed
+
+The **Android release check** workflow
+(`.github/workflows/android-release-check.yml`) runs on pushes and pull
+requests to `main` and `version2` that touch `android/`. It runs release lint
+(`lintVitalRelease`) and the release build steps (resources, Kotlin compile,
+dexing) without packaging or signing, so it catches release-only failures such
+as `DuplicatePlatformClasses` that the debug unit tests miss.
+
+It does not produce an APK. Signed APKs are still built manually with
+`scripts/finalize-release.sh` and the release key.
+
+If it fails on lint, run the same command locally from `android/`:
+
+```bash
+./gradlew :app:lintVitalRelease :app:processReleaseResources :app:compileReleaseKotlin :app:mergeDexRelease --no-daemon
+```
+
+The lint errors (issue ID in brackets, e.g. `[DuplicatePlatformClasses]`) are
+printed in the build output.
+
+---
+
 ## Reference: where things live
 
 | Thing | Location |
