@@ -2,7 +2,7 @@ const { db } = require('../db/database');
 const config = require('../config');
 const proxyaddr = require('proxy-addr');
 const { trustedProxies } = require('../config/cloudflareIps');
-const { appendEntry } = require('../lib/activity-chain');
+const { appendEntry, pruneChain } = require('../lib/activity-chain');
 
 // Gate function: returns true when an immediate TCP peer is one we trust
 // to populate forwarding headers (Cloudflare edges, loopback, link-local,
@@ -77,14 +77,20 @@ async function getActivity(options = {}) {
 }
 
 // Prune activity_log rows past the retention window (config.auditLogRetentionDays,
-// ≥365 per RFP compliance). Boundary: a row is deleted once it is strictly older
-// than the window — a row exactly N days old is kept.
-// Only ever invoked by the manual admin action DELETE /api/activity/prune; no
-// scheduler or background sweep calls this.
-async function pruneActivityLog() {
-  await db
-    .prepare("DELETE FROM activity_log WHERE created_at < UNIX_TIMESTAMP() - (? * 86400)")
-    .run(config.auditLogRetentionDays);
+// ≥365 per RFP compliance) without breaking the hash chain: lib/activity-chain.js
+// pruneChain removes the id-ordered block before the first row still inside the
+// window (cutoff = now - N days; a row exactly N days old is inside), records the
+// checkpoint and chains an audit:pruned entry by `actingUserId`, all in one
+// transaction. Returns { pruned, anchor_id, cutoff } ({ pruned: 0, cutoff } when
+// nothing was old enough). Only ever invoked by the manual admin action
+// DELETE /api/activity/prune; no scheduler or background sweep calls this.
+async function pruneActivityLog(actingUserId = null) {
+  const now = Math.floor(Date.now() / 1000);
+  return pruneChain(db, {
+    cutoffEpoch: now - config.auditLogRetentionDays * 86400,
+    now,
+    userId: actingUserId,
+  });
 }
 
 // The audit-log path for a request: mount path + matched route PATTERN (e.g.

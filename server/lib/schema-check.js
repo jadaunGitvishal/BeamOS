@@ -145,6 +145,13 @@ const REQUIRED_COLUMNS = [
   // unchained row, which the verifier reports as a failure.
   ['activity_log', 'prev_hash', "ALTER TABLE activity_log ADD COLUMN prev_hash CHAR(64) NULL"],
   ['activity_log', 'entry_hash', "ALTER TABLE activity_log ADD COLUMN entry_hash CHAR(64) NULL"],
+  // Audit retention pruning checkpoint (lib/activity-chain.js pruneChain). The
+  // verifier and backfillChain() read all three at boot / on every check. An
+  // existing chain row gets NULL anchors and pruned_count 0 = "never pruned",
+  // which verifies exactly as before.
+  ['activity_log_chain', 'anchor_id', "ALTER TABLE activity_log_chain ADD COLUMN anchor_id BIGINT NULL"],
+  ['activity_log_chain', 'anchor_hash', "ALTER TABLE activity_log_chain ADD COLUMN anchor_hash CHAR(64) NULL"],
+  ['activity_log_chain', 'pruned_count', "ALTER TABLE activity_log_chain ADD COLUMN pruned_count BIGINT NOT NULL DEFAULT 0"],
   // Ref 31: one-time device hardware identity. The device:register handler
   // (ws/deviceSocket.js) and the activation-code claim (routes/registration-codes.js)
   // both write these now, so an un-migrated DB would fail every register/claim until

@@ -98,12 +98,19 @@ router.get(
   }),
 );
 
-// Prune old logs (admin only)
-router.delete("/prune", (req, res) => {
+// Prune old logs (admin only). Awaited, so success is only reported once the
+// prune (block delete + checkpoint + chained audit:pruned entry, one transaction)
+// has committed; a failure rolls all of it back and returns 500.
+router.delete("/prune", async (req, res) => {
   if (!ELEVATED_ROLES.includes(req.user.role))
     return res.status(403).json({ error: "Admin only" });
-  pruneActivityLog();
-  res.json({ success: true });
+  try {
+    const { pruned, anchor_id = null, cutoff } = await pruneActivityLog(req.user.id);
+    res.json({ success: true, pruned, anchor_id, cutoff });
+  } catch (e) {
+    console.error("[activity] audit-log prune failed:", e);
+    res.status(500).json({ error: "Audit log prune failed" });
+  }
 });
 
 // GET /verify-integrity?start_id=&end_id=  (admin only)

@@ -130,7 +130,9 @@ makes an HTTP request, so each such request produces exactly one entry.
 
 Rows older than `AUDIT_LOG_RETENTION_DAYS` (default 365, and values below 365
 are raised to 365) are deleted only by the manual admin action
-`DELETE /api/activity/prune`. Nothing runs automatically.
+`DELETE /api/activity/prune`. Nothing runs automatically. See
+[Retention pruning](#retention-pruning) for how a prune keeps the chain
+verifiable.
 
 ## Tamper evidence
 
@@ -139,6 +141,74 @@ Each row's `entry_hash` is SHA-256 over `prev_hash`, `user_id`, `action`,
 before it. `GET /api/activity/verify-integrity` (optionally with
 `?start_id=&end_id=`) walks the chain and reports altered, unlinked or missing
 rows. See `lib/activity-chain.js` for the exact serialization.
+
+## Retention pruning
+
+`DELETE /api/activity/prune` is manual and limited to the elevated admin roles,
+as before. It waits for the prune to finish and returns
+`{ success: true, pruned, anchor_id, cutoff }`. If the prune fails, nothing is
+removed, the error is logged on the server, and the route returns `500`
+`{ error }` (never `success: true`).
+
+**What is removed.** The cutoff is now minus the retention period. A prune
+removes one block of rows in `id` order from the start of the chain: every row
+whose `id` is lower than that of the first row (in `id` order) whose
+`created_at` is at or after the cutoff. It never deletes by `created_at` alone.
+A row with an old timestamp but a higher `id` than an in-window row survives,
+so a prune can't leave a gap in the middle of the chain. If no row is inside
+the window, every row is removed, and the new `audit:pruned` entry is the only
+row left. If nothing is old enough, nothing changes: the response has
+`pruned: 0` and no `audit:pruned` entry is written.
+
+**The checkpoint.** `activity_log_chain` has three more columns:
+
+- `anchor_id` and `anchor_hash`: the `id` and `entry_hash` of the newest row the
+  last prune removed. The first remaining row's `prev_hash` points at this hash.
+- `pruned_count`: the total number of rows ever pruned. `entry_count` still
+  counts every row ever chained, so `entry_count - pruned_count` rows should
+  exist.
+
+On a database that predates them, the startup schema check
+(`lib/schema-check.js`) adds the three columns, leaving the anchors `NULL` and
+`pruned_count` at `0`, which means "never pruned". It logs each column it adds
+and does nothing on later runs.
+
+**The `audit:pruned` entry.** Each prune appends a normal chained entry with
+action `audit:pruned`. Its `user_id` is the admin who ran the prune, and its
+`details` is JSON:
+`{"cutoff", "removed", "anchor_id", "anchor_hash", "pruned_count_total"}`.
+The delete, the checkpoint update and this entry are written in one
+transaction, holding the same `activity_log_chain` row lock as every append.
+Concurrent audit writes wait for the prune and then chain after its entry. If
+any step fails, all of it rolls back.
+
+**How verification uses it.** `verify-integrity` starts the chain at
+`anchor_hash` instead of the genesis hash, requires the first remaining row's
+`id` to be above `anchor_id`, and expects `entry_count - pruned_count` rows. A
+ranged check that starts at or before the first remaining row uses the anchor
+the same way. After a prune, the response also carries a `checkpoint` object.
+
+The checkpoint is also cross-checked against the newest `audit:pruned` entry.
+They must agree on `anchor_id`, `anchor_hash` and the total pruned count.
+Verification reports the new failure type `checkpoint_mismatch` when:
+
+- they disagree (for example `anchor_hash` or `pruned_count` was edited);
+- the checkpoint is set but no `audit:pruned` entry exists (it was deleted);
+- `audit:pruned` entries exist but the checkpoint is empty;
+- a row at or below `anchor_id` is still present.
+
+The other kinds of tampering show up as the existing failure types:
+
+- Editing an `audit:pruned` entry's `details` gives `content_altered`.
+- Deleting further rows from the start gives `broken_link` and
+  `count_mismatch`.
+
+A database that has never been pruned verifies exactly as before.
+
+Rows that were already damaged are not repaired: a prune neither re-hashes nor
+rewrites any row. For example, rows damaged by the earlier user-deletion issue
+(see [User deletion](#user-deletion)) keep failing verification until a prune
+removes them with the rest of their block.
 
 ## User deletion
 
@@ -198,18 +268,6 @@ These are documented here and not fixed.
    status `200`, so the entry says `outcome=completed` even though the file is
    empty or truncated. The failure appears only in the server console
    (`[backup] mysqldump exited …`).
-3. **Pruning makes the chain fail verification.** `pruneActivityLog`
-   (`DELETE /api/activity/prune`) deletes the oldest rows but leaves
-   `activity_log_chain` untouched. After a prune, a whole-chain
-   `verify-integrity` reports two failures:
-   - `broken_link` on the first remaining row. Its `prev_hash` points at a
-     deleted row, while the verifier expects the genesis hash.
-   - `count_mismatch`. `entry_count` still counts the deleted rows.
-
-   A ranged check that starts at the first remaining row fails the same way;
-   one that starts any later passes. This was confirmed with the real
-   `verifyChain` over a simulated prune. Retention pruning and verification
-   need to be reconciled (tracked separately).
 
 ## Tests
 
@@ -238,3 +296,19 @@ covers:
   `organization_id` without breaking the chain;
 - the foreign-key repair on a scratch table (and that a second run is a no-op);
 - the startup repair's result on the real `activity_log`.
+
+[`server/test/audit-prune.test.js`](../server/test/audit-prune.test.js) runs
+against a scratch MySQL database that it creates and drops, so the real audit
+log is never pruned. It covers:
+
+- full and ranged verification after a prune;
+- two prunes in a row;
+- nothing old enough to prune, and everything old enough;
+- an out-of-order timestamp (no gap in the middle of the chain);
+- audit writes that run during a prune;
+- rollback when the prune fails partway;
+- tamper detection after a prune;
+- unchanged verification for a chain that has never been pruned;
+- the route: `403` for non-admins, the counts, a `500` on failure, and the
+  audit entries the route writes;
+- the startup column repair.

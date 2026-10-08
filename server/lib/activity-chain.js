@@ -87,6 +87,15 @@ const INSERT_SQL = `INSERT INTO activity_log
 // Callers pass whatever subset of fields they have; the rest default to NULL.
 // created_at defaults to "now" (UNIX seconds) and is what gets hashed.
 async function appendEntry(db, fields = {}) {
+  // db.transaction(fn) returns a runner; invoke it (trailing ()) to actually run.
+  return db.transaction((tx) => appendInTx(tx, fields))();
+}
+
+// The body of appendEntry, on a caller's transaction handle `tx` (every statement
+// runs on that one connection and commits/rolls back with the caller's work).
+// pruneChain() uses it so its audit:pruned entry is chained inside the prune's own
+// transaction. Re-taking the row lock is harmless when the caller already holds it.
+async function appendInTx(tx, fields = {}) {
   const {
     user_id = null,
     device_id = null,
@@ -102,38 +111,108 @@ async function appendEntry(db, fields = {}) {
 
   if (!action) throw new Error('appendEntry: action is required');
 
-  // db.transaction(fn) returns a runner; invoke it (trailing ()) to actually run.
+  // (1) Take the exclusive lock: an UPDATE of chain row 1 serializes every
+  // concurrent append here (see the header). Doubles as the "chain last
+  // touched" timestamp.
+  await lockChainRow(tx);
+
+  // (2) Read the head. We hold the row lock, so this is the true current head
+  // even if another append was racing us a moment ago.
+  const head = await tx
+    .prepare('SELECT last_hash, entry_count FROM activity_log_chain WHERE id = 1')
+    .get();
+  const prev_hash = head.last_hash;
+  const entry_hash = computeEntryHash({ prev_hash, user_id, action, details, ip_address, created_at });
+
+  const res = await tx.prepare(INSERT_SQL).run(
+    user_id, device_id, action, details, ip_address, workspace_id, organization_id,
+    acting_user_id, was_acting_as ? 1 : 0, created_at, prev_hash, entry_hash,
+  );
+
+  await tx
+    .prepare('UPDATE activity_log_chain SET last_hash = ?, entry_count = entry_count + 1, updated_at = ? WHERE id = 1')
+    .run(entry_hash, Math.floor(Date.now() / 1000));
+
+  return { id: res.lastInsertRowid, entry_hash, prev_hash };
+}
+
+async function lockChainRow(tx) {
+  const locked = await tx
+    .prepare('UPDATE activity_log_chain SET updated_at = ? WHERE id = 1')
+    .run(Math.floor(Date.now() / 1000));
+  if (!locked.changes) {
+    // Should never happen: schema.sql seeds row 1 and backfillChain() re-asserts
+    // it at boot. Fail loudly rather than silently forking from genesis.
+    throw new Error('activity_log_chain row 1 is missing — run backfillChain()');
+  }
+}
+
+// The audit:pruned entry's action. verifyChain() cross-checks the newest one
+// against the checkpoint on activity_log_chain.
+const PRUNED_ACTION = 'audit:pruned';
+
+// Retention pruning that keeps the chain verifiable. Removes ONE clean, id-ordered
+// block from the START of the chain: every row with id < boundaryId, where
+// boundaryId is the id of the first row (in id order) whose created_at is inside
+// the window (>= cutoffEpoch). Never deletes by created_at alone, so an
+// out-of-order old row after an in-window row survives and no middle gap can
+// appear. If no row is inside the window the block is every row; the new
+// audit:pruned entry is then the only survivor.
+//
+// In ONE transaction, holding the same activity_log_chain row lock appendEntry
+// takes (so concurrent logActivity calls queue behind it): delete the block,
+// record the checkpoint (anchor_id/anchor_hash = the newest deleted row, the
+// prev_hash the first survivor links to; pruned_count += N), and chain an
+// audit:pruned entry describing it. All of it commits together or not at all.
+// Nothing old enough -> { pruned: 0 }, no changes, no audit:pruned entry.
+async function pruneChain(db, { cutoffEpoch, now = Math.floor(Date.now() / 1000), userId = null } = {}) {
+  const cutoff = Number(cutoffEpoch);
+  if (!Number.isFinite(cutoff)) throw new Error('pruneChain: cutoffEpoch is required');
+
   return db.transaction(async (tx) => {
-    // (1) Take the exclusive lock: an UPDATE of chain row 1 serializes every
-    // concurrent append here (see the header). Doubles as the "chain last
-    // touched" timestamp.
-    const locked = await tx
-      .prepare('UPDATE activity_log_chain SET updated_at = ? WHERE id = 1')
-      .run(Math.floor(Date.now() / 1000));
-    if (!locked.changes) {
-      // Should never happen: schema.sql seeds row 1 and backfillChain() re-asserts
-      // it at boot. Fail loudly rather than silently forking from genesis.
-      throw new Error('activity_log_chain row 1 is missing — run backfillChain()');
+    await lockChainRow(tx);
+
+    const inWindow = await tx
+      .prepare('SELECT MIN(id) AS id FROM activity_log WHERE created_at >= ?')
+      .get(cutoff);
+    let boundaryId;
+    if (inWindow && inWindow.id != null) {
+      boundaryId = Number(inWindow.id);
+    } else {
+      const newest = await tx.prepare('SELECT MAX(id) AS id FROM activity_log').get();
+      if (!newest || newest.id == null) return { pruned: 0, cutoff };
+      boundaryId = Number(newest.id) + 1;
     }
 
-    // (2) Read the head. We hold the row lock, so this is the true current head
-    // even if another append was racing us a moment ago.
-    const head = await tx
-      .prepare('SELECT last_hash, entry_count FROM activity_log_chain WHERE id = 1')
-      .get();
-    const prev_hash = head.last_hash;
-    const entry_hash = computeEntryHash({ prev_hash, user_id, action, details, ip_address, created_at });
+    const last = await tx
+      .prepare('SELECT id, entry_hash FROM activity_log WHERE id < ? ORDER BY id DESC LIMIT 1')
+      .get(boundaryId);
+    if (!last) return { pruned: 0, cutoff };
 
-    const res = await tx.prepare(INSERT_SQL).run(
-      user_id, device_id, action, details, ip_address, workspace_id, organization_id,
-      acting_user_id, was_acting_as ? 1 : 0, created_at, prev_hash, entry_hash,
-    );
+    const del = await tx.prepare('DELETE FROM activity_log WHERE id < ?').run(boundaryId);
+    const removed = Number(del.changes);
+    const anchorId = Number(last.id);
+    const anchorHash = last.entry_hash;
 
     await tx
-      .prepare('UPDATE activity_log_chain SET last_hash = ?, entry_count = entry_count + 1, updated_at = ? WHERE id = 1')
-      .run(entry_hash, Math.floor(Date.now() / 1000));
+      .prepare('UPDATE activity_log_chain SET anchor_id = ?, anchor_hash = ?, pruned_count = pruned_count + ? WHERE id = 1')
+      .run(anchorId, anchorHash, removed);
+    const { pruned_count } = await tx.prepare('SELECT pruned_count FROM activity_log_chain WHERE id = 1').get();
 
-    return { id: res.lastInsertRowid, entry_hash, prev_hash };
+    await appendInTx(tx, {
+      user_id: userId,
+      action: PRUNED_ACTION,
+      details: JSON.stringify({
+        cutoff,
+        removed,
+        anchor_id: anchorId,
+        anchor_hash: anchorHash,
+        pruned_count_total: Number(pruned_count),
+      }),
+      created_at: now,
+    });
+
+    return { pruned: removed, anchor_id: anchorId, cutoff };
   })();
 }
 
@@ -142,8 +221,16 @@ async function appendEntry(db, fields = {}) {
 // in id order from the last already-chained row (or genesis). ALREADY-hashed rows
 // are the anchor and are NEVER rewritten — rewriting them would erase tamper
 // evidence. Also re-asserts the activity_log_chain head row.
+//
+// Pruning (pruneChain): entry_count counts every row ever chained, pruned ones
+// included, so the re-asserted count is surviving chained rows + pruned_count, and
+// an empty surviving chain starts from the prune checkpoint's anchor_hash rather
+// than genesis. Never pruned (pruned_count 0, anchor NULL) = exactly as before.
 async function backfillChain(db) {
   await db.exec("INSERT IGNORE INTO activity_log_chain (id, last_hash, entry_count) VALUES (1, REPEAT('0', 64), 0)");
+
+  const checkpoint = await readCheckpoint(db);
+  const startHash = checkpoint.anchor_hash || GENESIS_PREV_HASH;
 
   const gap = await db.prepare('SELECT COUNT(*) AS n FROM activity_log WHERE entry_hash IS NULL').get();
   const unchained = gap ? Number(gap.n) : 0;
@@ -158,14 +245,14 @@ async function backfillChain(db) {
     const total = await db.prepare('SELECT COUNT(*) AS n FROM activity_log WHERE entry_hash IS NOT NULL').get();
     await db
       .prepare('UPDATE activity_log_chain SET last_hash = ?, entry_count = ?, updated_at = ? WHERE id = 1')
-      .run(tail ? tail.entry_hash : GENESIS_PREV_HASH, total ? Number(total.n) : 0, Math.floor(Date.now() / 1000));
+      .run(tail ? tail.entry_hash : startHash, (total ? Number(total.n) : 0) + checkpoint.pruned_count, Math.floor(Date.now() / 1000));
     return { backfilled: 0 };
   }
 
   const anchor = await db
     .prepare('SELECT id, entry_hash FROM activity_log WHERE entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1')
     .get();
-  let prev = anchor ? anchor.entry_hash : GENESIS_PREV_HASH;
+  let prev = anchor ? anchor.entry_hash : startHash;
   let lastId = anchor ? Number(anchor.id) : 0;
   let chainedCount = await db.prepare('SELECT COUNT(*) AS n FROM activity_log WHERE entry_hash IS NOT NULL').get();
   chainedCount = chainedCount ? Number(chainedCount.n) : 0;
@@ -198,7 +285,7 @@ async function backfillChain(db) {
 
   await db
     .prepare('UPDATE activity_log_chain SET last_hash = ?, entry_count = ?, updated_at = ? WHERE id = 1')
-    .run(prev, chainedCount + filled, Math.floor(Date.now() / 1000));
+    .run(prev, chainedCount + filled + checkpoint.pruned_count, Math.floor(Date.now() / 1000));
 
   console.log(`[activity-chain] backfilled ${filled} pre-existing activity_log row(s) into the hash chain`);
   return { backfilled: filled };
@@ -214,19 +301,34 @@ async function backfillChain(db) {
 // Returns:
 //   { ok, checked, range:{start_id,end_id}, chain_head:{...}, failures:[ {id, type, detail} ] }
 // failure types: 'unchained' | 'content_altered' | 'broken_link' | 'head_mismatch' | 'count_mismatch'
+//                | 'checkpoint_mismatch'
+//
+// After a retention prune (pruneChain) the chain starts at the checkpoint: the
+// first surviving row must link to anchor_hash (not genesis) and have an id above
+// anchor_id, the expected row count is entry_count - pruned_count, and the
+// checkpoint must agree with the newest audit:pruned entry (checkpoint_mismatch
+// otherwise). A ranged check that starts at or before the first surviving row
+// uses the anchor the same way. Never pruned: identical to before.
 async function verifyChain(db, opts = {}) {
   const startId = opts.startId != null ? Number(opts.startId) : null;
   const endId = opts.endId != null ? Number(opts.endId) : null;
   const fullChain = startId == null && endId == null;
 
+  const checkpoint = await readCheckpoint(db);
+  const startHash = checkpoint.anchor_hash || GENESIS_PREV_HASH;
+
   // Anchor: the entry_hash the first in-range row's prev_hash must equal.
-  let expectedPrev = GENESIS_PREV_HASH;
+  let expectedPrev = startHash;
   let firstRowId = null;
+  let usesChainStart = true; // the walk begins at the first surviving row
   if (startId != null) {
     const before = await db
       .prepare('SELECT id, entry_hash FROM activity_log WHERE id < ? ORDER BY id DESC LIMIT 1')
       .get(startId);
-    if (before) expectedPrev = before.entry_hash; // genesis stays if nothing precedes the range
+    if (before) {
+      expectedPrev = before.entry_hash; // the chain start (anchor or genesis) stays if nothing precedes the range
+      usesChainStart = false;
+    }
   }
 
   const failures = [];
@@ -245,7 +347,16 @@ async function verifyChain(db, opts = {}) {
     if (!rows.length) break;
 
     for (const r of rows) {
-      if (firstRowId == null) firstRowId = r.id;
+      if (firstRowId == null) {
+        firstRowId = r.id;
+        if (usesChainStart && checkpoint.anchor_id != null && Number(r.id) <= checkpoint.anchor_id) {
+          failures.push({
+            id: Number(r.id),
+            type: 'checkpoint_mismatch',
+            detail: `first row id ${r.id} is not after the prune checkpoint (anchor_id ${checkpoint.anchor_id}) — a row exists that a prune already removed`,
+          });
+        }
+      }
       checked++;
       cursor = Number(r.id);
 
@@ -297,17 +408,19 @@ async function verifyChain(db, opts = {}) {
   };
 
   if (fullChain) {
-    const head = await db.prepare('SELECT last_hash, entry_count FROM activity_log_chain WHERE id = 1').get();
+    const head = checkpoint.exists ? checkpoint : null;
     const total = await db.prepare('SELECT COUNT(*) AS n FROM activity_log').get();
     const actualCount = total ? Number(total.n) : 0;
-    const actualHead = lastSeen ? lastSeen.entry_hash : GENESIS_PREV_HASH;
+    const actualHead = lastSeen ? lastSeen.entry_hash : startHash;
+    // Rows that should still exist: every row ever chained minus those pruned.
+    const expectedCount = head ? head.entry_count - head.pruned_count : null;
     const headMatches = !!head && head.last_hash === actualHead;
-    const countMatches = !!head && Number(head.entry_count) === actualCount;
+    const countMatches = !!head && expectedCount === actualCount;
     result.chain_head = {
       stored: head ? head.last_hash : null,
       actual: actualHead,
       matches: headMatches,
-      stored_count: head ? Number(head.entry_count) : null,
+      stored_count: expectedCount,
       actual_count: actualCount,
       count_matches: countMatches,
     };
@@ -317,15 +430,74 @@ async function verifyChain(db, opts = {}) {
     }
     if (!countMatches) {
       result.ok = false;
-      result.failures.push({ id: null, type: 'count_mismatch', detail: `activity_log has ${actualCount} rows but the chain expected ${head ? head.entry_count : '?'}` });
+      result.failures.push({ id: null, type: 'count_mismatch', detail: `activity_log has ${actualCount} rows but the chain expected ${head ? expectedCount : '?'}` });
+    }
+  }
+
+  if (fullChain || usesChainStart) {
+    const mismatches = await checkCheckpoint(db, checkpoint);
+    if (mismatches.length) {
+      result.ok = false;
+      result.failures.push(...mismatches);
+    }
+    if (checkpoint.anchor_id != null || checkpoint.pruned_count > 0) {
+      result.checkpoint = {
+        anchor_id: checkpoint.anchor_id,
+        anchor_hash: checkpoint.anchor_hash,
+        pruned_count: checkpoint.pruned_count,
+        entry_count: checkpoint.entry_count,
+      };
     }
   }
 
   return result;
 }
 
+// activity_log_chain row 1, with the prune checkpoint normalised (columns that a
+// pre-checkpoint table lacks read as "never pruned").
+async function readCheckpoint(db) {
+  const row = await db.prepare('SELECT * FROM activity_log_chain WHERE id = 1').get();
+  if (!row) return { exists: false, last_hash: null, entry_count: 0, anchor_id: null, anchor_hash: null, pruned_count: 0 };
+  return {
+    exists: true,
+    last_hash: row.last_hash,
+    entry_count: Number(row.entry_count),
+    anchor_id: row.anchor_id != null ? Number(row.anchor_id) : null,
+    anchor_hash: row.anchor_hash ?? null,
+    pruned_count: row.pruned_count != null ? Number(row.pruned_count) : 0,
+  };
+}
+
+// The checkpoint and the newest audit:pruned entry must tell the same story: each
+// prune writes both in one transaction, so a disagreement means one was edited or
+// the entry was deleted. Returns checkpoint_mismatch failures (empty when they agree).
+async function checkCheckpoint(db, checkpoint) {
+  const latest = await db
+    .prepare('SELECT id, details FROM activity_log WHERE action = ? ORDER BY id DESC LIMIT 1')
+    .get(PRUNED_ACTION);
+  const isSet = checkpoint.anchor_id != null || checkpoint.anchor_hash != null || checkpoint.pruned_count > 0;
+  const fail = (id, detail) => [{ id, type: 'checkpoint_mismatch', detail }];
+
+  if (!latest) {
+    return isSet ? fail(null, `the prune checkpoint is set (anchor_id ${checkpoint.anchor_id}, pruned_count ${checkpoint.pruned_count}) but no ${PRUNED_ACTION} entry exists — it was deleted, or the checkpoint was forged`) : [];
+  }
+  const id = Number(latest.id);
+  if (!isSet) return fail(id, `${PRUNED_ACTION} entry ${id} exists but the prune checkpoint on activity_log_chain is empty — the checkpoint was cleared`);
+
+  let d = null;
+  try { d = JSON.parse(latest.details); } catch (_) { /* reported below */ }
+  if (!d || typeof d !== 'object') return fail(id, `${PRUNED_ACTION} entry ${id} has unreadable details`);
+  const diffs = [];
+  if (Number(d.anchor_id) !== checkpoint.anchor_id) diffs.push(`anchor_id ${d.anchor_id} vs ${checkpoint.anchor_id}`);
+  if (d.anchor_hash !== checkpoint.anchor_hash) diffs.push(`anchor_hash ${short(d.anchor_hash)} vs ${short(checkpoint.anchor_hash)}`);
+  if (Number(d.pruned_count_total) !== checkpoint.pruned_count) diffs.push(`pruned_count ${d.pruned_count_total} vs ${checkpoint.pruned_count}`);
+  return diffs.length
+    ? fail(id, `the newest ${PRUNED_ACTION} entry (${id}) disagrees with the prune checkpoint: ${diffs.join('; ')} (entry vs checkpoint)`)
+    : [];
+}
+
 function short(h) {
   return typeof h === 'string' ? h.slice(0, 12) + '…' : String(h);
 }
 
-module.exports = { GENESIS_PREV_HASH, computeEntryHash, appendEntry, backfillChain, verifyChain };
+module.exports = { GENESIS_PREV_HASH, PRUNED_ACTION, computeEntryHash, appendEntry, pruneChain, backfillChain, verifyChain };

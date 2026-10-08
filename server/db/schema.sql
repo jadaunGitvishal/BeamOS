@@ -854,11 +854,20 @@ CREATE INDEX idx_activity_log_user ON activity_log(user_id, created_at DESC);
 -- same predecessor (which would fork the chain). last_hash also lets the verifier
 -- detect truncation of the newest rows - deleting from the tail leaves no
 -- successor to notice the gap, but last_hash still points past them.
+-- Retention pruning checkpoint (lib/activity-chain.js pruneChain): anchor_id /
+-- anchor_hash are the id and entry_hash of the newest row a prune removed (NULL =
+-- never pruned), and the verifier anchors the first surviving row's prev_hash to
+-- anchor_hash. pruned_count is the total rows ever pruned, so entry_count -
+-- pruned_count is the number of rows that should still exist. Existing DBs get
+-- these three columns from lib/schema-check.js.
 CREATE TABLE IF NOT EXISTS activity_log_chain (
-    id          TINYINT PRIMARY KEY,
-    last_hash   CHAR(64) NOT NULL,
-    entry_count BIGINT NOT NULL DEFAULT 0,
-    updated_at  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
+    id           TINYINT PRIMARY KEY,
+    last_hash    CHAR(64) NOT NULL,
+    entry_count  BIGINT NOT NULL DEFAULT 0,
+    updated_at   BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    anchor_id    BIGINT NULL,
+    anchor_hash  CHAR(64) NULL,
+    pruned_count BIGINT NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 INSERT IGNORE INTO activity_log_chain (id, last_hash, entry_count) VALUES (1, REPEAT('0', 64), 0);
 
