@@ -33,12 +33,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - uses: android-actions/setup-android@v3
+      # GitHub's ubuntu runners ship the Android SDK with ANDROID_HOME set, so no
+      # setup action is needed - fail clearly here if that ever stops being true.
+      - name: Check Android SDK
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-<unset>}"
+          test -n "$ANDROID_HOME" || { echo "::error::ANDROID_HOME is not set on this runner"; exit 1; }
       # An explicit task list rather than assembleRelease: excluding packageRelease
       # from assembleRelease also skips dexing, and packaging is what pulls in
       # signing (validateSigningRelease).
