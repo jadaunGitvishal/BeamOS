@@ -6,7 +6,9 @@ const {
   getWorkspaceDeviceFilter,
   getWorkspaceDeviceSubquery,
 } = require('../lib/workspace-scope');
-const { renderCsv, renderXlsx, renderPdf } = require('../lib/report-export');
+const { renderCsv, renderXlsx, renderPdf, renderSectionedXlsx, renderSectionedPdf } = require('../lib/report-export');
+const { canReadFieldVisits } = require('../lib/permissions');
+const fieldOps = require('../lib/field-ops-summary');
 const { getProofOfPlaySummary } = require('../lib/proof-of-play');
 const { publicFieldList, DOMAIN_LABELS } = require('../lib/report-fields');
 const { buildCustomReportQuery, ReportQueryError } = require('../lib/report-query-builder');
@@ -90,6 +92,67 @@ router.post(
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename=custom-report.csv');
     res.send(renderCsv(query.headers, dataRows));
+  }),
+);
+
+// PMI Ref 68: the Field Operations report (lib/field-ops-summary.js holds every
+// definition) for the ACTIVE workspace only (req.workspaceId), one UTC period.
+//   ?period=day|week|month (default week) &date=YYYY-MM-DD (any day in the period;
+//   default = the last complete period, as Ref 66) &format=json|csv|xlsx|pdf
+// Access: lib/permissions.canReadFieldVisits on the active workspace - the SAME
+// predicate the field-visit GET routes use, so this never widens who reads visit
+// data. API tokens are refused: field-visit data is JWT-only everywhere else
+// (/api/workspaces is not on the token surface) and this router is.
+// Downloads are Content-Disposition: attachment, so Ref 20's activityLogger records
+// one EXPORT each. Never includes field_visits.sim_network_info.
+const FIELD_OPS_FORMATS = ['json', 'csv', 'xlsx', 'pdf'];
+
+router.get(
+  '/field-operations',
+  asyncHandler(async (req, res) => {
+    if (req.apiToken) {
+      return res.status(403).json({ error: 'The field operations report is not available to API tokens' });
+    }
+    if (!req.workspace || !(await canReadFieldVisits(db, req.user, req.workspace))) {
+      return res.status(403).json({ error: 'Field-visit access required for this workspace' });
+    }
+    const format = req.query.format === undefined ? 'json' : String(req.query.format);
+    if (!FIELD_OPS_FORMATS.includes(format)) {
+      return res.status(400).json({ error: `format must be one of: ${FIELD_OPS_FORMATS.join(', ')}` });
+    }
+    let period;
+    try {
+      period = fieldOps.resolvePeriod(req.query.period === undefined ? 'week' : String(req.query.period), req.query.date);
+    } catch (e) {
+      if (e instanceof fieldOps.PeriodError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+
+    const report = await fieldOps.getFieldOpsReport(db, {
+      workspaceId: req.workspaceId,
+      period,
+      nowEpoch: Math.floor(Date.now() / 1000),
+    });
+    if (format === 'json') return res.json(report);
+
+    const base = `field-operations-${period.kind}-${period.fileKey}`;
+    const title = `Field operations - ${report.workspace ? report.workspace.name : ''} - ${period.label}`;
+    if (format === 'xlsx') {
+      const buffer = await renderSectionedXlsx(fieldOps.exportTables(report).map((tb) => ({ ...tb, heading: tb.sheet })));
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename=${base}.xlsx`);
+      return res.send(buffer);
+    }
+    if (format === 'pdf') {
+      const buffer = await renderSectionedPdf(title, fieldOps.pdfTables(report));
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename=${base}.pdf`);
+      return res.send(buffer);
+    }
+    const csv = fieldOps.csvTable(report);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=${base}.csv`);
+    res.send(renderCsv(csv.headers, csv.rows));
   }),
 );
 

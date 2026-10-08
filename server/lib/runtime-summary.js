@@ -54,6 +54,15 @@
 
 const DAY = 86400;
 
+// The screen-eligibility pieces of the rule above, exported so other reports (Ref 68
+// field operations: lib/field-ops-summary.js) reuse them instead of restating them:
+// a device still in this status is not a screen yet, and a blocked screen is excluded
+// from every figure.
+const NOT_A_SCREEN_STATUS = 'provisioning';
+function isBlockedScreen(sc) {
+  return Number(sc.blocked) === 1 || sc.blocked === true;
+}
+
 function round1(x) {
   return Math.round((x + Number.EPSILON) * 10) / 10;
 }
@@ -107,7 +116,7 @@ function summarizeRuntime({ screens = [], usage = [], workspaces = [], startEpoc
   const excluded = { blocked: 0, not_yet_registered: 0 };
   const outScreens = [];
   for (const sc of screens) {
-    if (Number(sc.blocked) === 1 || sc.blocked === true) {
+    if (isBlockedScreen(sc)) {
       excluded.blocked++;
       continue;
     }
@@ -194,11 +203,11 @@ async function loadRuntimeInputs(db, { organizationId, workspaceIds, startEpoch,
          FROM devices d
          JOIN workspaces w ON w.id = d.workspace_id
         WHERE w.organization_id = ? AND d.workspace_id IN (${marks})
-          AND d.status <> 'provisioning'
+          AND d.status <> ?
           AND d.created_at < ?
         ORDER BY d.name, d.id`,
     )
-    .all(organizationId, ...ids, endEpoch);
+    .all(organizationId, ...ids, NOT_A_SCREEN_STATUS, endEpoch);
 
   const { firstDay, lastDay } = periodDays(startEpoch, endEpoch);
   const usage = await db
@@ -227,4 +236,4 @@ async function getRuntimeSummary(db, opts) {
   return { ...summary, workspaces_loaded: inputs.workspaces };
 }
 
-module.exports = { summarizeRuntime, loadRuntimeInputs, getRuntimeSummary, round1, DAY };
+module.exports = { summarizeRuntime, loadRuntimeInputs, getRuntimeSummary, round1, DAY, NOT_A_SCREEN_STATUS, isBlockedScreen };

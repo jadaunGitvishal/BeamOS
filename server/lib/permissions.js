@@ -221,9 +221,18 @@ async function canLogFieldVisit(db, user, workspace) {
   return !!wm && (wm.role === 'workspace_admin' || wm.role === 'workspace_editor');
 }
 
+// Ref 43 read gate for field-visit data: anyone who can LOG a visit here, OR any
+// ordinary reader of the workspace (canAccessWorkspace: members, org admins/owners,
+// platform staff, Refs 49/67 regional viewers in scope). The field-visit GET routes
+// (routes/workspaces.js) and the Ref 68 field operations report (routes/reports.js)
+// both use this one predicate, so the report can never widen who reads visit data.
+async function canReadFieldVisits(db, user, workspace) {
+  return (await canLogFieldVisit(db, user, workspace)) || (await canAccessWorkspace(db, user, workspace));
+}
+
 module.exports = {
   // boolean predicates
-  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canLogFieldVisit, canAdminOrg, canAccessOrg, canManageOrgRegions, isOrgAdmin, isOrgOwner,
+  canRead, canWrite, canAdmin, canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canLogFieldVisit, canReadFieldVisits, canAdminOrg, canAccessOrg, canManageOrgRegions, isOrgAdmin, isOrgOwner,
   // express middleware
   requireWorkspace,
   requireWorkspaceRead,

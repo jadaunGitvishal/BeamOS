@@ -3,6 +3,7 @@ import { showToast } from "../components/toast.js";
 import { esc } from "../utils.js";
 import { t } from "../i18n.js";
 import { openCustomReportBuilderModal } from "../components/custom-report-builder-modal.js";
+import { openFieldOpsReportModal } from "../components/field-ops-report-modal.js";
 
 const API = (url, opts = {}) =>
   fetch("/api" + url, {
@@ -42,6 +43,12 @@ export async function render(container) {
           </svg>
           Export custom reports
         </button>
+        <button type="button" class="btn btn-secondary" id="fieldOpsReportBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.5-2.5z"/>
+          </svg>
+          ${t("fieldops.button")}
+        </button>
       </div>
     </div>
 
@@ -68,6 +75,7 @@ export async function render(container) {
   loadReport();
 
   document.getElementById("customReportBtn").onclick = () => openCustomReportBuilderModal();
+  document.getElementById("fieldOpsReportBtn").onclick = () => openFieldOpsReportModal();
 
   // document.getElementById('exportBtn').onclick = () => {
   //   const deviceId = document.getElementById('reportDevice').value;

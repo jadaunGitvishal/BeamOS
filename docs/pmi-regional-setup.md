@@ -74,6 +74,17 @@ listing every screen that was never online and the 50 with the lowest uptime.
 Details, including how a zero-runtime screen is defined, are in
 [regional-reports.md](regional-reports.md).
 
+### Field operations report (on the portal)
+
+**Reports → Field operations** shows installations and activations, RFS and
+R&M visits, other visits, visits still in progress, and OEM / hardware cases
+for the current workspace, by UTC day, ISO week or month. You can download it
+as CSV, XLSX or PDF. It isn't emailed. Anyone who can read the workspace's
+field visits can open it, and that includes regional viewers in scope. Two
+definitions are still pending PMI confirmation: RFS = "Routine check" visits,
+and OEM case = "hardware" tickets. See
+[field-operations-report.md](field-operations-report.md).
+
 ## Good to know
 
 - **Read-only.** Regional viewers can view and export everything in their

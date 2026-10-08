@@ -5,7 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const config = require("../config");
 const { db } = require("../db/database");
-const { canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canManageOrgRegions, canLogFieldVisit } = require("../lib/permissions");
+const { canAdminWorkspace, canAccessWorkspace, canWriteWorkspace, canManageOrgRegions, canLogFieldVisit, canReadFieldVisits } = require("../lib/permissions");
 const fieldVisitUpload = require("../middleware/fieldVisitUpload");
 const { sanitizeString } = require("../middleware/sanitize");
 const { sanitizeCoords } = require("../lib/geo");
@@ -1397,7 +1397,7 @@ async function loadWorkspaceForFieldVisitRead(req, res) {
     res.status(404).json({ error: "Workspace not found" });
     return null;
   }
-  if (!(await canLogFieldVisit(db, req.user, ws)) && !(await canAccessWorkspace(db, req.user, ws))) {
+  if (!(await canReadFieldVisits(db, req.user, ws))) {
     res.status(403).json({ error: "Field-visit access required for this workspace" });
     return null;
   }
