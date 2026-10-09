@@ -51,7 +51,27 @@ let codeSeq = 100000 + crypto.randomInt(800000);
 const nextCode = () => String(codeSeq++);
 const CODES = {};
 
+// The real, platform-wide app_settings rows this file overwrites (directly and via the
+// admin cadence route). Captured before anything touches them and put back exactly
+// (value + updated_at) at the end; a key that didn't exist is removed again. If the
+// capture never happened, nothing is restored or deleted.
+const SETTINGS_KEYS = [report.PENDING_KEY, report.FREQ_KEY];
+let savedSettings = null;
+async function captureSettings() {
+  const rows = await db.prepare(`SELECT \`key\`, value, updated_at FROM app_settings WHERE \`key\` IN (${SETTINGS_KEYS.map(() => '?').join(',')})`).all(...SETTINGS_KEYS);
+  savedSettings = new Map(rows.map((r) => [r.key, r]));
+}
+async function restoreSettings() {
+  if (!savedSettings) return;
+  for (const key of SETTINGS_KEYS) {
+    const row = savedSettings.get(key);
+    if (row) await db.prepare('INSERT INTO app_settings (`key`, value, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)').run(key, row.value, row.updated_at);
+    else await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(key);
+  }
+}
+
 before(async () => {
+  await captureSettings();
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-admin1'), email('admin1'), 'WS1 Admin');
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-admin2'), email('admin2'), 'WS2 Admin');
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-installer'), email('installer'), 'Field Installer');
@@ -106,16 +126,18 @@ before(async () => {
   await db.prepare('INSERT INTO app_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)').run(report.FREQ_KEY, '7');
 });
 
+// Runs after the Stage B describe block too (root hooks run once all subtests finish).
 after(async () => {
-  const codeIds = Object.keys(CODES).map((k) => id('rc-' + k));
-  await db.prepare(`DELETE FROM registration_codes WHERE id IN (${codeIds.map(() => '?').join(',')})`).run(...codeIds);
-  await db.prepare('DELETE FROM devices WHERE id = ?').run(id('dev-claimed'));
-  await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces + members
-  await db.prepare('UPDATE activity_log SET user_id = NULL WHERE user_id LIKE ?').run(RID + '-%');
-  await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
-  await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(report.PENDING_KEY);
-  await db.prepare('INSERT INTO app_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)').run(report.FREQ_KEY, '7');
-  // db.close() is the very last hook in this file (after the Stage B block).
+  try {
+    const codeIds = Object.keys(CODES).map((k) => id('rc-' + k));
+    if (codeIds.length) await db.prepare(`DELETE FROM registration_codes WHERE id IN (${codeIds.map(() => '?').join(',')})`).run(...codeIds);
+    await db.prepare('DELETE FROM devices WHERE id = ?').run(id('dev-claimed'));
+    await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces + members
+    // activity_log rows keep their user_id: it is part of the audit hash chain (same as lib/user-deletion.js).
+    await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
+  } finally {
+    try { await restoreSettings(); } finally { await db.close(); }
+  }
 });
 
 // ---- helpers ----------------------------------------------------------
@@ -369,10 +391,8 @@ describe('Ref 48 Stage B — live pending-installations endpoint + admin cadence
     const codeIds = Object.keys(C).map((k) => id('rc-' + k));
     await db.prepare(`DELETE FROM registration_codes WHERE id IN (${codeIds.map(() => '?').join(',')})`).run(...codeIds);
     await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org'));
-    await db.prepare('UPDATE activity_log SET user_id = NULL WHERE user_id LIKE ?').run(RID + '-%');
     await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
-    await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(report.PENDING_KEY);
-    await db.prepare('INSERT INTO app_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)').run(report.FREQ_KEY, '7');
+    // The touched app_settings rows are restored to their pre-run values by the file's last after().
     await appSettings.__reload();
   });
 
@@ -495,9 +515,4 @@ describe('Ref 48 Stage B — live pending-installations endpoint + admin cadence
     const next30 = new Date(Date.parse(ranOn + 'T00:00:00Z') + 30 * DAY * 1000).toISOString().slice(0, 10);
     assert.equal(st.next_report_date, next30);
   });
-});
-
-// db.close() last — after both the Stage A hooks and the Stage B describe block.
-after(async () => {
-  await db.close();
 });

@@ -30,7 +30,29 @@ const yesterday = new Date(now.getTime() - 86400_000);
 const yStart = Math.floor(Date.parse(yesterday.toISOString().slice(0, 10) + 'T12:00:00Z') / 1000);
 const lastMonthMid = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15, 12) / 1000;
 
+// The real, platform-wide app_settings rows this file touches: the digest watermarks it
+// clears, plus the regional-report watermarks that runReportDigests() advances on the same
+// tick (services/regional-report.js PERIODS). Captured before anything touches them and
+// put back exactly (value + updated_at) at the end; a key that didn't exist is removed
+// again. If the capture never happened, nothing is restored or deleted.
+const SETTINGS_KEYS = [digest.DAILY_KEY, digest.MONTHLY_KEY,
+  'regional_report_daily_through', 'regional_report_weekly_through', 'regional_report_monthly_through'];
+let savedSettings = null;
+async function captureSettings() {
+  const rows = await db.prepare(`SELECT \`key\`, value, updated_at FROM app_settings WHERE \`key\` IN (${SETTINGS_KEYS.map(() => '?').join(',')})`).all(...SETTINGS_KEYS);
+  savedSettings = new Map(rows.map((r) => [r.key, r]));
+}
+async function restoreSettings() {
+  if (!savedSettings) return;
+  for (const key of SETTINGS_KEYS) {
+    const row = savedSettings.get(key);
+    if (row) await db.prepare('INSERT INTO app_settings (`key`, value, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)').run(key, row.value, row.updated_at);
+    else await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(key);
+  }
+}
+
 before(async () => {
+  await captureSettings();
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-wsadmin1'), email('wsadmin1'), 'WS Admin One');
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-wsadmin2'), email('wsadmin2'), 'WS Admin Two');
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-viewer'), email('viewer'), 'WS Viewer');
@@ -80,13 +102,15 @@ before(async () => {
 });
 
 after(async () => {
-  await db.prepare('DELETE FROM play_logs WHERE device_id IN (?, ?)').run(id('d1'), id('d2'));
-  await db.prepare('DELETE FROM device_usage_daily WHERE device_id IN (?, ?)').run(id('d1'), id('d2'));
-  await db.prepare('DELETE FROM devices WHERE id IN (?, ?)').run(id('d1'), id('d2'));
-  await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces + members
-  await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
-  await db.prepare('DELETE FROM app_settings WHERE `key` IN (?, ?)').run(digest.DAILY_KEY, digest.MONTHLY_KEY);
-  await db.close();
+  try {
+    await db.prepare('DELETE FROM play_logs WHERE device_id IN (?, ?)').run(id('d1'), id('d2'));
+    await db.prepare('DELETE FROM device_usage_daily WHERE device_id IN (?, ?)').run(id('d1'), id('d2'));
+    await db.prepare('DELETE FROM devices WHERE id IN (?, ?)').run(id('d1'), id('d2'));
+    await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces + members
+    await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
+  } finally {
+    try { await restoreSettings(); } finally { await db.close(); }
+  }
 });
 
 function fakeEmail() {

@@ -47,7 +47,27 @@ const DAY = 86400;
 const nowSec = Math.floor(Date.now() / 1000);
 const now = new Date(nowSec * 1000);
 
+// The real, platform-wide app_settings rows this file overwrites (directly and via the
+// admin cadence route). Captured before anything touches them and put back exactly
+// (value + updated_at) at the end; a key that didn't exist is removed again. If the
+// capture never happened, nothing is restored or deleted.
+const SETTINGS_KEYS = [report.RECON_KEY, report.FREQ_KEY];
+let savedSettings = null;
+async function captureSettings() {
+  const rows = await db.prepare(`SELECT \`key\`, value, updated_at FROM app_settings WHERE \`key\` IN (${SETTINGS_KEYS.map(() => '?').join(',')})`).all(...SETTINGS_KEYS);
+  savedSettings = new Map(rows.map((r) => [r.key, r]));
+}
+async function restoreSettings() {
+  if (!savedSettings) return;
+  for (const key of SETTINGS_KEYS) {
+    const row = savedSettings.get(key);
+    if (row) await db.prepare('INSERT INTO app_settings (`key`, value, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)').run(key, row.value, row.updated_at);
+    else await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(key);
+  }
+}
+
 before(async () => {
+  await captureSettings();
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-admin1'), email('admin1'), 'WS Admin One');
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-admin2'), email('admin2'), 'WS Admin Two');
   await db.prepare('INSERT INTO users (id, email, name) VALUES (?, ?, ?)').run(id('u-viewer'), email('viewer'), 'WS Viewer');
@@ -95,15 +115,17 @@ before(async () => {
   await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(report.RECON_KEY);
 });
 
+// Runs after the Stage B describe block too (root hooks run once all subtests finish).
 after(async () => {
-  const devIds = ['d-ghost', 'd-ghost-conn', 'd-stale', 'd-stale-suppressed', 'd-healthy', 'd-recent-offline', 'd-blocked', 'd-ws2-ghost', 'd-ws3-ghost'].map(id);
-  await db.prepare(`DELETE FROM device_telemetry WHERE device_id IN (${devIds.map(() => '?').join(',')})`).run(...devIds);
-  await db.prepare(`DELETE FROM devices WHERE id IN (${devIds.map(() => '?').join(',')})`).run(...devIds);
-  await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces + members
-  await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
-  await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(report.RECON_KEY);
-  await db.prepare('INSERT INTO app_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)').run(report.FREQ_KEY, '7');
-  // db.close() is the very last hook in this file (after the Stage B block).
+  try {
+    const devIds = ['d-ghost', 'd-ghost-conn', 'd-stale', 'd-stale-suppressed', 'd-healthy', 'd-recent-offline', 'd-blocked', 'd-ws2-ghost', 'd-ws3-ghost'].map(id);
+    await db.prepare(`DELETE FROM device_telemetry WHERE device_id IN (${devIds.map(() => '?').join(',')})`).run(...devIds);
+    await db.prepare(`DELETE FROM devices WHERE id IN (${devIds.map(() => '?').join(',')})`).run(...devIds);
+    await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces + members
+    await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
+  } finally {
+    try { await restoreSettings(); } finally { await db.close(); }
+  }
 });
 
 function fakeEmail() {
@@ -374,12 +396,9 @@ describe('Ref 49 Stage B — live reconciliation endpoint + admin cadence', () =
     await db.prepare(`DELETE FROM device_telemetry WHERE device_id IN (${devIds.map(() => '?').join(',')})`).run(...devIds);
     await db.prepare(`DELETE FROM devices WHERE id IN (${devIds.map(() => '?').join(',')})`).run(...devIds);
     await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org'));
-    // Unlink (don't delete) our audit rows — exactly what lib/user-deletion.js's
-    // cascade does — so the users can be removed without tripping the FK.
-    await db.prepare('UPDATE activity_log SET user_id = NULL WHERE user_id LIKE ?').run(RID + '-%');
+    // activity_log rows keep their user_id: it is part of the audit hash chain (same as lib/user-deletion.js).
     await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
-    await db.prepare('DELETE FROM app_settings WHERE `key` = ?').run(reconReport.RECON_KEY);
-    await db.prepare('INSERT INTO app_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)').run(reconReport.FREQ_KEY, '7');
+    // The touched app_settings rows are restored to their pre-run values by the file's last after().
     await appSettings.__reload();
   });
 
@@ -499,9 +518,4 @@ describe('Ref 49 Stage B — live reconciliation endpoint + admin cadence', () =
     assert.equal(st.frequency_days, 30);
     assert.equal(st.next_report_date, next30);
   });
-});
-
-// db.close() last — after both the Stage A hooks and the Stage B describe block.
-after(async () => {
-  await db.close();
 });
