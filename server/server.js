@@ -929,7 +929,7 @@ async function boot() {
 
   // Start heartbeat checker
   const { startHeartbeatChecker } = require("./services/heartbeat");
-  startHeartbeatChecker(io);
+  startHeartbeatChecker(io, { maintenance: config.heartbeatMaintenanceEnabled });
 
   // #142: start event-loop lag sampling (feeds /api/status + the reconnect throttle)
   const { startLoopLagMonitor } = require("./services/loop-lag");
@@ -939,64 +939,81 @@ async function boot() {
   const commandQueue = require("./lib/command-queue");
   commandQueue.startSweep();
 
-  // Start scheduler
-  const { startScheduler } = require("./services/scheduler");
-  startScheduler(io);
+  // Background schedulers: on by default; SCHEDULERS_ENABLED=false (test-spawned servers)
+  // skips all of them. Loop-lag, the command-queue sweep and the in-memory sweeps above stay on.
+  // The screenshot sweep and heartbeat maintenance have their own overrides (config.js).
+  const disabledParts = [
+    !config.schedulersEnabled && "schedulers",
+    !config.screenshotSchedulerEnabled && "screenshot scheduler",
+    !config.heartbeatMaintenanceEnabled && "heartbeat maintenance",
+  ].filter(Boolean);
+  if (disabledParts.length) console.log(`[boot] background DISABLED: ${disabledParts.join(", ")}`);
 
-  // Ref 36: periodic live screen preview sweep
-  const { startScreenshotScheduler } = require("./services/screenshot-scheduler");
-  startScreenshotScheduler(io);
-
-  // Ref 46: daily/monthly automated proof-of-play report digests
-  const { startReportDigests } = require("./services/report-digest");
-  startReportDigests();
-
-  // Ref 49: periodic device reconciliation report (ghost / stale devices) — every
-  // `reconciliation_frequency_days` days, same watermark sweep as the report digest
-  const { startReconciliationReport } = require("./services/reconciliation-report");
-  startReconciliationReport();
-
-  // Ref 48: periodic pending-installation follow-up report (registration codes
-  // generated ahead of an install but never activated) — every
-  // `pending_installation_report_frequency_days` days, same watermark sweep
-  const { startPendingInstallationReport } = require("./services/pending-installation-report");
-  startPendingInstallationReport();
-
-  // Ref 28 (Extensibility & integrations; unrelated to the Android offline-resilience
-  // Ref 28): land gzipped NDJSON in an S3-compatible bucket for Snowflake / Databricks /
-  // dbt / Atlan. Opt-in only - the interval never starts unless explicitly enabled.
-  if (config.dataPlatformExport.enabled) {
-    const { startDataPlatformExport } = require("./services/data-platform-export");
-    startDataPlatformExport();
+  if (config.schedulersEnabled) {
+    // Start scheduler
+    const { startScheduler } = require("./services/scheduler");
+    startScheduler(io);
   }
 
-  // Ref 51: long-term outage recorder (feeds SLA MTTR beyond status-log retention)
-  const { startOutageHistoryRecorder } = require("./services/outage-history");
-  startOutageHistoryRecorder();
+  // Ref 36: periodic live screen preview sweep
+  if (config.screenshotSchedulerEnabled) {
+    const { startScreenshotScheduler } = require("./services/screenshot-scheduler");
+    startScreenshotScheduler(io);
+  }
 
-  // Ref 51: SLA breach escalation emails (ongoing outage past the threshold -> alert workspace admins once)
-  const { startOutageEscalations } = require("./services/outage-escalation");
-  startOutageEscalations();
+  if (config.schedulersEnabled) {
 
-  // Ref 58: ticket response-time SLA escalation emails (ticket breached -> alert workspace admins once, ever)
-  const { startTicketEscalations } = require("./services/ticket-escalation");
-  startTicketEscalations();
+    // Ref 46: daily/monthly automated proof-of-play report digests
+    const { startReportDigests } = require("./services/report-digest");
+    startReportDigests();
 
-  // Start alert service
-  const { startAlertService } = require("./services/alerts");
-  startAlertService(io);
+    // Ref 49: periodic device reconciliation report (ghost / stale devices) — every
+    // `reconciliation_frequency_days` days, same watermark sweep as the report digest
+    const { startReconciliationReport } = require("./services/reconciliation-report");
+    startReconciliationReport();
 
-  // Ref 52: 30-day-prior warranty-expiry alert emails (warranty_alerts table dedupes per device+expiry-date)
-  const { startWarrantyAlerts } = require("./services/warranty-alert");
-  startWarrantyAlerts();
+    // Ref 48: periodic pending-installation follow-up report (registration codes
+    // generated ahead of an install but never activated) — every
+    // `pending_installation_report_frequency_days` days, same watermark sweep
+    const { startPendingInstallationReport } = require("./services/pending-installation-report");
+    startPendingInstallationReport();
 
-  // Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
-  const { startActivationNudge } = require("./services/activationNudge");
-  startActivationNudge();
+    // Ref 28 (Extensibility & integrations; unrelated to the Android offline-resilience
+    // Ref 28): land gzipped NDJSON in an S3-compatible bucket for Snowflake / Databricks /
+    // dbt / Atlan. Opt-in only - the interval never starts unless explicitly enabled.
+    if (config.dataPlatformExport.enabled) {
+      const { startDataPlatformExport } = require("./services/data-platform-export");
+      startDataPlatformExport();
+    }
 
-  // #73: agency-upload digest flush (batched draft/published notifications to admins + owner)
-  const { startAgencyDigest } = require("./services/agency-digest");
-  startAgencyDigest();
+    // Ref 51: long-term outage recorder (feeds SLA MTTR beyond status-log retention)
+    const { startOutageHistoryRecorder } = require("./services/outage-history");
+    startOutageHistoryRecorder();
+
+    // Ref 51: SLA breach escalation emails (ongoing outage past the threshold -> alert workspace admins once)
+    const { startOutageEscalations } = require("./services/outage-escalation");
+    startOutageEscalations();
+
+    // Ref 58: ticket response-time SLA escalation emails (ticket breached -> alert workspace admins once, ever)
+    const { startTicketEscalations } = require("./services/ticket-escalation");
+    startTicketEscalations();
+
+    // Start alert service
+    const { startAlertService } = require("./services/alerts");
+    startAlertService(io);
+
+    // Ref 52: 30-day-prior warranty-expiry alert emails (warranty_alerts table dedupes per device+expiry-date)
+    const { startWarrantyAlerts } = require("./services/warranty-alert");
+    startWarrantyAlerts();
+
+    // Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
+    const { startActivationNudge } = require("./services/activationNudge");
+    startActivationNudge();
+
+    // #73: agency-upload digest flush (batched draft/published notifications to admins + owner)
+    const { startAgencyDigest } = require("./services/agency-digest");
+    startAgencyDigest();
+  }
 
   // Handle provisioning via WebSocket notification (kept as a require for its
   // registration side effect on the /api/provision router mounted earlier).

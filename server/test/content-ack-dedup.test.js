@@ -25,9 +25,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 before(async () => {
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', CONTENT_ACK_DEDUP_MS: String(DEDUP_MS) },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', CONTENT_ACK_DEDUP_MS: String(DEDUP_MS) },
     stdio: ['ignore', logFd, logFd],
   });
   let up = false;

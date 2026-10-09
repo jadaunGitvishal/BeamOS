@@ -21,9 +21,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 before(async () => {
   const logFd = fs.openSync(path.join(os.tmpdir(), 'st-ho.log'), 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
       PING_INTERVAL: '400', PING_TIMEOUT: '400',            // half-open closed ~800ms
       HEARTBEAT_INTERVAL: '400', HEARTBEAT_TIMEOUT: '800' },  // checker marks offline fast
     stdio: ['ignore', logFd, logFd],

@@ -33,9 +33,9 @@ let proc, JWT, db, deviceSock;
 
 before(async () => {
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', SCREENSHOT_PREVIEW_INTERVAL_MS: String(SWEEP_MS) },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', SCREENSHOT_SCHEDULER_ENABLED: 'true', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', SCREENSHOT_PREVIEW_INTERVAL_MS: String(SWEEP_MS) },
     stdio: ['ignore', logFd, logFd],
   });
   let up = false;

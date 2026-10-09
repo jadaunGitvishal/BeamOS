@@ -35,9 +35,9 @@ const created = { deviceIds: [] };
 
 before(async () => {
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
     stdio: ['ignore', logFd, logFd],
   });
   let up = false;

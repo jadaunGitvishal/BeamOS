@@ -36,10 +36,10 @@ before(async () => {
   await db.prepare("INSERT INTO app_settings (`key`, value) VALUES ('status_debug_enabled', 'true') ON DUPLICATE KEY UPDATE value = 'true'").run();
 
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
-      ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
+      ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
       LAG_SAMPLE_INTERVAL_MS: '200',          // sample fast
       LAG_FLUSH_MS: '200',                    // #146 Item E: batch-insert fast so persistence is observable in-test
       LAG_TELEMETRY_RETENTION_DAYS: '0.00001', // ~0.86s retention

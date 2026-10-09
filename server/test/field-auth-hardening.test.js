@@ -343,7 +343,7 @@ const CERTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fah-certs-')); // no ce
 function bootServer(env) {
   const child = spawn(process.execPath, ['--env-file-if-exists=.env', 'server.js'], {
     cwd: SERVER_DIR,
-    env: { ...process.env, CERTS_DIR, JWT_SECRET: 'fah-child-secret', ...env },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', CERTS_DIR, JWT_SECRET: 'fah-child-secret', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

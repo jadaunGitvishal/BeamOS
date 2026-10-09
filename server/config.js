@@ -9,6 +9,14 @@ const DATA_DIR = process.env.DATA_DIR || __dirname;
 const uploadsDir = process.env.UPLOADS_DIR || path.join(DATA_DIR, "uploads");
 const certsDir = process.env.CERTS_DIR || path.join(DATA_DIR, "certs");
 
+// Background schedulers (see schedulersEnabled below). A narrow override, when set,
+// wins for its own part; unset, it follows SCHEDULERS_ENABLED.
+const schedulersEnabled = process.env.SCHEDULERS_ENABLED !== "false";
+function schedulerOverride(name) {
+  const v = process.env[name];
+  return v != null && v !== "" ? v === "true" : schedulersEnabled;
+}
+
 // #146 billing: optional JSON override for the rate card (else the agreement defaults).
 // Must be a non-empty array of {minScreens, rate}; anything malformed falls back to null.
 function parseBillingRateTable(raw) {
@@ -408,6 +416,16 @@ module.exports = {
   // #146: env DEFAULT for the /api/status debug block; a persisted app_settings value
   // (admin toggle) overrides this once set. Default on (matches prior behavior).
   statusDebugEnabled: process.env.STATUS_DEBUG_ENABLED !== "false",
+  // Background schedulers started in server.js boot() (reports, escalations, alerts,
+  // digests, screenshot sweep, ...) plus the heartbeat checker's maintenance sweeps.
+  // Default on; SCHEDULERS_ENABLED=false turns them off (tests' spawned servers, so a
+  // test boot can't email, move report watermarks or prune rows it didn't create).
+  schedulersEnabled,
+  // Narrow overrides (default: follow schedulersEnabled), so a test can turn on just the
+  // part it exercises: SCREENSHOT_SCHEDULER_ENABLED for the Ref 36 screenshot sweep,
+  // HEARTBEAT_MAINTENANCE_ENABLED for the heartbeat startup prune + maintenance sweeps.
+  screenshotSchedulerEnabled: schedulerOverride("SCREENSHOT_SCHEDULER_ENABLED"),
+  heartbeatMaintenanceEnabled: schedulerOverride("HEARTBEAT_MAINTENANCE_ENABLED"),
 
   // Ref 51 (SLA Dashboard, Stage 1): env DEFAULTS for the platform-wide SLA
   // targets. A persisted app_settings value (admin toggle) overrides these once

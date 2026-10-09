@@ -34,9 +34,9 @@ const created = { deviceIds: [], fingerprints: [] };
 
 before(async () => {
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', RECLAIM_SETTLE_SECONDS: '300', RECLAIM_REJECT_LOG_WINDOW_MS: '60000' },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', RECLAIM_SETTLE_SECONDS: '300', RECLAIM_REJECT_LOG_WINDOW_MS: '60000' },
     stdio: ['ignore', logFd, logFd],
   });
   let up = false;

@@ -22,9 +22,9 @@ const DATA_DIR = path.join(os.tmpdir(), 'st-totp-rot-' + crypto.randomBytes(4).t
 
 function bootServer(jwtSecret) {
   const logFd = fs.openSync(path.join(os.tmpdir(), 'st-rot-' + crypto.randomBytes(3).toString('hex') + '.log'), 'w');
-  return spawn('node', ['server.js'], {
+  return spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', JWT_SECRET: jwtSecret },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', JWT_SECRET: jwtSecret },
     stdio: ['ignore', logFd, logFd],
   });
 }

@@ -18,9 +18,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 before(async () => {
   const logFd = fs.openSync(path.join(os.tmpdir(), 'st-storm.log'), 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', SESSION_SETTLE_WINDOW_MS: '2500' },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', SESSION_SETTLE_WINDOW_MS: '2500' },
     stdio: ['ignore', logFd, logFd],
   });
   let up = false;

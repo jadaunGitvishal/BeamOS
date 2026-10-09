@@ -45,10 +45,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 before(async () => {
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
-      ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
+      ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
       HEARTBEAT_TIMEOUT: '1500', HEARTBEAT_INTERVAL: '500',
       STATUS_LOG_FLUSH_MS: '300',
       RECONNECT_HARD_CEILING: '8', RECONNECT_WINDOW_MS: '5000', RECONNECT_BASE_MAX: '3',

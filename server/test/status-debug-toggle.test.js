@@ -41,9 +41,9 @@ before(async () => {
   await db.prepare("INSERT INTO app_settings (`key`, value) VALUES ('status_debug_enabled', 'true') ON DUPLICATE KEY UPDATE value = 'true'").run();
 
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
+    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
     stdio: ['ignore', logFd, logFd],
   });
   let up = false;

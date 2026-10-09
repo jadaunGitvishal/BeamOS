@@ -24,10 +24,10 @@ let proc;
 
 before(async () => {
   const logFd = fs.openSync(LOG, 'w');
-  proc = spawn('node', ['server.js'], {
+  proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
-      ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
+      ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
       // warm-up left at default (30s) so the whole test runs in the cold-start window
       RECONNECT_HARD_CEILING: '8',
       RECONNECT_WINDOW_MS: '5000',

@@ -7,12 +7,15 @@ const { chunkedDelete, currentBand, yieldTick } = require('../lib/chunked-prune'
 // Track connected device sockets: deviceId -> { socketId, lastHeartbeat }
 const deviceConnections = new Map();
 
-function startHeartbeatChecker(io) {
+// opts.maintenance (default true): run the startup prune and the per-tick maintenance
+// sweeps. false (SCHEDULERS_ENABLED=false) skips only those; offline marking, billing
+// accrual and the status-log writer always run.
+function startHeartbeatChecker(io, { maintenance = true } = {}) {
   // #146: startup sweep is chunked + async + fire-and-forget + NOT band-gated, so a
   // bloated device_status_log self-heals on next deploy WITHOUT freezing boot (the old
   // whole-table sort froze boot 40-48s -> healthcheck fail -> restart loop). It
   // trickles in bounded batches while the server comes up and serves.
-  pruneStatusLog({ bandGate: false }).catch(() => {});
+  if (maintenance) pruneStatusLog({ bandGate: false }).catch(() => {});
 
   // #146: start the batched device_status_log flush loop.
   statusLogWriter.start();
@@ -81,7 +84,7 @@ function startHeartbeatChecker(io) {
       // #146: all table-growth maintenance runs OFF the interval body — async, chunked,
       // band-gated, re-entrancy-guarded — so a sweep can never block the loop or stack.
       // The offline-marking above stays synchronous (it's the core heartbeat function).
-      runMaintenance();
+      if (maintenance) runMaintenance();
     } catch (e) {
       console.error('[heartbeat] tick failed:', e.message);
     }
