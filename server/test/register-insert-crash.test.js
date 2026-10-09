@@ -31,6 +31,12 @@ const { db } = require('../db/database');
 let httpServer, io, base;
 const uncaught = [];
 const onUncaught = (e) => uncaught.push(e);
+// Runs against the REAL MySQL database: track exactly what this run creates so
+// after() deletes only that. sentCodes are this run's random pairing codes;
+// T_START bounds the backstop so no earlier device can ever match.
+const createdIds = new Set();
+const sentCodes = new Set();
+const T_START = Math.floor(Date.now() / 1000) - 1;
 
 before(async () => {
   process.on('uncaughtException', onUncaught);   // capture escaped throws instead of dying
@@ -42,21 +48,35 @@ before(async () => {
 });
 after(async () => {
   process.off('uncaughtException', onUncaught);
-  try { io.close(); } catch { /* */ }
-  try { httpServer.close(); } catch { /* */ }
-  await db.close();
+  try {
+    try { io.close(); } catch { /* */ }
+    try { await new Promise((r) => httpServer.close(() => r())); } catch { /* */ }
+    await new Promise((r) => setTimeout(r, 300));   // let disconnect handlers finish their writes
+    if (createdIds.size) {
+      const ids = [...createdIds];
+      await db.prepare(`DELETE FROM devices WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+    }
+    // Backstop for a device this run registered but never saw device:registered for.
+    if (sentCodes.size) {
+      const codes = [...sentCodes];
+      await db.prepare(`DELETE FROM devices WHERE pairing_code IN (${codes.map(() => '?').join(',')}) AND created_at >= ?`).run(...codes, T_START);
+    }
+  } finally {
+    await db.close();
+  }
 });
 
 const connect = () => ioClient(`${base}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
 
 // Register with a payload; resolves the outcome (registered | authError | timeout).
 function register(payload) {
+  if (payload && payload.pairing_code) sentCodes.add(String(payload.pairing_code));
   return new Promise((resolve) => {
     const s = connect();
     let done = false;
     const fin = (r) => { if (done) return; done = true; try { s.close(); } catch { /* */ } resolve(r); };
     s.on('connect', () => s.emit('device:register', payload));
-    s.on('device:registered', (d) => fin({ registered: true, id: d.device_id }));
+    s.on('device:registered', (d) => { if (d && d.device_id) createdIds.add(d.device_id); fin({ registered: true, id: d.device_id }); });
     s.on('device:auth-error', (e) => fin({ authError: true, error: e && e.error }));
     setTimeout(() => fin({ timeout: true }), 3000);
   });

@@ -18,7 +18,40 @@ const guard = require('../lib/ota-download-guard');
 const chunked = require('../lib/chunked-prune');
 const { db, pruneStatusLog } = require('../db/database');
 
-after(async () => { await db.close(); });
+// Runs against the REAL MySQL database: every device/status row this file creates
+// carries a per-run prefix, and only prefixed rows are ever deleted.
+const PREFIX = `sl-kill-${crypto.randomBytes(4).toString('hex')}-`;
+const LIKE = `${PREFIX}%`;
+const dev = (name) => PREFIX + name;
+async function addDevices(...names) {
+  const now = Math.floor(Date.now() / 1000);
+  for (const n of names) await db.prepare("INSERT INTO devices (id, status, created_at) VALUES (?, 'offline', ?)").run(dev(n), now);
+}
+// pruneStatusLog() is a GLOBAL sweep (retention + per-device cap over every device).
+// Run immediately before each call: skip if it would delete rows this file didn't
+// create. The retention cutoff is a minute later than the sweep's own, so a row
+// crossing the line between this check and the sweep is counted too.
+async function skipIfForeignPrunable(t) {
+  const cutoff = Math.floor(Date.now() / 1000) - config.statusLogRetentionDays * 86400 + 60;
+  const foreignOld = Number((await db.prepare('SELECT COUNT(*) AS n FROM device_status_log WHERE device_id NOT LIKE ? AND timestamp < ?').get(LIKE, cutoff)).n);
+  const foreignOverCap = config.statusLogMaxRowsPerDevice > 0
+    ? Number((await db.prepare('SELECT COUNT(*) AS n FROM (SELECT device_id FROM device_status_log WHERE device_id NOT LIKE ? GROUP BY device_id HAVING COUNT(*) > ?) x').get(LIKE, config.statusLogMaxRowsPerDevice)).n)
+    : 0;
+  if (foreignOld > 0 || foreignOverCap > 0) {
+    t.skip(`pruneStatusLog would touch rows this test didn't create: ${foreignOld} over-retention row(s), ${foreignOverCap} over-cap device(s)`);
+    return true;
+  }
+  return false;
+}
+
+after(async () => {
+  try {
+    await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
+    await db.prepare('DELETE FROM devices WHERE id LIKE ?').run(LIKE);   // cascades any status rows
+  } finally {
+    await db.close();
+  }
+});
 
 test('FLAP_LIMITER_ENABLED=false -> flap limiter always allows', () => {
   flap.reset();
@@ -51,18 +84,21 @@ test('CONNECT_RATE_QUARANTINE_TRIPS=0 -> never quarantines (only cools down)', (
   } finally { Object.assign(config, { connectRateQuarantineTrips: orig.trips, connectRateMax: orig.max, connectRateCooldownMs: orig.cd }); }
 });
 
-test('MAINTENANCE_BAND_GATE_ENABLED=false -> interval prune runs even under load', async () => {
-  db.exec('DELETE FROM device_status_log');
-  const ins = db.prepare("INSERT INTO device_status_log (device_id, status, timestamp) VALUES ('d', 'online', ?)");
+test('MAINTENANCE_BAND_GATE_ENABLED=false -> interval prune runs even under load', async (t) => {
+  await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
+  await addDevices('d');
+  const ins = db.prepare("INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, 'online', ?)");
   const oldTs = Math.floor(Date.now() / 1000) - 10 * 86400;   // older than retention
-  for (let i = 0; i < 10; i++) ins.run(oldTs);
+  for (let i = 0; i < 10; i++) ins.run(dev('d'), oldTs);
 
   chunked.__setBandForTest(() => 'critical');
-  // sanity: with the band-gate ON, a band-gated run is a no-op under critical
-  assert.equal(await pruneStatusLog({ bandGate: true }), 0, 'gate ON -> skipped while critical');
-
-  config.maintenanceBandGateEnabled = false;
   try {
+    // sanity: with the band-gate ON, a band-gated run is a no-op under critical
+    if (await skipIfForeignPrunable(t)) return;
+    assert.equal(await pruneStatusLog({ bandGate: true }), 0, 'gate ON -> skipped while critical');
+
+    config.maintenanceBandGateEnabled = false;
+    if (await skipIfForeignPrunable(t)) return;
     const deleted = await pruneStatusLog({ bandGate: true });
     assert.ok(deleted > 0, 'gate OFF -> maintenance runs even under critical');
   } finally { config.maintenanceBandGateEnabled = true; chunked.__setBandForTest(() => 'normal'); }

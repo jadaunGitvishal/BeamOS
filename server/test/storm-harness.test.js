@@ -24,23 +24,61 @@ const { db, pruneStatusLog } = require('../db/database');
 const flap = require('../lib/flap-limiter');
 const otaGuard = require('../lib/ota-download-guard');
 const chunked = require('../lib/chunked-prune');
+const config = require('../config');   // same instance pruneStatusLog reads (env set above)
 
-after(async () => { await db.close(); });
+// Runs against the REAL MySQL database: every device/status row this file creates
+// carries a per-run prefix, and only prefixed rows are ever deleted.
+const PREFIX = `sl-storm-${crypto.randomBytes(4).toString('hex')}-`;
+const LIKE = `${PREFIX}%`;
+const dev = (name) => PREFIX + name;
+async function addDevices(...names) {
+  const now = Math.floor(Date.now() / 1000);
+  for (const n of names) await db.prepare("INSERT INTO devices (id, status, created_at) VALUES (?, 'offline', ?)").run(dev(n), now);
+}
+// pruneStatusLog() is a GLOBAL sweep (retention + per-device cap over every device).
+// Run immediately before each call: skip if it would delete rows this file didn't
+// create. The retention cutoff is a minute later than the sweep's own, so a row
+// crossing the line between this check and the sweep is counted too.
+async function skipIfForeignPrunable(t) {
+  const cutoff = Math.floor(Date.now() / 1000) - config.statusLogRetentionDays * 86400 + 60;
+  const foreignOld = Number((await db.prepare('SELECT COUNT(*) AS n FROM device_status_log WHERE device_id NOT LIKE ? AND timestamp < ?').get(LIKE, cutoff)).n);
+  const foreignOverCap = config.statusLogMaxRowsPerDevice > 0
+    ? Number((await db.prepare('SELECT COUNT(*) AS n FROM (SELECT device_id FROM device_status_log WHERE device_id NOT LIKE ? GROUP BY device_id HAVING COUNT(*) > ?) x').get(LIKE, config.statusLogMaxRowsPerDevice)).n)
+    : 0;
+  if (foreignOld > 0 || foreignOverCap > 0) {
+    t.skip(`pruneStatusLog would touch rows this test didn't create: ${foreignOld} over-retention row(s), ${foreignOverCap} over-cap device(s)`);
+    return true;
+  }
+  return false;
+}
 
-test('storm: bloated-table sweep + flapper + OTA flood — loop stays responsive, limiters bite', async () => {
+after(async () => {
+  try {
+    await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
+    await db.prepare('DELETE FROM devices WHERE id LIKE ?').run(LIKE);   // cascades any status rows
+  } finally {
+    await db.close();
+  }
+});
+
+test('storm: bloated-table sweep + flapper + OTA flood — loop stays responsive, limiters bite', async (t) => {
   chunked.__setBandForTest(() => 'normal');
   flap.reset();
 
   // Pre-bloat: 300k rows across a few flapping devices (recent -> the cap prune must
   // remove ~299k+ of them).
-  db.exec('DELETE FROM device_status_log');
+  await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
+  await addDevices('dev-0', 'dev-1', 'dev-2');
   const ins = db.prepare('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)');
   const now = Math.floor(Date.now() / 1000);
   db.transaction(() => {
-    for (let i = 0; i < 300000; i++) ins.run('dev-' + (i % 3), i % 2 ? 'online' : 'offline', now);
+    for (let i = 0; i < 300000; i++) ins.run(dev('dev-' + (i % 3)), i % 2 ? 'online' : 'offline', now);
   })();
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_status_log').get().c, 300000, 'seeded 300k');
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE).c, 300000, 'seeded 300k');
 
+  // Guard before the ticker starts (nothing touches the DB in between), so a skip
+  // never leaves an interval running.
+  if (await skipIfForeignPrunable(t)) return;
   // Event-loop responsiveness probe: max gap between 10ms ticks = worst sync block.
   let maxGap = 0, last = Date.now(), ticks = 0;
   const ticker = setInterval(() => { const n = Date.now(); maxGap = Math.max(maxGap, n - last); last = n; ticks++; }, 10);
@@ -73,7 +111,7 @@ test('storm: bloated-table sweep + flapper + OTA flood — loop stays responsive
   assert.ok(ticks >= 2, `ticker sampled the run (${ticks} ticks) — max-gap measurement is meaningful`);
   // 2) The sweep actually drained the backlog to the cap.
   assert.ok(deleted >= 298000, `sweep trimmed the backlog (${deleted} deleted)`);
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_status_log').get().c, 1500, '3 devices x 500 cap');
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE).c, 1500, '3 devices x 500 cap');
   // 3) Every limiter still bit under load.
   assert.ok(flapRefused > 0, 'the flapper was refused (flap limiter bit)');
   assert.ok(otaShed > 0, 'the OTA flood was shed past the global window cap');
