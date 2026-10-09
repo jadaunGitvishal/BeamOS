@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { appendEntry, verifyChain } = require('../lib/activity-chain');
 const { dropUserForeignKeys } = require('../lib/schema-check');
 const { startInProcessApp } = require('./helpers/inprocess-app');
@@ -77,9 +77,14 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (admin) await app.db.prepare("UPDATE users SET role = 'user' WHERE id = ?").run(admin.id).catch(() => {});
-  await cleanupUsers(app.db, cleanup.reverse());
-  await app.stop();
+  try {
+    if (app) {
+      if (admin) await app.db.prepare("UPDATE users SET role = 'user' WHERE id = ?").run(admin.id).catch(() => {});
+      await cleanupUsers(app.db, cleanup.reverse());
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 // ---- user deletion keeps the hashed columns ----

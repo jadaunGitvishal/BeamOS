@@ -16,7 +16,7 @@ const { PassThrough } = require('node:stream');
 const jose = require('jose');
 
 const config = require('../config');
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { ACCOUNT_DEACTIVATED_MESSAGE } = require('../middleware/auth');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
@@ -153,12 +153,17 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  Object.assign(config, saved);
-  globalThis.fetch = realFetch;
-  https.get = realHttpsGet;
-  await setSsoOnly(O, false);
-  await cleanupUsers(app.db, cleanup.reverse());
-  await app.stop();
+  try {
+    if (app) {
+      Object.assign(config, saved);
+      globalThis.fetch = realFetch;
+      https.get = realHttpsGet;
+      await setSsoOnly(O, false);
+      await cleanupUsers(app.db, cleanup.reverse());
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 test.beforeEach(() => configure({ tenant: TENANT_ID }));

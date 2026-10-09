@@ -36,7 +36,7 @@ before(async () => {
   db.prepare("INSERT INTO devices (id, status, playlist_id) VALUES ('perf-dev', 'online', 'pl-big')").run();
   db.pragma('foreign_keys = ON');
 });
-after(() => { try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ } });
+after(async () => { try { try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ } } finally { await db.close(); } });
 
 test('buildPlaylistPayload is synchronous and cheap enough for a fleet-wide reconnect', () => {
   assert.equal(typeof buildPlaylistPayload, 'function');

@@ -24,7 +24,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const jose = require('jose');
 
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { deleteUserCascade } = require('../lib/user-deletion');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
@@ -193,17 +193,26 @@ test.before(async () => {
   await removeMember('S1', rv.id);
 });
 
-test.after(async () => {
+// Scoped fixture cleanup. Runs in the last test (with its check) and again in
+// teardown as a backstop for a partial setup; the second run finds nothing left.
+async function cleanupFixtures() {
   try {
     if (sp) await app.db.prepare('DELETE FROM entra_service_principals WHERE id = ?').run(sp.id);
     await app.db.prepare('UPDATE organizations SET max_token_lifetime_days = NULL WHERE id = ?').run(owner.orgId);
   } catch { /* best-effort */ }
+  sp = null;
   // members first, the org owner (and with it the org, its workspaces, devices, tokens) last
-  await cleanupUsers(app.db, [...cleanup.filter((id) => id !== owner.id).reverse(), owner.id]);
-  const left = await app.db.prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE id IN (${Object.keys(W).map(() => '?').join(',')})`).get(...Object.values(W));
-  assert.equal(left.n, 0, 'fixture workspaces cleaned up');
-  globalThis.fetch = realFetch;
-  await app.stop();
+  if (cleanup.length) await cleanupUsers(app.db, [...cleanup.filter((id) => id !== owner.id).reverse(), owner.id]);
+  cleanup.length = 0;
+}
+
+test.after(async () => {
+  try {
+    if (app) await cleanupFixtures();
+  } finally {
+    globalThis.fetch = realFetch;
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 // ------------------------------------------------------------- unchanged paths
@@ -356,4 +365,11 @@ test('Entra SP: registering admin loses access to A -> 403, no B data, audited a
   assert.deepEqual(devicesSeen(r.body), [D.A]);
   const row = await app.db.prepare('SELECT revoked_at FROM entra_service_principals WHERE id = ?').get(sp.id);
   assert.equal(row.revoked_at, null);
+});
+
+// Runs last: the fixture cleanup and its check live in a test, so teardown never asserts.
+test('cleanup: every fixture workspace this file created is removed', async () => {
+  await cleanupFixtures();
+  const left = await app.db.prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE id IN (${Object.keys(W).map(() => '?').join(',')})`).get(...Object.values(W));
+  assert.equal(left.n, 0, 'fixture workspaces cleaned up');
 });

@@ -18,7 +18,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { spawnSync } = require('node:child_process');
 
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { requireAuth } = require('../middleware/auth');
 const { hashToken, generateToken, displayPrefix } = require('../middleware/apiToken');
 const { startInProcessApp } = require('./helpers/inprocess-app');
@@ -137,9 +137,14 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (admin) await app.db.prepare("UPDATE users SET role = 'user' WHERE id = ?").run(admin.id).catch(() => {});
-  await cleanupUsers(app.db, cleanup.reverse());
-  await app.stop();
+  try {
+    if (app) {
+      if (admin) await app.db.prepare("UPDATE users SET role = 'user' WHERE id = ?").run(admin.id).catch(() => {});
+      await cleanupUsers(app.db, cleanup.reverse());
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 // ===================== EXPORT =====================

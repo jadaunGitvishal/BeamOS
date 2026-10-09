@@ -164,13 +164,16 @@ before(async () => {
 });
 
 after(async () => {
-  const devs = await db.prepare('SELECT id FROM devices WHERE id LIKE ?').all(RID + '-%');
-  for (const d of devs) await db.prepare('DELETE FROM device_usage_daily WHERE device_id = ?').run(d.id);
-  await db.prepare('DELETE FROM devices WHERE id LIKE ?').run(RID + '-%');
-  await db.prepare('DELETE FROM organizations WHERE id IN (?, ?)').run(ORG_A, ORG_B); // cascades workspaces, members, regions, scopes
-  await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
-  await restoreWatermarks();
-  await db.close();
+  try {
+    const devs = await db.prepare('SELECT id FROM devices WHERE id LIKE ?').all(RID + '-%');
+    for (const d of devs) await db.prepare('DELETE FROM device_usage_daily WHERE device_id = ?').run(d.id);
+    await db.prepare('DELETE FROM devices WHERE id LIKE ?').run(RID + '-%');
+    await db.prepare('DELETE FROM organizations WHERE id IN (?, ?)').run(ORG_A, ORG_B); // cascades workspaces, members, regions, scopes
+    await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
+    await restoreWatermarks();
+  } finally {
+    await db.close();
+  }
 });
 
 async function restoreWatermarks() {

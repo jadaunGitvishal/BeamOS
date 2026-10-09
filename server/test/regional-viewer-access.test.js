@@ -22,7 +22,7 @@ const { Server } = require('socket.io');
 const ioClient = require('socket.io-client');
 
 const config = require('../config');
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { accessibleWorkspaceIds, accessContext } = require('../lib/tenancy');
 const { canAccessWorkspace } = require('../lib/permissions');
 const { deleteUserCascade, deleteOrgCascade } = require('../lib/user-deletion');
@@ -130,11 +130,16 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  for (const orgId of scratchOrgs) { try { await deleteOrgCascade(app.db, { orgId }); } catch { /* */ } }
-  // members first, the org owners last
-  const owners = [ownerA.id, ownerB.id];
-  await cleanupUsers(app.db, [...cleanup.filter((id) => !owners.includes(id)).reverse(), ...owners]);
-  await app.stop();
+  try {
+    if (app) {
+      for (const orgId of scratchOrgs) { try { await deleteOrgCascade(app.db, { orgId }); } catch { /* */ } }
+      // members first, the org owners last
+      const owners = [ownerA.id, ownerB.id];
+      await cleanupUsers(app.db, [...cleanup.filter((id) => !owners.includes(id)).reverse(), ...owners]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 test('accessibleWorkspaceIds and /me: exactly the scoped workspaces (region scope covers everything below it)', async () => {

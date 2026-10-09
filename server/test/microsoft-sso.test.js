@@ -28,6 +28,7 @@ const jose = require('jose');
 const config = require('../config');
 const { verifyEntraIdToken } = require('../middleware/entraToken');
 const { startInProcessApp } = require('./helpers/inprocess-app');
+const { db } = require('../db/database');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
 
 const TENANT_ID = 'aaaaaaaa-1111-2222-3333-444444444444';
@@ -222,11 +223,16 @@ let app;
 const createdUserIds = [];
 test.before(async () => { app = await startInProcessApp({ only: [] }); });
 test.after(async () => {
-  Object.assign(config, saved);
-  globalThis.fetch = realFetch;
-  https.get = realHttpsGet;
-  await cleanupUsers(app.db, createdUserIds);
-  await app.stop();
+  try {
+    if (app) {
+      Object.assign(config, saved);
+      globalThis.fetch = realFetch;
+      https.get = realHttpsGet;
+      await cleanupUsers(app.db, createdUserIds);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 async function postMicrosoft(body) {

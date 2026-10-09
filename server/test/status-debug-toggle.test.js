@@ -51,13 +51,16 @@ before(async () => {
   if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
 });
 after(async () => {
-  try { proc.kill('SIGKILL'); } catch { /* */ }
-  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
-  if (priorDebugSetting === null) await db.prepare("DELETE FROM app_settings WHERE `key` = 'status_debug_enabled'").run();
-  else await db.prepare("UPDATE app_settings SET value = ? WHERE `key` = 'status_debug_enabled'").run(priorDebugSetting);
-  await cleanupDevices(db, created.deviceIds);
-  await cleanupUsers(db, created.userIds);
-  await db.close();
+  try {
+    try { proc.kill('SIGKILL'); } catch { /* */ }
+    for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+    if (priorDebugSetting === null) await db.prepare("DELETE FROM app_settings WHERE `key` = 'status_debug_enabled'").run();
+    else if (priorDebugSetting !== undefined) await db.prepare("UPDATE app_settings SET value = ? WHERE `key` = 'status_debug_enabled'").run(priorDebugSetting); // undefined = never recorded: leave it
+    await cleanupDevices(db, created.deviceIds);
+    await cleanupUsers(db, created.userIds);
+  } finally {
+    await db.close();
+  }
 });
 
 const status = async () => (await fetch(BASE + '/api/status')).json();

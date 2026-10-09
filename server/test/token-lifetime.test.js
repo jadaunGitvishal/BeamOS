@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
 
@@ -70,8 +70,13 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  await cleanupUsers(app.db, cleanup.reverse());
-  await app.stop();
+  try {
+    if (app) {
+      await cleanupUsers(app.db, cleanup.reverse());
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 test.afterEach(async () => { await setCap(owner.orgId, null); });

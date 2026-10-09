@@ -33,7 +33,7 @@ before(async () => {
   await new Promise((r) => httpServer.listen(0, r));
   base = `http://127.0.0.1:${httpServer.address().port}`;
 });
-after(() => { try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ } });
+after(async () => { try { try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ } } finally { await db.close(); } });
 
 const connect = () => ioClient(`${base}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
 

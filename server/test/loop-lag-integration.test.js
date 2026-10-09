@@ -57,14 +57,17 @@ before(async () => {
 });
 
 after(async () => {
-  try { proc.kill('SIGKILL'); } catch { /* */ }
-  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
-  // Restore the real, global status_debug_enabled setting to whatever it was
-  // before this test touched it (see `before()`) - not a disposable row this
-  // file owns, so "cleanup" here means putting it back, not deleting it.
-  if (priorDebugSetting === null) await db.prepare("DELETE FROM app_settings WHERE `key` = 'status_debug_enabled'").run();
-  else await db.prepare("UPDATE app_settings SET value = ? WHERE `key` = 'status_debug_enabled'").run(priorDebugSetting);
-  await db.close();
+  try {
+    try { proc.kill('SIGKILL'); } catch { /* */ }
+    for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+    // Restore the real, global status_debug_enabled setting to whatever it was
+    // before this test touched it (see `before()`) - not a disposable row this
+    // file owns, so "cleanup" here means putting it back, not deleting it.
+    if (priorDebugSetting === null) await db.prepare("DELETE FROM app_settings WHERE `key` = 'status_debug_enabled'").run();
+    else if (priorDebugSetting !== undefined) await db.prepare("UPDATE app_settings SET value = ? WHERE `key` = 'status_debug_enabled'").run(priorDebugSetting); // undefined = never recorded: leave it
+  } finally {
+    await db.close();
+  }
 });
 
 test('/api/status exposes a current loop_lag snapshot', async () => {

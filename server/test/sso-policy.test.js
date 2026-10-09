@@ -41,10 +41,13 @@ const joinWorkspace = (user, org, role = 'workspace_viewer') =>
 
 test.before(async () => { await initDb(); });
 test.after(async () => {
-  // Orgs first (cascades members + workspaces + workspace_members), then users.
-  for (const id of orgIds) await db.prepare('DELETE FROM organizations WHERE id = ?').run(id);
-  await cleanupUsers(db, userIds);
-  await db.close();
+  try {
+    // Orgs first (cascades members + workspaces + workspace_members), then users.
+    for (const id of orgIds) await db.prepare('DELETE FROM organizations WHERE id = ?').run(id);
+    await cleanupUsers(db, userIds);
+  } finally {
+    await db.close();
+  }
 });
 
 test('no memberships at all -> false', async () => {

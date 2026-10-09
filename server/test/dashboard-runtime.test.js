@@ -17,7 +17,7 @@ const { test, before, after, mock } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { generateToken, hashToken, displayPrefix } = require('../middleware/apiToken');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers, cleanupRows } = require('./helpers/disposable');
@@ -162,13 +162,18 @@ before(async () => {
 });
 
 after(async () => {
-  const ids = Object.values(D);
-  for (const id of ids) await app.db.prepare('DELETE FROM device_usage_daily WHERE device_id = ?').run(id);
-  await cleanupRows(app.db, 'devices', ids);
-  const owners = [ownerA.id, ownerB.id];
-  await cleanupUsers(app.db, [...cleanup.filter((id) => !owners.includes(id)).reverse(), ...owners]);
-  await app.stop();
-  mock.timers.reset();
+  try {
+    if (app) {
+      const ids = Object.values(D);
+      for (const id of ids) await app.db.prepare('DELETE FROM device_usage_daily WHERE device_id = ?').run(id);
+      await cleanupRows(app.db, 'devices', ids);
+      const owners = [ownerA.id, ownerB.id];
+      await cleanupUsers(app.db, [...cleanup.filter((id) => !owners.includes(id)).reverse(), ...owners]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+    mock.timers.reset();
+  }
 });
 
 test('period mapping: complete UTC days ending at today\'s midnight, never today', async () => {

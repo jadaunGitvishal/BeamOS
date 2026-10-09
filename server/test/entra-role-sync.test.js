@@ -10,7 +10,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
 const { verifyChain } = require('../lib/activity-chain');
@@ -182,8 +182,13 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  await cleanupUsers(app.db, cleanup.reverse());
-  await app.stop();
+  try {
+    if (app) {
+      await cleanupUsers(app.db, cleanup.reverse());
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 let personal; // the subject's own org (manual org_owner + workspace_admin), never mapped

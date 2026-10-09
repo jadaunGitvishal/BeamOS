@@ -71,16 +71,19 @@ before(async () => {
 });
 
 after(async () => {
-  await db.prepare('DELETE FROM app_settings WHERE `key` LIKE ?').run(`data_platform_export_%:${RID}-%`);
-  await db.prepare('DELETE FROM tickets WHERE workspace_id IN (?, ?)').run(WS1, WS2);
-  await db.prepare('DELETE FROM sim_inventory WHERE workspace_id IN (?, ?)').run(WS1, WS2);
-  await db.prepare('DELETE FROM outage_history WHERE device_id IN (?, ?)').run(D1, D2);
-  await db.prepare('DELETE FROM play_logs WHERE device_id IN (?, ?)').run(D1, D2);
-  await db.prepare('DELETE FROM device_usage_daily WHERE device_id IN (?, ?)').run(D1, D2);
-  await db.prepare('DELETE FROM devices WHERE id IN (?, ?)').run(D1, D2);
-  await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces
-  await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
-  await db.close();
+  try {
+    await db.prepare('DELETE FROM app_settings WHERE `key` LIKE ?').run(`data_platform_export_%:${RID}-%`);
+    await db.prepare('DELETE FROM tickets WHERE workspace_id IN (?, ?)').run(WS1, WS2);
+    await db.prepare('DELETE FROM sim_inventory WHERE workspace_id IN (?, ?)').run(WS1, WS2);
+    await db.prepare('DELETE FROM outage_history WHERE device_id IN (?, ?)').run(D1, D2);
+    await db.prepare('DELETE FROM play_logs WHERE device_id IN (?, ?)').run(D1, D2);
+    await db.prepare('DELETE FROM device_usage_daily WHERE device_id IN (?, ?)').run(D1, D2);
+    await db.prepare('DELETE FROM devices WHERE id IN (?, ?)').run(D1, D2);
+    await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org')); // cascades workspaces
+    await db.prepare('DELETE FROM users WHERE id LIKE ?').run(RID + '-%');
+  } finally {
+    await db.close();
+  }
 });
 
 // Fake S3: records every putObject; `failWhen(params)` returning true throws

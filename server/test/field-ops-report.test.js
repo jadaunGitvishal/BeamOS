@@ -18,7 +18,7 @@ const os = require('node:os');
 const path = require('node:path');
 const ExcelJS = require('exceljs');
 
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { generateToken, hashToken, displayPrefix } = require('../middleware/apiToken');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers, cleanupUser } = require('./helpers/disposable');
@@ -211,9 +211,14 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  const owners = [ownerA.id, ownerB.id];
-  await cleanupUsers(app.db, [...cleanup.filter((id) => !owners.includes(id)).reverse(), ...owners]);
-  await app.stop();
+  try {
+    if (app) {
+      const owners = [ownerA.id, ownerB.id];
+      await cleanupUsers(app.db, [...cleanup.filter((id) => !owners.includes(id)).reverse(), ...owners]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 test('access: members, org admins and in-scope regional viewers read; others are refused; a technician matches the field-visit endpoints', async () => {

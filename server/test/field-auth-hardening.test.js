@@ -30,7 +30,7 @@ const { spawn } = require('node:child_process');
 const bcrypt = require('bcryptjs');
 
 const config = require('../config');
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag } = require('./helpers/disposable');
 
@@ -55,16 +55,21 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  config.fieldOtpEnabled = savedFlag;
-  const db = app.db;
-  for (const id of users) {
-    await db.prepare('DELETE FROM workspace_members WHERE user_id = ?').run(id);
-    await db.prepare('DELETE FROM organization_members WHERE user_id = ?').run(id);
+  try {
+    if (app) {
+      config.fieldOtpEnabled = savedFlag;
+      const db = app.db;
+      for (const id of users) {
+        await db.prepare('DELETE FROM workspace_members WHERE user_id = ?').run(id);
+        await db.prepare('DELETE FROM organization_members WHERE user_id = ?').run(id);
+      }
+      for (const id of workspaces) await db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
+      for (const id of orgs) await db.prepare('DELETE FROM organizations WHERE id = ?').run(id);
+      for (const id of users) await db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
   }
-  for (const id of workspaces) await db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
-  for (const id of orgs) await db.prepare('DELETE FROM organizations WHERE id = ?').run(id);
-  for (const id of users) await db.prepare('DELETE FROM users WHERE id = ?').run(id);
-  await app.stop();
 });
 
 // ---------------------------------------------------------------- fixtures

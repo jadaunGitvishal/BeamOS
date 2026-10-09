@@ -22,7 +22,7 @@ const { Server } = require('socket.io');
 const ioClient = require('socket.io-client');
 
 const config = require('../config');
-const { initDb } = require('../db/database');
+const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
 const { setUserDeactivated } = require('../lib/user-deactivation');
@@ -42,9 +42,14 @@ test.before(async () => {
   app.app.use('/api/field-auth', require('../routes/field-auth'));
 });
 test.after(async () => {
-  config.fieldOtpEnabled = savedFieldOtp;
-  await cleanupUsers(app.db, created);
-  await app.stop();
+  try {
+    if (app) {
+      config.fieldOtpEnabled = savedFieldOtp;
+      await cleanupUsers(app.db, created);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 const PASSWORD = 'correct-horse-9';
