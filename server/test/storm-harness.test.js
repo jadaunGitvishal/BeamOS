@@ -18,12 +18,14 @@ process.env.STATUS_LOG_RETENTION_DAYS = '3';
 process.env.CONNECT_RATE_MAX = '20';
 process.env.OTA_DOWNLOAD_MAX_PER_WINDOW = '120';
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { db, pruneStatusLog } = require('../db/database');
 const flap = require('../lib/flap-limiter');
 const otaGuard = require('../lib/ota-download-guard');
 const chunked = require('../lib/chunked-prune');
+
+after(async () => { await db.close(); });
 
 test('storm: bloated-table sweep + flapper + OTA flood — loop stays responsive, limiters bite', async () => {
   chunked.__setBandForTest(() => 'normal');

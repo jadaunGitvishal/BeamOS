@@ -9,10 +9,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 process.env.DATA_DIR = path.join(os.tmpdir(), 'st-ident-' + crypto.randomBytes(4).toString('hex'));
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { db } = require('../db/database');
 const { resolveIdentity } = require('../lib/device-identity');
+
+after(async () => { await db.close(); });
 
 // Spy on db.prepare to record whether the device_fingerprints query is ever prepared/run.
 function withPrepareSpy(fn) {

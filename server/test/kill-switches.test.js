@@ -10,13 +10,15 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 process.env.DATA_DIR = path.join(os.tmpdir(), 'st-kill-' + crypto.randomBytes(4).toString('hex'));
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const config = require('../config');
 const flap = require('../lib/flap-limiter');
 const guard = require('../lib/ota-download-guard');
 const chunked = require('../lib/chunked-prune');
 const { db, pruneStatusLog } = require('../db/database');
+
+after(async () => { await db.close(); });
 
 test('FLAP_LIMITER_ENABLED=false -> flap limiter always allows', () => {
   flap.reset();

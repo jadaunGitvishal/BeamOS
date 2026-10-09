@@ -26,6 +26,7 @@ const http = require('node:http');
 const { Server } = require('socket.io');
 const ioClient = require('socket.io-client');
 const setupDeviceSocket = require('../ws/deviceSocket');
+const { db } = require('../db/database');
 
 let httpServer, io, base;
 const uncaught = [];
@@ -39,10 +40,11 @@ before(async () => {
   await new Promise((r) => httpServer.listen(0, r));
   base = `http://127.0.0.1:${httpServer.address().port}`;
 });
-after(() => {
+after(async () => {
   process.off('uncaughtException', onUncaught);
   try { io.close(); } catch { /* */ }
   try { httpServer.close(); } catch { /* */ }
+  await db.close();
 });
 
 const connect = () => ioClient(`${base}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });

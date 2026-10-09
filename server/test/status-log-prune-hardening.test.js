@@ -13,10 +13,12 @@ process.env.STATUS_LOG_RETENTION_DAYS = '3';
 process.env.STATUS_LOG_MAX_ROWS_PER_DEVICE = '500';
 process.env.STATUS_LOG_PRUNE_BATCH = '2000';
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { db, pruneStatusLog } = require('../db/database');
 const chunked = require('../lib/chunked-prune');
+
+after(async () => { await db.close(); });
 
 function seed(deviceId, n, ageSecFn) {
   const ins = db.prepare('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)');

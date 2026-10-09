@@ -12,11 +12,13 @@ process.env.CONNECT_RATE_MAX = '20';
 process.env.CONNECT_RATE_ANON_MAX = '60';
 process.env.CONNECT_RATE_COOLDOWN_MS = '60000';
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const flap = require('../lib/flap-limiter');
 const { resolveIdentity, ANON_KEY } = require('../lib/device-identity');
 const { db } = require('../db/database');
+
+after(async () => { await db.close(); });
 
 test('a device flapping every ~4s over minutes is refused after the window max', () => {
   flap.reset();

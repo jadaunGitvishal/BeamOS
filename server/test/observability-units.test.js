@@ -7,10 +7,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 process.env.DATA_DIR = path.join(os.tmpdir(), 'st-obsunit-' + crypto.randomBytes(4).toString('hex'));
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const heartbeat = require('../services/heartbeat');
 const appSettings = require('../lib/app-settings');
+const { db } = require('../db/database');
+
+after(async () => { await db.close(); });
 
 test('heartbeat.getConnectedCount reflects the live connection map (not DB status)', () => {
   const start = heartbeat.getConnectedCount();

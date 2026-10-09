@@ -9,11 +9,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 process.env.DATA_DIR = path.join(os.tmpdir(), 'st-billing-' + crypto.randomBytes(4).toString('hex'));
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { db } = require('../db/database');
 const billing = require('../lib/billing');
 const heartbeat = require('../services/heartbeat');
+
+after(async () => { await db.close(); });
 
 const seedRow = db.prepare('INSERT OR REPLACE INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)');
 const readSec = (id, day) => (db.prepare('SELECT online_seconds s FROM device_usage_daily WHERE device_id = ? AND day = ?').get(id, day) || {}).s;

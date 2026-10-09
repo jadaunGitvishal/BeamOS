@@ -10,9 +10,11 @@ const crypto = require('node:crypto');
 process.env.DATA_DIR = path.join(os.tmpdir(), 'st-statusprune-' + crypto.randomBytes(4).toString('hex'));
 process.env.STATUS_LOG_RETENTION_DAYS = '2';
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { db, pruneStatusLog } = require('../db/database');
+
+after(async () => { await db.close(); });
 
 test('global sweep deletes rows older than retention across ALL devices, keeps recent', async () => {
   db.exec('DELETE FROM device_status_log'); // clean slate
