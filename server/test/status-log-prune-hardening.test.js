@@ -54,47 +54,53 @@ after(async () => {
   }
 });
 
-function seed(deviceId, n, ageSecFn) {
-  const ins = db.prepare('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)');
+// Batched multi-row INSERTs (2000 rows per statement), awaited, so even a 300k-row
+// backlog is seeded in seconds and fully committed before the assertions run.
+async function seed(deviceId, n, ageSecFn) {
   const now = Math.floor(Date.now() / 1000);
-  const tx = db.transaction((count) => {
-    for (let i = 0; i < count; i++) ins.run(deviceId, i % 2 ? 'online' : 'offline', now - ageSecFn(i));
-  });
-  tx(n);
+  const BATCH = 2000;
+  for (let i = 0; i < n; i += BATCH) {
+    const rows = [], params = [];
+    for (let j = i; j < Math.min(n, i + BATCH); j++) {
+      rows.push('(?, ?, ?)');
+      params.push(deviceId, j % 2 ? 'online' : 'offline', now - ageSecFn(j));
+    }
+    await db.prepare(`INSERT INTO device_status_log (device_id, status, timestamp) VALUES ${rows.join(', ')}`).run(...params);
+  }
 }
 // With a device: that (prefixed) device's rows. Without one: all of THIS file's rows only.
-const count = (d) => (d
-  ? db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id = ?').get(d)
-  : db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE)).c;
+const count = async (d) => Number((d
+  ? await db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id = ?').get(d)
+  : await db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE)).c);
 
 test('correctness: keeps newest cap per device, drops older-than-retention, devices independent', async (t) => {
   await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
   chunked.__setBandForTest(() => 'normal');
   await addDevices('A', 'B', 'C');
   // device A: 800 recent rows -> cap keeps newest 500
-  seed(dev('A'), 800, () => 0);
+  await seed(dev('A'), 800, () => 0);
   // device B: 300 recent (< cap, all kept) + 50 older-than-retention (dropped)
-  seed(dev('B'), 300, () => 0);
-  seed(dev('B'), 50, () => 10 * 86400);
+  await seed(dev('B'), 300, () => 0);
+  await seed(dev('B'), 50, () => 10 * 86400);
   // device C: 10 rows, all old -> all dropped
-  seed(dev('C'), 10, () => 10 * 86400);
+  await seed(dev('C'), 10, () => 10 * 86400);
 
   if (await skipIfForeignPrunable(t)) return;
   await pruneStatusLog();
 
-  assert.equal(count(dev('A')), 500, 'A capped to newest 500');
-  assert.equal(count(dev('B')), 300, 'B keeps its 300 recent, drops the 50 old');
-  assert.equal(count(dev('C')), 0, 'C all older than retention -> gone');
+  assert.equal(await count(dev('A')), 500, 'A capped to newest 500');
+  assert.equal(await count(dev('B')), 300, 'B keeps its 300 recent, drops the 50 old');
+  assert.equal(await count(dev('C')), 0, 'C all older than retention -> gone');
   const cutoff = Math.floor(Date.now() / 1000) - 3 * 86400;
-  assert.ok(db.prepare('SELECT MIN(timestamp) m FROM device_status_log WHERE device_id LIKE ?').get(LIKE).m >= cutoff, 'nothing older than retention survives');
+  assert.ok(Number((await db.prepare('SELECT MIN(timestamp) m FROM device_status_log WHERE device_id LIKE ?').get(LIKE)).m) >= cutoff, 'nothing older than retention survives');
 });
 
 test('non-blocking: 300k-row single-device backlog trims in many batches, loop stays responsive', async (t) => {
   await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
   chunked.__setBandForTest(() => 'normal');
   await addDevices('flapper');
-  seed(dev('flapper'), 300000, () => 0);              // all recent -> cap prune must remove ~299500
-  assert.equal(count(dev('flapper')), 300000, 'seeded 300k');
+  await seed(dev('flapper'), 300000, () => 0);              // all recent -> cap prune must remove ~299500
+  assert.equal(await count(dev('flapper')), 300000, 'seeded 300k');
 
   // Guard before the ticker starts (nothing touches the DB in between), so a skip
   // never leaves an interval running.
@@ -108,7 +114,7 @@ test('non-blocking: 300k-row single-device backlog trims in many batches, loop s
   const deleted = await pruneStatusLog();
   clearInterval(ticker);
 
-  assert.equal(count(dev('flapper')), 500, 'trimmed to the cap');
+  assert.equal(await count(dev('flapper')), 500, 'trimmed to the cap');
   assert.ok(deleted >= 299000, `deleted the backlog (${deleted})`);
   assert.ok(maxGap < 250, `no long freeze — max event-loop gap ${maxGap}ms (would be seconds if unbatched)`);
 });
@@ -116,18 +122,18 @@ test('non-blocking: 300k-row single-device backlog trims in many batches, loop s
 test('band-gate: interval run is a no-op when loaded; startup/normal runs', async (t) => {
   await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
   await addDevices('X');
-  seed(dev('X'), 900, () => 0);
+  await seed(dev('X'), 900, () => 0);
 
   chunked.__setBandForTest(() => 'critical');
   try {
     if (await skipIfForeignPrunable(t)) return;
     assert.equal(await pruneStatusLog({ bandGate: true }), 0, 'band-gated interval run skips while critical');
-    assert.equal(count(dev('X')), 900, 'no rows touched while loaded');
+    assert.equal(await count(dev('X')), 900, 'no rows touched while loaded');
 
     // startup path is NOT band-gated even under load
     if (await skipIfForeignPrunable(t)) return;
     assert.ok(await pruneStatusLog({ bandGate: false }) > 0, 'un-gated startup run trims even while critical');
-    assert.equal(count(dev('X')), 500, 'startup cleared the backlog to cap');
+    assert.equal(await count(dev('X')), 500, 'startup cleared the backlog to cap');
   } finally {
     chunked.__setBandForTest(() => 'normal');
   }
@@ -137,10 +143,10 @@ test('re-entrancy: two concurrent runs -> work happens once', async (t) => {
   await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
   chunked.__setBandForTest(() => 'normal');
   await addDevices('Y');
-  seed(dev('Y'), 5000, () => 0);
+  await seed(dev('Y'), 5000, () => 0);
 
   if (await skipIfForeignPrunable(t)) return;   // one check covers both concurrent runs
   const [a, b] = await Promise.all([pruneStatusLog(), pruneStatusLog()]);   // fired synchronously
   assert.ok((a > 0) !== (b > 0), 'exactly one run did the work; the other short-circuited to 0');
-  assert.equal(count(dev('Y')), 500, 'trimmed to cap exactly once (no double-run corruption)');
+  assert.equal(await count(dev('Y')), 500, 'trimmed to cap exactly once (no double-run corruption)');
 });

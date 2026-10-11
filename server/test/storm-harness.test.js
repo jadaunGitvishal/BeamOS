@@ -69,12 +69,15 @@ test('storm: bloated-table sweep + flapper + OTA flood — loop stays responsive
   // remove ~299k+ of them).
   await db.prepare('DELETE FROM device_status_log WHERE device_id LIKE ?').run(LIKE);
   await addDevices('dev-0', 'dev-1', 'dev-2');
-  const ins = db.prepare('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)');
+  // Batched multi-row INSERTs (2000 rows per statement), awaited, so the 300k-row
+  // backlog is fully committed in seconds before the sweep starts.
   const now = Math.floor(Date.now() / 1000);
-  db.transaction(() => {
-    for (let i = 0; i < 300000; i++) ins.run(dev('dev-' + (i % 3)), i % 2 ? 'online' : 'offline', now);
-  })();
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE).c, 300000, 'seeded 300k');
+  for (let i = 0; i < 300000; i += 2000) {
+    const rows = [], params = [];
+    for (let j = i; j < i + 2000; j++) { rows.push('(?, ?, ?)'); params.push(dev('dev-' + (j % 3)), j % 2 ? 'online' : 'offline', now); }
+    await db.prepare(`INSERT INTO device_status_log (device_id, status, timestamp) VALUES ${rows.join(', ')}`).run(...params);
+  }
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE)).c), 300000, 'seeded 300k');
 
   // Guard before the ticker starts (nothing touches the DB in between), so a skip
   // never leaves an interval running.
@@ -111,7 +114,7 @@ test('storm: bloated-table sweep + flapper + OTA flood — loop stays responsive
   assert.ok(ticks >= 2, `ticker sampled the run (${ticks} ticks) — max-gap measurement is meaningful`);
   // 2) The sweep actually drained the backlog to the cap.
   assert.ok(deleted >= 298000, `sweep trimmed the backlog (${deleted} deleted)`);
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE).c, 1500, '3 devices x 500 cap');
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE)).c), 1500, '3 devices x 500 cap');
   // 3) Every limiter still bit under load.
   assert.ok(flapRefused > 0, 'the flapper was refused (flap limiter bit)');
   assert.ok(otaShed > 0, 'the OTA flood was shed past the global window cap');

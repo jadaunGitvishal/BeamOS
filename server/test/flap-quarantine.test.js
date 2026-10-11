@@ -48,23 +48,29 @@ test('quarantine engages after N trips, refuses cheaply, and AUTO-CLEARS', () =>
 });
 
 // --- integration: a flapping device is quarantined but devices.blocked stays 0 ---
+// Real MySQL (beamos_test via npm test): a test-owned device (prefixed id, legacy
+// plaintext token 'tok'); only this row is removed.
+const DEV = 'FQ-' + crypto.randomBytes(4).toString('hex') + '-flap-dev';
 let httpServer, io, base;
 before(async () => {
-  db.pragma('foreign_keys = OFF');
-  db.prepare("INSERT INTO devices (id, device_token, status, blocked) VALUES ('flap-dev', 'tok', 'offline', 0)").run();
-  db.pragma('foreign_keys = ON');
+  await db.prepare("INSERT INTO devices (id, device_token, status, blocked) VALUES (?, 'tok', 'offline', 0)").run(DEV);
   httpServer = http.createServer(); io = new Server(httpServer); setupDeviceSocket(io);
   await new Promise((r) => httpServer.listen(0, r));
   base = `http://127.0.0.1:${httpServer.address().port}`;
 });
-after(async () => { try { try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ } } finally { await db.close(); } });
+after(async () => {
+  try {
+    try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ }
+    await db.prepare('DELETE FROM devices WHERE id = ?').run(DEV);
+  } finally { await db.close(); }
+});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function reg() {
   return new Promise((resolve) => {
     const s = ioClient(`${base}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
     let done = false; const fin = (r) => { if (done) return; done = true; try { s.close(); } catch { /* */ } resolve(r); };
-    s.on('connect', () => s.emit('device:register', { device_id: 'flap-dev', device_token: 'tok' }));
+    s.on('connect', () => s.emit('device:register', { device_id: DEV, device_token: 'tok' }));
     s.on('device:registered', () => fin({ registered: true }));
     s.on('device:throttled', (m) => fin({ throttled: true, reason: m && m.reason }));
     setTimeout(() => fin({ timeout: true }), 1500);
@@ -83,6 +89,6 @@ test('a flapping device gets quarantined, but devices.blocked is NEVER auto-writ
   const q = await reg();
   assert.ok(throttled >= 1 || q.throttled, 'the flapper was refused (flap/quarantine bit)');
 
-  const row = db.prepare("SELECT blocked FROM devices WHERE id = 'flap-dev'").get();
+  const row = await db.prepare('SELECT blocked FROM devices WHERE id = ?').get(DEV);
   assert.equal(row.blocked, 0, 'auto-quarantine NEVER wrote devices.blocked — operator lever untouched');
 });

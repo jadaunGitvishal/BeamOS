@@ -59,24 +59,24 @@ test('global sweep deletes rows older than retention across ALL devices, keeps r
   // 5 days old (> 2d retention): an active device, a device NOT in the devices
   // table (removed/idle — what the per-device insert-time prune never revisits),
   // and the heartbeat offline_timeout status that bypasses logDeviceStatus.
-  old.run(dev('live-dev'), 'online', now - 5 * 86400);
-  old.run(dev('removed-idle-dev'), 'offline', now - 5 * 86400);
-  old.run(dev('hb-dev'), 'offline_timeout', now - 5 * 86400);
+  await old.run(dev('live-dev'), 'online', now - 5 * 86400);
+  await old.run(dev('removed-idle-dev'), 'offline', now - 5 * 86400);
+  await old.run(dev('hb-dev'), 'offline_timeout', now - 5 * 86400);
   // recent (< retention): must survive, regardless of device existence / status.
-  old.run(dev('live-dev'), 'online', now);
-  old.run(dev('hb-dev'), 'offline_timeout', now - 3600);
+  await old.run(dev('live-dev'), 'online', now);
+  await old.run(dev('hb-dev'), 'offline_timeout', now - 3600);
 
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE).c, 5, 'seeded 5 rows');
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) c FROM device_status_log WHERE device_id LIKE ?').get(LIKE)).c), 5, 'seeded 5 rows');
 
   if (await skipIfForeignPrunable(t)) return;
   const deleted = await pruneStatusLog();
   assert.equal(deleted, 3, 'the 3 over-retention rows pruned (incl. removed-idle + offline_timeout paths)');
 
-  const remaining = db.prepare('SELECT device_id, status FROM device_status_log WHERE device_id LIKE ? ORDER BY device_id').all(LIKE);
+  const remaining = await db.prepare('SELECT device_id, status FROM device_status_log WHERE device_id LIKE ? ORDER BY device_id').all(LIKE);
   assert.equal(remaining.length, 2);
   // both survivors are the recent rows; no old row of any device/status survived
   assert.deepEqual(remaining.map(r => r.device_id).sort(), [dev('hb-dev'), dev('live-dev')]);
-  const oldestNow = db.prepare('SELECT MIN(timestamp) m FROM device_status_log WHERE device_id LIKE ?').get(LIKE).m;
+  const oldestNow = Number((await db.prepare('SELECT MIN(timestamp) m FROM device_status_log WHERE device_id LIKE ?').get(LIKE)).m);
   const cutoff = Math.floor(Date.now() / 1000) - 2 * 86400;
   assert.ok(oldestNow >= cutoff, 'no surviving row is older than the retention cutoff');
 });

@@ -15,10 +15,21 @@ const { db } = require('../db/database');
 const billing = require('../lib/billing');
 const heartbeat = require('../services/heartbeat');
 
-after(async () => { await db.close(); });
+// Real MySQL (beamos_test via npm test): every device id this file writes carries a
+// per-run prefix, and only prefixed rows are removed afterwards.
+const P = 'BU-' + crypto.randomBytes(4).toString('hex') + '-';
+const D = (s) => P + s;
+after(async () => {
+  try { await db.prepare('DELETE FROM device_usage_daily WHERE device_id LIKE ?').run(P + '%'); } finally { await db.close(); }
+});
 
-const seedRow = db.prepare('INSERT OR REPLACE INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)');
-const readSec = (id, day) => (db.prepare('SELECT online_seconds s FROM device_usage_daily WHERE device_id = ? AND day = ?').get(id, day) || {}).s;
+const seedRow = {
+  run: (id, day, secs) => db.prepare('INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE online_seconds = VALUES(online_seconds)').run(id, day, secs),
+};
+const readSec = async (id, day) => ((await db.prepare('SELECT online_seconds s FROM device_usage_daily WHERE device_id = ? AND day = ?').get(id, day)) || {}).s;
+// The report counts every device with usage in the month: this file's months must hold
+// only its own rows, or the exact figures below would be someone else's data.
+const foreignRowsIn = async (month) => Number((await db.prepare('SELECT COUNT(*) AS c FROM device_usage_daily WHERE day LIKE ? AND device_id NOT LIKE ?').get(month + '-%', P + '%')).c);
 
 // ---------------- contract math ----------------
 test('ASD: 8h->1.0, 4h->0.5, 24h->1.0 (capped), 0->0', () => {
@@ -53,42 +64,43 @@ test('tier is flat: 499->1.50, 500->1.25, 999->1.25, 1000->1.00; 0 unbilled', ()
 // ---------------- accumulator (uses January 2025 to avoid the report months) ----------------
 test('accumulator: accrues by interval, caps at 86400/day, disconnected does not accrue', async () => {
   heartbeat.__resetAccrual();
-  const A = 'acc-a', B = 'acc-b';
+  const A = D('acc-a'), B = D('acc-b');
   heartbeat.registerConnection(A, 'sA');
   heartbeat.registerConnection(B, 'sB');
   const t0 = Date.UTC(2025, 0, 15, 12, 0, 0), day = '2025-01-15';
   assert.equal(await heartbeat.accrueUsage(t0), 0, 'first tick is baseline (no credit)');
   await heartbeat.accrueUsage(t0 + 10000);              // +10s to both connected devices
-  assert.equal(readSec(A, day), 10);
-  assert.equal(readSec(B, day), 10);
+  assert.equal(await readSec(A, day), 10);
+  assert.equal(await readSec(B, day), 10);
 
   heartbeat.removeConnection(B);                         // B goes offline
   await heartbeat.accrueUsage(t0 + 20000);              // +10s to A only
-  assert.equal(readSec(A, day), 20, 'still-connected device accrues');
-  assert.equal(readSec(B, day), 10, 'disconnected device does NOT accrue');
+  assert.equal(await readSec(A, day), 20, 'still-connected device accrues');
+  assert.equal(await readSec(B, day), 10, 'disconnected device does NOT accrue');
   heartbeat.removeConnection(A);
 });
 
 test('accumulator: daily online_seconds capped at 86400', async () => {
   heartbeat.__resetAccrual();
-  const C = 'acc-cap', day = '2025-01-16';
+  const C = D('acc-cap'), day = '2025-01-16';
   heartbeat.registerConnection(C, 'sC');
   await heartbeat.accrueUsage(Date.UTC(2025, 0, 16, 0, 0, 0));      // baseline
-  seedRow.run(C, day, 86390);                                       // near the daily cap
+  await seedRow.run(C, day, 86390);                                 // near the daily cap
   await heartbeat.accrueUsage(Date.UTC(2025, 0, 16, 0, 0, 20));     // +20s -> would be 86410
-  assert.equal(readSec(C, day), 86400, 'capped at 86400, never above');
+  assert.equal(await readSec(C, day), 86400, 'capped at 86400, never above');
   heartbeat.removeConnection(C);
 });
 
 // ---------------- Usage Report ----------------
-test('report: completed past month is_final with billable_screens_final', () => {
+test('report: completed past month is_final with billable_screens_final', async () => {
+  assert.equal(await foreignRowsIn('2025-02'), 0, 'precondition: no other usage rows in 2025-02');
   // Feb 2025 (28 days): 5 devices online 4h (ASD 0.5) every day -> Σ = 5*0.5*28 = 70.
   // BillableScreens = round(70/28) = round(2.5) = 3.
   for (let d = 1; d <= 28; d++) {
     const day = `2025-02-${String(d).padStart(2, '0')}`;
-    for (let k = 0; k < 5; k++) seedRow.run(`feb-${k}`, day, 14400);
+    for (let k = 0; k < 5; k++) await seedRow.run(D(`feb-${k}`), day, 14400);
   }
-  const rep = billing.buildUsageReport('2025-02', Date.UTC(2025, 5, 15));   // "now" = June -> Feb is final
+  const rep = await billing.buildUsageReport('2025-02', Date.UTC(2025, 5, 15));   // "now" = June -> Feb is final
   assert.equal(rep.is_final, true);
   assert.equal(rep.days_in_month, 28);
   assert.equal(rep.provisioned_screens, 5);
@@ -101,14 +113,15 @@ test('report: completed past month is_final with billable_screens_final', () => 
   assert.equal(rep.daily[0].active_screen_days, 2.5);       // 5 * 0.5
 });
 
-test('report: MTD excludes today from the average (partial today does not drag it)', () => {
+test('report: MTD excludes today from the average (partial today does not drag it)', async () => {
+  assert.equal(await foreignRowsIn('2025-06'), 0, 'precondition: no other usage rows in 2025-06');
   const now = Date.UTC(2025, 5, 15, 10, 0, 0);   // 2025-06-15
   // Completed days 01..14: one device full 8h (ASD 1.0) each -> avg over 14 completed = 1.0.
-  for (let d = 1; d <= 14; d++) seedRow.run('jun-steady', `2025-06-${String(d).padStart(2, '0')}`, 28800);
+  for (let d = 1; d <= 14; d++) await seedRow.run(D('jun-steady'), `2025-06-${String(d).padStart(2, '0')}`, 28800);
   // TODAY (15th): a huge spike of 100 devices that WOULD inflate the average if counted.
-  for (let k = 0; k < 100; k++) seedRow.run(`jun-spike-${k}`, '2025-06-15', 28800);
+  for (let k = 0; k < 100; k++) await seedRow.run(D(`jun-spike-${k}`), '2025-06-15', 28800);
 
-  const rep = billing.buildUsageReport('2025-06', now);
+  const rep = await billing.buildUsageReport('2025-06', now);
   assert.equal(rep.is_final, false);
   assert.equal('billable_screens_final' in rep, false, 'no final figure mid-month');
   assert.equal(rep.days_elapsed, 15);
@@ -118,18 +131,18 @@ test('report: MTD excludes today from the average (partial today does not drag i
   assert.equal(rep.provisioned_screens, 101, 'distinct devices seen this month incl today');
 });
 
-test('report: invalid month is rejected', () => {
-  assert.throws(() => billing.buildUsageReport('2025-13'), /invalid month/);
-  assert.throws(() => billing.buildUsageReport('nope'), /invalid month/);
+test('report: invalid month is rejected', async () => {
+  await assert.rejects(billing.buildUsageReport('2025-13'), /invalid month/);
+  await assert.rejects(billing.buildUsageReport('nope'), /invalid month/);
 });
 
 // ---------------- retention (LAST — prunes old months) ----------------
 test('device_usage_daily prunes via chunked-prune beyond retention', async () => {
   const old = '2020-01-01';
   const recent = billing.utcDay(Date.now());
-  seedRow.run('ret-old', old, 100);
-  seedRow.run('ret-new', recent, 100);
+  await seedRow.run(D('ret-old'), old, 100);
+  await seedRow.run(D('ret-new'), recent, 100);
   await heartbeat.pruneUsageDaily();
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM device_usage_daily WHERE day = ?').get(old).c, 0, 'old row pruned');
-  assert.equal(db.prepare("SELECT COUNT(*) c FROM device_usage_daily WHERE device_id = 'ret-new'").get().c, 1, 'recent row kept');
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) c FROM device_usage_daily WHERE day = ?').get(old)).c), 0, 'old row pruned');
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) c FROM device_usage_daily WHERE device_id = ?').get(D('ret-new'))).c), 1, 'recent row kept');
 });

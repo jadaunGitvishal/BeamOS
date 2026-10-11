@@ -21,19 +21,28 @@ const ioClient = require('socket.io-client');
 const { db } = require('../db/database');
 const setupDeviceSocket = require('../ws/deviceSocket');
 
+// Real MySQL (beamos_test via npm test): a test-owned device (prefixed id, legacy
+// plaintext token 'tok') and its fingerprint mapping; only these rows are removed.
+const P = 'OB-' + crypto.randomBytes(4).toString('hex');
+const DEV = `${P}-blk-dev`, FP = `${P}-fp-blk`;
+
 let httpServer, io, base;
 before(async () => {
-  db.pragma('foreign_keys = OFF');
-  db.prepare("INSERT INTO devices (id, device_token, status, blocked) VALUES ('blk-dev', 'tok', 'offline', 1)").run();
-  db.prepare("INSERT OR REPLACE INTO device_fingerprints (fingerprint, device_id) VALUES ('fp-blk', 'blk-dev')").run();
-  db.pragma('foreign_keys = ON');
+  await db.prepare("INSERT INTO devices (id, device_token, status, blocked) VALUES (?, 'tok', 'offline', 1)").run(DEV);
+  await db.prepare('INSERT INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)').run(FP, DEV);
   httpServer = http.createServer();
   io = new Server(httpServer);
   setupDeviceSocket(io);
   await new Promise((r) => httpServer.listen(0, r));
   base = `http://127.0.0.1:${httpServer.address().port}`;
 });
-after(async () => { try { try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ } } finally { await db.close(); } });
+after(async () => {
+  try {
+    try { io.close(); } catch { /* */ } try { httpServer.close(); } catch { /* */ }
+    await db.prepare('DELETE FROM device_fingerprints WHERE fingerprint = ?').run(FP);
+    await db.prepare('DELETE FROM devices WHERE id = ?').run(DEV);
+  } finally { await db.close(); }
+});
 
 const connect = () => ioClient(`${base}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
 
@@ -52,21 +61,21 @@ function register(payload) {
 }
 
 test('a blocked device is refused at handshake, cheaply (no playlist build)', async () => {
-  const r = await register({ device_id: 'blk-dev', device_token: 'tok' });
+  const r = await register({ device_id: DEV, device_token: 'tok' });
   assert.equal(r.authError, 'Device blocked', 'refused with the block error');
   assert.ok(!r.registered, 'never registered');
   assert.ok(!r.gotPlaylist, 'no playlist was built — short-circuited before heavy work');
 });
 
 test('a blocked device reconnecting WITHOUT device_id but with a mapped fingerprint is still refused', async () => {
-  const r = await register({ fingerprint: 'fp-blk' });   // no device_id — resolves via device_fingerprints
+  const r = await register({ fingerprint: FP });   // no device_id — resolves via device_fingerprints
   assert.equal(r.authError, 'Device blocked', 'caught via the fingerprint->device_id identity chain');
   assert.ok(!r.registered);
 });
 
 test('unblock takes effect on the NEXT register, no restart', async () => {
-  db.prepare("UPDATE devices SET blocked = 0 WHERE id = 'blk-dev'").run();
-  const r = await register({ device_id: 'blk-dev', device_token: 'tok' });
+  await db.prepare('UPDATE devices SET blocked = 0 WHERE id = ?').run(DEV);
+  const r = await register({ device_id: DEV, device_token: 'tok' });
   assert.ok(r.registered, 'registers once unblocked — same running server, no restart');
   assert.ok(!r.authError);
 });
