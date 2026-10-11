@@ -18,7 +18,20 @@ const flap = require('../lib/flap-limiter');
 const { resolveIdentity, ANON_KEY } = require('../lib/device-identity');
 const { db } = require('../db/database');
 
-after(async () => { await db.close(); });
+// Test-owned rows on the real test DB (beamos_test via npm test): one device and the
+// fingerprint mapping to it, plus prefixed fingerprints that must stay unmapped.
+const P = 'FL-' + crypto.randomBytes(4).toString('hex');
+const DEV = `${P}-dev-mapped`;
+const FP = (s) => `${P}-${s}`;
+
+after(async () => {
+  try {
+    await db.prepare('DELETE FROM device_fingerprints WHERE fingerprint LIKE ?').run(P + '-%');
+    await db.prepare('DELETE FROM devices WHERE id = ?').run(DEV);
+  } finally {
+    await db.close();
+  }
+});
 
 test('a device flapping every ~4s over minutes is refused after the window max', () => {
   flap.reset();
@@ -47,40 +60,40 @@ test('two device_ids from the "same IP" are independent (never IP-keyed)', () =>
   assert.equal(flap.check('d:B', now).allow, true, 'B is unaffected — no shared IP bucket');
 });
 
-test('identity chain: device_id > fingerprint(->device_id) > token > global anon; never IP', () => {
+test('identity chain: device_id > fingerprint(->device_id) > token > global anon; never IP', async () => {
   // device_id wins
-  assert.deepEqual(resolveIdentity({ device_id: 'dev1', fingerprint: 'fp', device_token: 'tok', ip: '10.10.10.1' }).kind, 'device_id');
-  // fingerprint maps to device_id when device_fingerprints has it
-  db.pragma('foreign_keys = OFF');   // seed the mapping without a real devices row
-  db.prepare('INSERT OR REPLACE INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)').run('fp-mapped', 'dev-mapped');
-  db.pragma('foreign_keys = ON');
-  const m = resolveIdentity({ fingerprint: 'fp-mapped' });
+  assert.deepEqual((await resolveIdentity({ device_id: 'dev1', fingerprint: 'fp', device_token: 'tok', ip: '10.10.10.1' })).kind, 'device_id');
+  // fingerprint maps to device_id when device_fingerprints has it (a real device row: the FK)
+  await db.prepare('INSERT INTO devices (id, name) VALUES (?, ?)').run(DEV, DEV);
+  await db.prepare('INSERT INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)').run(FP('fp-mapped'), DEV);
+  const m = await resolveIdentity({ fingerprint: FP('fp-mapped') });
   assert.equal(m.kind, 'fingerprint->device_id');
-  assert.equal(m.key, 'd:dev-mapped');
+  assert.equal(m.key, 'd:' + DEV);
   // unmapped fingerprint keys on the raw fingerprint
-  assert.equal(resolveIdentity({ fingerprint: 'fp-unknown' }).key, 'f:fp-unknown');
+  assert.equal((await resolveIdentity({ fingerprint: FP('fp-unknown') })).key, 'f:' + FP('fp-unknown'));
   // token fallback
-  assert.equal(resolveIdentity({ device_token: 'tok9' }).key, 't:tok9');
+  assert.equal((await resolveIdentity({ device_token: 'tok9' })).key, 't:tok9');
   // nothing identifiable -> single global anon bucket (NOT ip, even if ip present)
-  assert.equal(resolveIdentity({ ip: '10.10.10.1' }).key, ANON_KEY);
+  assert.equal((await resolveIdentity({ ip: '10.10.10.1' })).key, ANON_KEY);
 });
 
-test('a device_id-less client is bucketed by fingerprint (not IP, not unthrottled)', () => {
+test('a device_id-less client is bucketed by fingerprint (not IP, not unthrottled)', async () => {
   flap.reset();
   let now = 0, refusedAt = -1;
   for (let i = 0; i < 25; i++) {
-    const key = resolveIdentity({ fingerprint: 'fp-flap' }).key;   // no device_id
+    const key = (await resolveIdentity({ fingerprint: FP('fp-flap') })).key;   // no device_id
+    assert.equal(key, 'f:' + FP('fp-flap'));
     if (!flap.check(key, now).allow && refusedAt < 0) refusedAt = i;
     now += 4000;
   }
   assert.equal(refusedAt, 20, 'a device_id-less flapper is still capped, by fingerprint');
 });
 
-test('a client with NO device_id and NO fingerprint is capped via the global anon bucket', () => {
+test('a client with NO device_id and NO fingerprint is capped via the global anon bucket', async () => {
   flap.reset();
   let now = 0, refusedAt = -1;
   for (let i = 0; i < 70; i++) {
-    const key = resolveIdentity({}).key;            // ANON_KEY — shared by all anon clients
+    const key = (await resolveIdentity({})).key;            // ANON_KEY — shared by all anon clients
     assert.equal(key, ANON_KEY);
     if (!flap.check(key, now).allow && refusedAt < 0) refusedAt = i;
     now += 1000;
@@ -88,12 +101,12 @@ test('a client with NO device_id and NO fingerprint is capped via the global ano
   assert.equal(refusedAt, 60, 'the anon bucket caps collectively at connectRateAnonMax (60), never unthrottled');
 });
 
-test('idle sweep evicts stale buckets but never the anon bucket', () => {
+test('idle sweep evicts stale buckets but never the anon bucket', async () => {
   flap.reset();
   flap.check('d:temp', 0);
   flap.check(ANON_KEY, 0);
   assert.ok(flap._size() >= 2);
   flap.sweep(10 * 300000);                          // long after idle window
   // anon bucket is preserved (shared global), device bucket evicted
-  assert.equal(resolveIdentity({}).key, ANON_KEY);
+  assert.equal((await resolveIdentity({})).key, ANON_KEY);
 });

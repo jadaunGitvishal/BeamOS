@@ -1,48 +1,50 @@
 'use strict';
 
 // #100 unit tests: the security-critical assertions that don't need a full server.
-// The bite-test (#1) injects an in-memory db with a real user row so that REMOVING the
-// mfa_pending rejection in requireAuth makes it go red (the pending token would then
-// find the user and call next()).
+// The bite-test (#1) uses a real user row (on the test DB, beamos_test via npm test) so
+// that REMOVING the mfa_pending rejection in requireAuth makes it go red (the pending
+// token would then find the user and call next()).
 
-const { test } = require('node:test');
+const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const Database = require('better-sqlite3');
 const { authenticator } = require('otplib');
 
-// Inject the db BEFORE requiring middleware/auth so requireAuth queries this one.
-const mem = new Database(':memory:');
-mem.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT, name TEXT, role TEXT,
-  auth_provider TEXT, avatar_url TEXT, plan_id TEXT, email_alerts INTEGER,
-  must_change_password INTEGER NOT NULL DEFAULT 0)`);
-mem.prepare("INSERT INTO users (id,email,name,role,auth_provider) VALUES ('u1','u1@x','U1','user','local')").run();
-require.cache[require.resolve('../db/database')] = {
-  id: require.resolve('../db/database'), loaded: true, exports: { db: mem },
-};
-
+const { db } = require('../db/database');
 const { requireAuth, generateMfaPendingToken, generateToken } = require('../middleware/auth');
 const totp = require('../lib/totp');
 const totpLockout = require('../lib/totp-lockout');
 
+const U1 = 'TU-' + crypto.randomBytes(4).toString('hex') + '-u1';
+before(async () => {
+  await db.prepare("INSERT INTO users (id, email, name, role, auth_provider) VALUES (?, ?, 'U1', 'user', 'local')").run(U1, `${U1}@test.local`);
+});
+after(async () => {
+  try { await db.prepare('DELETE FROM users WHERE id = ?').run(U1); } finally { await db.close(); }
+});
+
+// requireAuth is async (it reads the user row) and its asyncHandler wrapper doesn't
+// return the promise, so settle on whichever of res.json() / next() it reaches.
 function runRequireAuth(token) {
-  const req = { headers: { authorization: 'Bearer ' + token }, originalUrl: '/api/devices' };
-  let status = 200, nexted = false;
-  const res = { status(s) { status = s; return this; }, json() { return this; } };
-  requireAuth(req, res, () => { nexted = true; });
-  return { status, nexted, req };
+  return new Promise((resolve) => {
+    const req = { headers: { authorization: 'Bearer ' + token }, originalUrl: '/api/devices' };
+    let status = 200;
+    const res = { status(s) { status = s; return this; }, json() { resolve({ status, nexted: false, err: null, req }); return this; } };
+    requireAuth(req, res, (err) => resolve({ status, nexted: !err, err: err || null, req }));
+  });
 }
 
-test('#100 BITE: requireAuth rejects an mfa_pending token (no password-only session)', () => {
-  const pending = runRequireAuth(generateMfaPendingToken({ id: 'u1' }));
+test('#100 BITE: requireAuth rejects an mfa_pending token (no password-only session)', async () => {
+  const pending = await runRequireAuth(generateMfaPendingToken({ id: U1 }));
   assert.equal(pending.status, 401, 'mfa_pending token must be 401');
   assert.equal(pending.nexted, false, 'must NOT call next() for an mfa_pending token');
   // Contrast: a FULL token for the SAME user passes - so the user EXISTS in the db,
   // which means removing the mfa_pending check would let the pending token through too
   // (next() called). That's what makes this a real bite-test, not a vacuous 401.
-  const full = runRequireAuth(generateToken({ id: 'u1', email: 'u1@x', role: 'user' }, null));
+  const full = await runRequireAuth(generateToken({ id: U1, email: `${U1}@test.local`, role: 'user' }, null));
+  assert.equal(full.err, null, 'requireAuth must not error for a full token');
   assert.equal(full.nexted, true, 'a full token for the same user must pass requireAuth');
-  assert.equal(full.req.user.id, 'u1');
+  assert.equal(full.req.user.id, U1);
 });
 
 test('#100 lockout: locks after MAX_FAILS, lifts after the window, reset clears', () => {

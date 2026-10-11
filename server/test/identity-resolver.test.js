@@ -14,34 +14,51 @@ const assert = require('node:assert/strict');
 const { db } = require('../db/database');
 const { resolveIdentity } = require('../lib/device-identity');
 
-after(async () => { await db.close(); });
+// Test-owned rows on the real test DB (beamos_test via npm test): a device and the
+// fingerprint mapping to it (device_fingerprints.device_id has a real FK to devices).
+const P = 'IR-' + crypto.randomBytes(4).toString('hex');
+const DEV = `${P}-dev-x`;
+const FP = `${P}-fp-x`;
 
-// Spy on db.prepare to record whether the device_fingerprints query is ever prepared/run.
-function withPrepareSpy(fn) {
-  const real = db.prepare.bind(db);
-  const prepared = [];
-  db.prepare = (sql) => { prepared.push(sql); return real(sql); };
-  try { fn(); } finally { db.prepare = real; }
-  return prepared;
-}
+// Count device_fingerprints lookups. device-identity prepares that statement ONCE,
+// lazily, and memoizes it, so a prepare-spy alone can't see later lookups: this wraps
+// db.prepare before the first resolve, and the memoized statement it hands out counts
+// every get() it runs for the rest of the file.
+let fpLookups = 0;
+const realPrepare = db.prepare.bind(db);
+db.prepare = (sql) => {
+  const st = realPrepare(sql);
+  if (!/device_fingerprints/.test(sql)) return st;
+  return { ...st, get: async (...a) => { fpLookups++; return st.get(...a); } };
+};
 
-test('a device_id-present resolve does ZERO fingerprint lookups', () => {
-  // warm the memoized statement first so a lazy prepare doesn't confuse the spy
-  resolveIdentity({ fingerprint: 'warm' });
-  const prepared = withPrepareSpy(() => {
-    const r = resolveIdentity({ device_id: 'dev-1', fingerprint: 'fp', device_token: 'tok' });
-    assert.equal(r.kind, 'device_id');
-    assert.equal(r.deviceId, 'dev-1');
-  });
-  assert.equal(prepared.filter((s) => /device_fingerprints/.test(s)).length, 0,
-    'no device_fingerprints query when device_id is present');
+after(async () => {
+  db.prepare = realPrepare;
+  try {
+    await db.prepare('DELETE FROM device_fingerprints WHERE fingerprint LIKE ?').run(P + '-%');
+    await db.prepare('DELETE FROM devices WHERE id = ?').run(DEV);
+  } finally {
+    await db.close();
+  }
 });
 
-test('a device_id-absent resolve DOES query device_fingerprints (only then)', () => {
-  db.pragma('foreign_keys = OFF');
-  db.prepare("INSERT OR REPLACE INTO device_fingerprints (fingerprint, device_id) VALUES ('fp-x', 'dev-x')").run();
-  db.pragma('foreign_keys = ON');
-  const r = resolveIdentity({ fingerprint: 'fp-x' });
+test('a device_id-present resolve does ZERO fingerprint lookups', async () => {
+  // warm the memoized statement first (a device_id-less resolve does one lookup)
+  await resolveIdentity({ fingerprint: `${P}-warm` });
+  assert.equal(fpLookups, 1, 'the spy sees the memoized fingerprint statement');
+  const before = fpLookups;
+  const r = await resolveIdentity({ device_id: 'dev-1', fingerprint: 'fp', device_token: 'tok' });
+  assert.equal(r.kind, 'device_id');
+  assert.equal(r.deviceId, 'dev-1');
+  assert.equal(fpLookups - before, 0, 'no device_fingerprints query when device_id is present');
+});
+
+test('a device_id-absent resolve DOES query device_fingerprints (only then)', async () => {
+  await db.prepare('INSERT INTO devices (id, name) VALUES (?, ?)').run(DEV, DEV);
+  await db.prepare('INSERT INTO device_fingerprints (fingerprint, device_id) VALUES (?, ?)').run(FP, DEV);
+  const before = fpLookups;
+  const r = await resolveIdentity({ fingerprint: FP });
   assert.equal(r.kind, 'fingerprint->device_id');
-  assert.equal(r.deviceId, 'dev-x');
+  assert.equal(r.deviceId, DEV);
+  assert.equal(fpLookups - before, 1, 'exactly one device_fingerprints lookup');
 });
