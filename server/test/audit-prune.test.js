@@ -12,7 +12,7 @@
 
 const crypto = require('node:crypto');
 
-const DB_NAME = `beamos_audit_prune_${crypto.randomBytes(4).toString('hex')}`;
+const DB_NAME = `beamos_test_audit_prune_${crypto.randomBytes(4).toString('hex')}`;
 process.env.MYSQL_DATABASE = DB_NAME;
 
 const test = require('node:test');
@@ -21,6 +21,7 @@ const mysql = require('mysql2/promise');
 
 const config = require('../config');
 const mysqlTls = require('../lib/mysql-tls');
+const { assertSafeTestDb, isAllowedTestDbName } = require('../lib/test-db-guard');
 const { initDb, db } = require('../db/database');
 const { GENESIS_PREV_HASH, PRUNED_ACTION, appendEntry, pruneChain, backfillChain, verifyChain } = require('../lib/activity-chain');
 const { verifyAndRepairSchema } = require('../lib/schema-check');
@@ -98,6 +99,7 @@ async function withPrunedInsertBlocked(fn) {
 }
 
 test.before(async () => {
+  assertSafeTestDb({ database: DB_NAME, user: config.mysqlUser });
   const conn = await mysql.createConnection(baseOptions());
   await conn.query(`CREATE DATABASE \`${DB_NAME}\``);
   await conn.end();
@@ -111,7 +113,10 @@ test.before(async () => {
 
 test.after(async () => {
   if (app) await app.server.close();
-  try { await db.exec(`DROP DATABASE \`${DB_NAME}\``); } finally { await db.close(); }
+  try {
+    if (!(isAllowedTestDbName(DB_NAME) && DB_NAME.startsWith('beamos_test_'))) throw new Error(`refusing to drop non-scratch database ${DB_NAME}`);
+    await db.exec(`DROP DATABASE \`${DB_NAME}\``);
+  } finally { await db.close(); }
 });
 
 test('prune: old block removed, full and ranged verification pass', async () => {

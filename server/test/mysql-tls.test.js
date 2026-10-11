@@ -250,6 +250,9 @@ async function cipherOf(conn) {
 test('integration', { skip: skipReason || false }, async (t) => {
   const vca = cfg({ mysqlSsl: 'verify-ca', mysqlSslCa: REAL_CA, mysqlHost: LOCAL_HOST });
 
+  // Every connection below uses DB; refuse (not skip) unless it is the test account + test DB.
+  require('../lib/test-db-guard').assertSafeTestDb({ database: DB.database, user: DB.user });
+
   // Reachability probe first (plain): if MySQL is down, skip rather than fail.
   try {
     const c = await connect(LOCAL_HOST, cfg());

@@ -15,9 +15,10 @@ const mysql = require('mysql2/promise');
 
 const config = require('../config');
 const mysqlTls = require('../lib/mysql-tls');
+const { assertSafeTestDb, isAllowedTestDbName } = require('../lib/test-db-guard');
 const { verifyAndRepairSchema } = require('../lib/schema-check');
 
-const DB_NAME = `beamos_ref49_repair_${crypto.randomBytes(4).toString('hex')}`;
+const DB_NAME = `beamos_test_ref49_repair_${crypto.randomBytes(4).toString('hex')}`;
 let pool;
 let handle;
 
@@ -43,6 +44,7 @@ function makeHandle(q) {
 }
 
 test.before(async () => {
+  assertSafeTestDb({ database: DB_NAME, user: config.mysqlUser });
   const admin = await mysql.createConnection(baseOptions());
   await admin.query(`CREATE DATABASE \`${DB_NAME}\``);
   await admin.end();
@@ -66,7 +68,10 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  try { await pool.query(`DROP DATABASE \`${DB_NAME}\``); } finally { await pool.end(); }
+  try {
+    if (!(isAllowedTestDbName(DB_NAME) && DB_NAME.startsWith('beamos_test_'))) throw new Error(`refusing to drop non-scratch database ${DB_NAME}`);
+    await pool.query(`DROP DATABASE \`${DB_NAME}\``);
+  } finally { await pool.end(); }
 });
 
 async function runCapturingLogs() {

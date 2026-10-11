@@ -30,6 +30,11 @@ if (config.mysqlSocketPath) poolConfig.socketPath = config.mysqlSocketPath;
 const _sslOptions = mysqlTls.mysqlSslOptions(config);
 if (_sslOptions) poolConfig.ssl = _sslOptions;
 
+// Under `node --test`, or when a test file is run directly with plain node, refuse
+// anything but the restricted test account on a test database.
+const _entry = (process.argv[1] || '').replace(/\\/g, '/');
+if (process.env.NODE_TEST_CONTEXT || /\/test\/.+\.test\.m?js$/.test(_entry)) require('../lib/test-db-guard').assertSafeTestDb({ database: config.mysqlDatabase, user: config.mysqlUser });
+
 const pool = mysql.createPool(poolConfig);
 
 // Thin wrapper reproducing better-sqlite3's Statement shape (.get/.all/.run) on top of
