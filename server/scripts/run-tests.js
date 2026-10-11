@@ -19,6 +19,8 @@
 //
 // Any failed check exits non-zero before anything is created or run.
 // Usage: npm test [-- <node --test args / files>]
+// Flags must come BEFORE file arguments (node --test treats everything after a file as
+// another file): npm test -- --test-name-pattern=X test/file.js
 
 const fs = require('fs');
 const path = require('path');
