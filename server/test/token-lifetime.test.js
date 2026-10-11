@@ -185,6 +185,19 @@ test("scim token: the cap is per-organization - another org's cap doesn't touch 
 const policyPath = (orgId) => `/api/organizations/${orgId}/token-policy`;
 const patchPolicy = (user, orgId, body) => j('PATCH', policyPath(orgId), { token: user.token, body });
 
+// logActivity is fire-and-forget from the route (it can land after the response) -
+// poll briefly (50ms steps, ~2s) until at least `n` rows exist; callers then assert
+// the exact rows. Same pattern as field-auth-hardening.test.js failedLoginRows().
+async function waitForRows(sql, params, n) {
+  let rows = [];
+  for (let i = 0; i < 40; i++) {
+    rows = await app.db.prepare(sql).all(...params);
+    if (rows.length >= n) return rows;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return rows;
+}
+
 // A second registered user added to owner's org / workspace with a given role.
 async function memberOf({ orgRole, workspaceRole, platformRole }) {
   const u = await registerUser('lifemember');
@@ -212,7 +225,7 @@ test('endpoint: org_owner reads the default (null) and sets a cap; the retroacti
   assert.deepEqual(cleared.body, { organization_id: owner.orgId, max_token_lifetime_days: null });
   assert.equal((await useApiToken(tok.token)).status, 200);
 
-  const logged = await app.db.prepare("SELECT details FROM activity_log WHERE user_id = ? AND action = 'org_token_lifetime_changed' ORDER BY id").all(owner.id);
+  const logged = await waitForRows("SELECT details FROM activity_log WHERE user_id = ? AND action = 'org_token_lifetime_changed' ORDER BY id", [owner.id], 2);
   assert.deepEqual(logged.map((r) => r.details.split(', max_token_lifetime_days: ')[1]), ['none -> 30', '30 -> none']);
 });
 
