@@ -18,8 +18,9 @@ const guard = require('../lib/ota-download-guard');
 const apkCache = require('../lib/apk-cache');
 
 test('apk-cache: get() never touches the filesystem (resolution cached at boot/refresh)', () => {
-  // seed a fake APK under DATA_DIR and refresh once
-  const apk = path.join(process.env.DATA_DIR, 'ScreenTinker.apk');
+  // seed a fake APK under DATA_DIR and refresh once. lib/apk-cache.js checks
+  // DATA_DIR/BeamOS.apk FIRST, so this fake wins over any real repo-root APK.
+  const apk = path.join(process.env.DATA_DIR, 'BeamOS.apk');
   fs.mkdirSync(process.env.DATA_DIR, { recursive: true });
   fs.writeFileSync(apk, 'FAKEAPKBYTES');
   const c = apkCache.refresh();

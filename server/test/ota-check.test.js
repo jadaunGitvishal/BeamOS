@@ -29,9 +29,10 @@ before(async () => {
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;
   // the breaker only reports update_available when an APK actually exists — give the
-  // test server a dummy one (resolveApkPath checks DATA_DIR/ScreenTinker.apk).
+  // test server a dummy one. lib/apk-cache.js checks DATA_DIR/BeamOS.apk FIRST, so
+  // this fake wins over any real repo-root APK.
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(path.join(DATA_DIR, 'ScreenTinker.apk'), Buffer.alloc(1024, 1));
+  fs.writeFileSync(path.join(DATA_DIR, 'BeamOS.apk'), Buffer.alloc(1024, 1));
   const logFd = fs.openSync(LOG, 'w');
   proc = spawn(process.execPath, ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' }, stdio: ['ignore', logFd, logFd] });
   let up = false;
