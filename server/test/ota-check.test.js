@@ -2,7 +2,7 @@
 
 // #144 — HTTP integration: the real /api/update/check endpoint with the breaker wired.
 // Proves end-to-end behavior + the device_id passthrough/keying. Rapid requests stay
-// within the 60s rate window, so THRESHOLD(3) trips on the 4th. Unique PORT 3991.
+// within the 60s rate window, so THRESHOLD(3) trips on the 4th. Port from freePort().
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -12,8 +12,9 @@ const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 
-const PORT = 3991;
-const BASE = `http://127.0.0.1:${PORT}`;
+const { freePort } = require('./helpers/free-port');
+
+let PORT, BASE; // assigned in before() from freePort()
 const DATA_DIR = path.join(os.tmpdir(), 'st-ota-' + crypto.randomBytes(4).toString('hex'));
 const LOG = path.join(os.tmpdir(), 'st-ota-' + crypto.randomBytes(4).toString('hex') + '.log');
 let proc, LATEST;
@@ -25,6 +26,8 @@ const check = async (version, deviceId) => {
 };
 
 before(async () => {
+  PORT = await freePort();
+  BASE = `http://127.0.0.1:${PORT}`;
   // the breaker only reports update_available when an APK actually exists — give the
   // test server a dummy one (resolveApkPath checks DATA_DIR/ScreenTinker.apk).
   fs.mkdirSync(DATA_DIR, { recursive: true });

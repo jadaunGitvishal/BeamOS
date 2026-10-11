@@ -8,7 +8,7 @@
 //   2. on-demand dashboard:request-screenshot still streams dashboard:screenshot-ready
 //      and does NOT add a persisted row (unchanged behaviour)
 //
-// Hits the same MySQL the dev server uses. Unique PORT 3991.
+// Hits the same MySQL the dev server uses. Port from freePort().
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -19,8 +19,9 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
 
-const PORT = 3991;
-const BASE = `http://127.0.0.1:${PORT}`;
+const { freePort } = require('./helpers/free-port');
+
+let PORT, BASE; // assigned in before() from freePort()
 const SWEEP_MS = 6000;
 const DATA_DIR = path.join(os.tmpdir(), 'st-shot-' + crypto.randomBytes(4).toString('hex'));
 const LOG = path.join(os.tmpdir(), 'st-shot-' + crypto.randomBytes(4).toString('hex') + '.log');
@@ -32,6 +33,8 @@ const FAKE_JPEG_B64 = Buffer.from('x'.repeat(220)).toString('base64');
 let proc, JWT, db, deviceSock;
 
 before(async () => {
+  PORT = await freePort();
+  BASE = `http://127.0.0.1:${PORT}`;
   const logFd = fs.openSync(LOG, 'w');
   proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
