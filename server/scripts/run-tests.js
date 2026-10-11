@@ -13,10 +13,14 @@
 //   d. DROP + CREATE the test DB, initDb() in a child process, insert one
 //      placeholder user (so the first user a test registers is not platform_admin).
 //   e. node --test --test-concurrency=1 <forwarded args>; exit with its code.
+//      With no forwarded args, an explicit sorted list of test/**/*.test.{js,mjs}
+//      (minus test/helpers/ and test/fixtures/) is passed instead of relying on
+//      node's default discovery, which also matches lib/ and scripts/ files.
 //
 // Any failed check exits non-zero before anything is created or run.
 // Usage: npm test [-- <node --test args / files>]
 
+const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const mysql = require('mysql2/promise');
@@ -29,7 +33,7 @@ const PLACEHOLDER_USER_ID = 'test-runner-placeholder';
 const PLACEHOLDER_EMAIL = 'placeholder@test-runner.local';
 
 function refuse(msg) {
-  console.error(`[test-runner] REFUSED: ${msg}`);
+  console.error(`[run-tests] REFUSED: ${msg}`);
   process.exit(1);
 }
 
@@ -39,6 +43,22 @@ function connectionOptions(user, password) {
   const ssl = mysqlTls.mysqlSslOptions(config);
   if (ssl) o.ssl = ssl;
   return o;
+}
+
+// Every test/**/*.test.js / *.test.mjs, outside test/helpers/ and test/fixtures/,
+// as sorted forward-slash paths relative to SERVER_DIR.
+function listTestFiles() {
+  const testDir = path.join(SERVER_DIR, 'test');
+  const skip = new Set([path.join(testDir, 'helpers'), path.join(testDir, 'fixtures')]);
+  const files = [];
+  (function walk(dir) {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) { if (!skip.has(full)) walk(full); }
+      else if (/\.test\.m?js$/.test(ent.name)) files.push(path.relative(SERVER_DIR, full).split(path.sep).join('/'));
+    }
+  })(testDir);
+  return files.sort();
 }
 
 // One SHOW GRANTS line is acceptable only as USAGE on *.* or a grant on `beamos\_test%`.
@@ -114,10 +134,13 @@ async function main() {
       })().catch((e) => { console.error(e); process.exit(1); });
     `], { cwd: SERVER_DIR, env, stdio: ['ignore', 'ignore', 'inherit'] });
     if (init.status !== 0) refuse(`initDb() on "${testDb}" failed (exit ${init.status}).`);
-    console.log(`[test-runner] ${testDb} reset as ${testUser} (schema + 1 placeholder user)`);
+    console.log(`[run-tests] ${testDb} reset as ${testUser} (schema + 1 placeholder user)`);
 
-    // e. run the tests
-    const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...forwardedArgs], { cwd: SERVER_DIR, env, stdio: 'inherit' });
+    // e. run the tests (forwarded flags are kept; pass flag values as --flag=value)
+    const hasFileArgs = forwardedArgs.some((a) => !a.startsWith('-'));
+    const runArgs = hasFileArgs ? forwardedArgs : [...forwardedArgs, ...listTestFiles()];
+    console.log(`[run-tests] running ${hasFileArgs ? forwardedArgs.filter((a) => !a.startsWith('-')).length : runArgs.length - forwardedArgs.length} test file(s)`);
+    const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...runArgs], { cwd: SERVER_DIR, env, stdio: 'inherit' });
     child.on('exit', (code, signal) => process.exit(code === null ? 1 : code));
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => child.kill(sig));
   } finally {
