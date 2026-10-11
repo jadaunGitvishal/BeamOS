@@ -37,6 +37,17 @@ if (process.env.NODE_TEST_CONTEXT || /\/test\/.+\.test\.m?js$/.test(_entry)) req
 
 const pool = mysql.createPool(poolConfig);
 
+// Behave like a default MySQL 8 everywhere: a server's my.ini can override sql_mode
+// (the dev server's sets sql_mode=""), so pin MySQL 8's default per connection.
+// 'connection' fires before the new connection is handed out, and its command queue
+// is FIFO, so this SET runs before any caller's first query on it.
+const MYSQL8_DEFAULT_SQL_MODE = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION";
+pool.pool.on("connection", (conn) => {
+  conn.query(`SET SESSION sql_mode = '${MYSQL8_DEFAULT_SQL_MODE}'`, (err) => {
+    if (err) console.error(`[db] failed to set session sql_mode: ${err.message}`);
+  });
+});
+
 // Thin wrapper reproducing better-sqlite3's Statement shape (.get/.all/.run) on top of
 // mysql2/promise, so the ~800 existing `db.prepare(sql).get(...)`-style call sites across
 // the app only need `await` added, not a rewrite. `queryable` is either the pool (ordinary,
