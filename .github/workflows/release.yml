@@ -44,7 +44,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     env:
-      KNOWN_FAILURES: "57"   # temporary baseline; lower it as failures are fixed
+      KNOWN_FAILURES: "55"   # temporary baseline; lower it as failures are fixed
     services:
       mysql:
         image: mysql:8.0
