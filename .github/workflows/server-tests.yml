@@ -1,0 +1,96 @@
+# Server tests (MySQL): runs the full server suite (`npm test` -> scripts/run-tests.js)
+# against an ephemeral MySQL 8.0 service container. The runner connects as a restricted
+# test account (beamos_test_user, privileges only on `beamos\_test%`), refuses to run
+# if that account can reach the dev database, resets `beamos_test`, then runs every
+# test/**/*.test.{js,mjs} serially.
+#
+# NON-BLOCKING (continue-on-error) until the known pre-existing failures (SQLite-era /
+# stale tests) are fixed; the full log is uploaded as the `server-test-log` artifact.
+#
+# The passwords below are throwaway values for the ephemeral service container only.
+
+name: "Server tests (MySQL)"
+
+on:
+  push:
+    branches: [main, version2]
+    paths:
+      - "server/**"
+      - ".github/workflows/server-tests.yml"
+  pull_request:
+    branches: [main, version2]
+    paths:
+      - "server/**"
+      - ".github/workflows/server-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-tests:
+    name: npm test (restricted test DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: beamos
+          MYSQL_USER: beamos_user
+          MYSQL_PASSWORD: ci_test_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Create restricted test user
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -proot <<'SQL'
+          CREATE USER 'beamos_test_user'@'%' IDENTIFIED BY 'ci_test_only_password';
+          GRANT ALL PRIVILEGES ON `beamos\_test%`.* TO 'beamos_test_user'@'%';
+          FLUSH PRIVILEGES;
+          SHOW GRANTS FOR 'beamos_test_user'@'%';
+          SQL
+
+      - name: Install deps
+        working-directory: server
+        run: npm ci
+
+      - name: npm test
+        working-directory: server
+        shell: bash
+        env:
+          MYSQL_HOST: "127.0.0.1"
+          MYSQL_PORT: "3306"
+          MYSQL_USER: "beamos_user"
+          MYSQL_PASSWORD: "ci_test_password"
+          MYSQL_DATABASE: "beamos"
+          MYSQL_TEST_USER: "beamos_test_user"
+          MYSQL_TEST_PASSWORD: "ci_test_only_password"
+        run: |
+          npm test 2>&1 | tee "$RUNNER_TEMP/npm-test.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-test-log
+          path: ${{ runner.temp }}/npm-test.log
