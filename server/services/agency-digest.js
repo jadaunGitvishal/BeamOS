@@ -53,10 +53,12 @@ async function flushAgencyDigests(db = defaultDb, email = defaultEmail) {
   // GROUP_CONCAT's default max length (group_concat_max_len, 1024 bytes on a stock MySQL
   // 8.0 install) could in principle truncate `ids` for a very large single-cycle batch of
   // notification ids; not addressed here (a server-level setting), just flagged.
+  // workspace_id is in the GROUP BY for ONLY_FULL_GROUP_BY; it doesn't change the
+  // grouping (rows carry the token's bound workspace, so token_id determines it).
   const groups = await db.prepare(`
     SELECT workspace_id, token_id, playlist_id, action, COUNT(*) AS n, GROUP_CONCAT(id) AS ids
     FROM agency_notifications WHERE sent_at IS NULL
-    GROUP BY token_id, playlist_id, action
+    GROUP BY workspace_id, token_id, playlist_id, action
   `).all();
 
   for (const g of groups) {
