@@ -414,6 +414,10 @@ module.exports = function setupDeviceSocket(io) {
                   pendingOfflines.delete(existing.device_id);
                 }
                 evictPriorSocket(existing.device_id, socket.id);
+                // Make this socket the incumbent NOW, before any await (see the reconnect
+                // path below for the race this closes).
+                currentDeviceId = existing.device_id;
+                heartbeat.registerConnection(existing.device_id, socket.id);
                 await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP(), ip_address = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
                   .run(getClientIp(socket), existing.device_id);
                 socket.emit('device:registered', { device_id: existing.device_id, device_token: newToken, status: 'online' });
@@ -421,8 +425,6 @@ module.exports = function setupDeviceSocket(io) {
                 if (oldDevice.user_id) {
                   socket.emit('device:paired', { name: oldDevice.name || 'Display' });
                 }
-                currentDeviceId = existing.device_id;
-                heartbeat.registerConnection(existing.device_id, socket.id);
                 socket.join(existing.device_id);
                 logDeviceStatus(existing.device_id, 'online');
                 await emitToDeviceWorkspace(dashboardNs, existing.device_id, 'dashboard:device-status', { device_id: existing.device_id, status: 'online' });
@@ -524,6 +526,12 @@ module.exports = function setupDeviceSocket(io) {
           }
           evictPriorSocket(device_id, socket.id);
           sessionSettle.accepted(device_id);   // #148 patch2: (re)arm the settle window on an accepted connection
+          // Register this socket as the incumbent NOW, before any await. The settle check above
+          // is a check-then-act: with MySQL (async since the migration) the DB writes below
+          // yield, and a duplicate arriving meanwhile used to find no incumbent in the map, get
+          // accepted too and never be evicted (6 concurrent sockets -> 6 accepted). Evict,
+          // accepted() and registerConnection are synchronous, so nothing can interleave here.
+          heartbeat.registerConnection(device_id, socket.id);
           await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP(), ip_address = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
             .run(getClientIp(socket), device_id);
 
@@ -543,7 +551,6 @@ module.exports = function setupDeviceSocket(io) {
             await persistHardwareInfo(db, device_id, device_info.hardware);
           }
 
-          heartbeat.registerConnection(device_id, socket.id);
           socket.join(device_id);
           socket.emit('device:registered', { device_id, device_token: tokenToSend, status: 'online' });
           // #143: a device paired/claimed server-side (user_id set) that RECONNECTS must be told
@@ -1090,7 +1097,9 @@ module.exports = function setupDeviceSocket(io) {
         if (activeNow && activeNow.socketId !== closingSocketId) return;
 
         await db.prepare("UPDATE devices SET status = 'offline', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(deviceId);
-        heartbeat.removeConnection(deviceId);
+        // Only drop OUR entry: a new socket may have registered during the await above.
+        const stillOurs = heartbeat.getConnection(deviceId);
+        if (!stillOurs || stillOurs.socketId === closingSocketId) heartbeat.removeConnection(deviceId);
         logDeviceStatus(deviceId, 'offline');
         await emitToDeviceWorkspace(dashboardNs, deviceId, 'dashboard:device-status', { device_id: deviceId, status: 'offline' });
 

@@ -66,7 +66,8 @@ function startHeartbeatChecker(io, { maintenance = true } = {}) {
           }
           await db.prepare("UPDATE devices SET status = 'offline', updated_at = UNIX_TIMESTAMP() WHERE id = ?")
             .run(device.id);
-          deviceConnections.delete(device.id);
+          // Only drop the stale entry judged above: a new socket may have registered during the await.
+          if (deviceConnections.get(device.id) === conn) deviceConnections.delete(device.id);
 
           // Notify dashboard (workspace-scoped via the device's room).
           emitToWorkspace(dashboardNs, await deviceRoom(device.id), 'dashboard:device-status', {
