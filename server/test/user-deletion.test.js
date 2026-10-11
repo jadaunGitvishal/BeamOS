@@ -1,235 +1,215 @@
 'use strict';
 
 // Issue #18: DELETE /api/auth/users/:id failed with "FOREIGN KEY constraint
-// failed". This suite reproduces the failure faithfully (foreign_keys ON,
-// prod-like uncascaded FKs) and verifies the cascade/unlink/refuse behaviour.
+// failed". This suite reproduces the failure faithfully and verifies the
+// cascade/unlink/refuse behaviour.
 //
-// Isolated in-memory better-sqlite3 injected into the require cache (same
-// harness as the other suites); Node v20 built-ins only.
+// In-process against the real MySQL test database (beamos_test via npm test): the
+// real /api/auth router, real auth and the real schema's FKs (playlists.user_id etc.
+// reference users without a cascade - the #18 cause). Every row is test-owned under
+// a per-run prefix and removed in test.after(); a final test proves no row outside
+// that prefix was touched.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
+const crypto = require('node:crypto');
 
-process.env.JWT_SECRET = 'test-secret-user-deletion';
+const { db, initDb } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { appendEntry, verifyChain } = require('../lib/activity-chain');
+const { deleteOrgCascade, deleteWorkspaceCascade } = require('../lib/user-deletion');
 
-const db = new Database(':memory:');
-db.pragma('foreign_keys = ON');
-// Representative subset of the real schema with the SAME uncascaded FKs to
-// users that caused #18. (The cascade helper's table-existence guard skips the
-// tables we don't model here.)
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')), deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL,
-    owner_user_id TEXT NOT NULL REFERENCES users(id)
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    invited_by TEXT REFERENCES users(id),
-    role TEXT NOT NULL, UNIQUE(organization_id, user_id)
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    name TEXT NOT NULL, created_by TEXT REFERENCES users(id)
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    invited_by TEXT REFERENCES users(id),
-    role TEXT NOT NULL, UNIQUE(workspace_id, user_id)
-  );
-  CREATE TABLE workspace_invites (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    email TEXT NOT NULL, role TEXT NOT NULL,
-    invited_by TEXT NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL
-  );
-  CREATE TABLE playlists (
-    id TEXT PRIMARY KEY, name TEXT,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    workspace_id TEXT REFERENCES workspaces(id)
-  );
-  CREATE TABLE devices (
-    id TEXT PRIMARY KEY, name TEXT,
-    user_id TEXT REFERENCES users(id),
-    workspace_id TEXT REFERENCES workspaces(id)
-  );
-  CREATE TABLE content (
-    id TEXT PRIMARY KEY, filename TEXT,
-    user_id TEXT REFERENCES users(id),
-    workspace_id TEXT REFERENCES workspaces(id)
-  );
-  CREATE TABLE activity_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT REFERENCES users(id),
-    acting_user_id TEXT REFERENCES users(id),
-    organization_id TEXT REFERENCES organizations(id),
-    workspace_id TEXT REFERENCES workspaces(id),
-    action TEXT NOT NULL, details TEXT, created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-  );
-`);
+const P = 'UD-' + crypto.randomBytes(4).toString('hex');
+const id = (s) => `${P}-${s}`;
 
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = {
-  id: dbModulePath, filename: dbModulePath, loaded: true,
-  exports: { db, pruneTelemetry() {}, pruneScreenshots() {} },
+let app, base;
+const tokens = {};
+
+async function user(key, role = 'user') {
+  const u = { id: id(key), email: `${id(key).toLowerCase()}@test.local`, role };
+  await db.prepare("INSERT INTO users (id, email, role, password_hash) VALUES (?, ?, ?, 'x')").run(u.id, u.email, role);
+  return u;
+}
+const run = (sql, ...params) => db.prepare(sql).run(...params);
+const exists = async (table, rowId) => !!(await db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(rowId));
+const count = async (sql, ...params) => Number((await db.prepare(sql).get(...params)).c);
+
+// Row counts OUTSIDE this file's data in every table the deletions touch.
+const OWN_ORGS = `SELECT id FROM organizations WHERE id LIKE '${P}-%'`;
+const OWN_WS = `SELECT id FROM workspaces WHERE id LIKE '${P}-%' OR organization_id IN (${OWN_ORGS})`;
+const OUTSIDE = {
+  users: `SELECT COUNT(*) AS c FROM users WHERE id NOT LIKE '${P}-%'`,
+  organizations: `SELECT COUNT(*) AS c FROM organizations WHERE id NOT IN (${OWN_ORGS})`,
+  workspaces: `SELECT COUNT(*) AS c FROM workspaces WHERE id NOT IN (${OWN_WS})`,
+  organization_members: `SELECT COUNT(*) AS c FROM organization_members WHERE organization_id NOT IN (${OWN_ORGS}) AND user_id NOT LIKE '${P}-%'`,
+  workspace_members: `SELECT COUNT(*) AS c FROM workspace_members WHERE workspace_id NOT IN (${OWN_WS}) AND user_id NOT LIKE '${P}-%'`,
+  devices: `SELECT COUNT(*) AS c FROM devices WHERE id NOT LIKE '${P}-%'`,
 };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const authRouter = require('../routes/auth');
+async function outsideCounts() {
+  const o = {};
+  for (const [t, sql] of Object.entries(OUTSIDE)) o[t] = await count(sql);
+  return o;
+}
+let outsideBefore;
 
 // ---- seed: an admin caller + a separate org owner ----
-function user(id, role = 'user') {
-  db.prepare("INSERT INTO users (id, email, role, password_hash) VALUES (?, ?, ?, 'x')").run(id, id + '@test.local', role);
-  return { id, email: id + '@test.local', role };
-}
-const admin = user('u-admin', 'platform_admin');
-const regular = user('u-regular', 'user');           // non-superadmin caller
-const orgOwner = user('u-owner', 'user');            // owns org X (the "other" tenant)
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('orgX','Org X','u-owner')").run();
-db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES ('orgX','u-owner','org_owner')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name, created_by) VALUES ('wsX','orgX','WS X','u-owner')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('wsX','u-owner','workspace_admin')").run();
+test.before(async () => {
+  await initDb();
+  app = await startInProcessApp({ only: [] });
+  base = app.base;
+  outsideBefore = await outsideCounts();
 
-const tokens = { admin: generateToken(admin, null), regular: generateToken(regular, null) };
+  const admin = await user('u-admin', 'platform_admin');
+  const regular = await user('u-regular', 'user');        // non-superadmin caller
+  await user('u-owner', 'user');                          // owns org X (the "other" tenant)
+  await run('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)', id('orgX'), `${P} Org X`, id('u-owner'));
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", id('orgX'), id('u-owner'));
+  await run('INSERT INTO workspaces (id, organization_id, name, created_by) VALUES (?, ?, ?, ?)', id('wsX'), id('orgX'), 'WS X', id('u-owner'));
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", id('wsX'), id('u-owner'));
 
-const app = express();
-app.use(express.json());
-app.use('/api/auth', authRouter);
-const server = app.listen(0);
-let base;
-test.before(async () => { await new Promise(r => server.listening ? r() : server.once('listening', r)); base = `http://127.0.0.1:${server.address().port}`; });
-test.after(() => { server.close(); db.close(); });
+  tokens.admin = generateToken(admin, null);
+  tokens.regular = generateToken(regular, null);
+});
 
-const del = (id, token) => fetch(`${base}/api/auth/users/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
-const exists = (table, id) => !!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
+// Only this file's rows: its orgs via the real cascade (workspaces, devices, content,
+// playlists, memberships), leftover prefixed resources, then its users. Audit rows are
+// kept (they keep user_id by design and the hash chain must stay verifiable).
+test.after(async () => {
+  try {
+    if (app) {
+      for (const o of await db.prepare(OWN_ORGS).all()) await deleteOrgCascade(db, { orgId: o.id });
+      for (const t of ['playlists', 'content', 'devices']) await run(`DELETE FROM ${t} WHERE id LIKE ?`, `${P}-%`);
+      await run('DELETE FROM users WHERE id LIKE ?', `${P}-%`);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
 
-test('reproduces #18: a bare DELETE FROM users fails the FK constraint', () => {
-  user('u-fkprobe');
-  db.prepare("INSERT INTO playlists (id, user_id) VALUES ('p-fkprobe','u-fkprobe')").run();
-  assert.throws(() => db.prepare('DELETE FROM users WHERE id = ?').run('u-fkprobe'), /FOREIGN KEY constraint failed/);
-  db.prepare("DELETE FROM playlists WHERE id='p-fkprobe'").run();
-  db.prepare("DELETE FROM users WHERE id='u-fkprobe'").run();
+const del = (userId, token) => fetch(`${base}/api/auth/users/${userId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+
+test('reproduces #18: a bare DELETE FROM users fails the FK constraint', async () => {
+  await user('u-fkprobe');
+  await run('INSERT INTO playlists (id, name, user_id) VALUES (?, ?, ?)', id('p-fkprobe'), 'FK probe', id('u-fkprobe'));
+  await assert.rejects(run('DELETE FROM users WHERE id = ?', id('u-fkprobe')), /foreign key constraint fails/i);
+  await run('DELETE FROM playlists WHERE id = ?', id('p-fkprobe'));
+  await run('DELETE FROM users WHERE id = ?', id('u-fkprobe'));
 });
 
 test('provisioned member (owns no org): deleted; resources preserved + unlinked', async () => {
-  const t = user('u-member');
-  db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('wsX','u-member','workspace_editor')").run();
-  db.prepare("INSERT INTO playlists (id, name, user_id, workspace_id) VALUES ('p1','P1','u-member','wsX')").run();
-  db.prepare("INSERT INTO devices (id, name, user_id, workspace_id) VALUES ('d1','D1','u-member','wsX')").run();
-  db.prepare("INSERT INTO activity_log (user_id, action) VALUES ('u-member','login')").run();
+  await user('u-member');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_editor')", id('wsX'), id('u-member'));
+  await run('INSERT INTO playlists (id, name, user_id, workspace_id) VALUES (?, ?, ?, ?)', id('p1'), 'P1', id('u-member'), id('wsX'));
+  await run('INSERT INTO devices (id, name, user_id, workspace_id) VALUES (?, ?, ?, ?)', id('d1'), 'D1', id('u-member'), id('wsX'));
+  // A real, chained audit row for the member (appendEntry = the logActivity path).
+  const audit = await appendEntry(db, { user_id: id('u-member'), action: 'login', details: `${P} member login` });
+  const auditId = Number(audit.id);
 
-  const res = await del('u-member', tokens.admin);
+  const res = await del(id('u-member'), tokens.admin);
   assert.equal(res.status, 200);
-  assert.equal(exists('users', 'u-member'), false, 'user deleted');
-  assert.equal(db.prepare("SELECT COUNT(*) c FROM workspace_members WHERE user_id='u-member'").get().c, 0, 'membership cascaded');
+  assert.equal(await exists('users', id('u-member')), false, 'user deleted');
+  assert.equal(await count('SELECT COUNT(*) AS c FROM workspace_members WHERE user_id = ?', id('u-member')), 0, 'membership cascaded');
   // org X untouched (not owned by the deleted user)
-  assert.equal(exists('organizations', 'orgX'), true);
-  assert.equal(exists('workspaces', 'wsX'), true);
+  assert.equal(await exists('organizations', id('orgX')), true);
+  assert.equal(await exists('workspaces', id('wsX')), true);
   // playlist preserved, NOT NULL user_id reassigned to the workspace's org owner
-  assert.equal(db.prepare("SELECT user_id FROM playlists WHERE id='p1'").get().user_id, 'u-owner', 'playlist reassigned to org owner');
+  assert.equal((await db.prepare('SELECT user_id FROM playlists WHERE id = ?').get(id('p1'))).user_id, id('u-owner'), 'playlist reassigned to org owner');
   // device preserved, nullable user_id set null
-  assert.equal(db.prepare("SELECT user_id FROM devices WHERE id='d1'").get().user_id, null, 'device unlinked');
-  // activity preserved, user_id set null
-  assert.equal(db.prepare("SELECT COUNT(*) c FROM activity_log WHERE user_id IS NULL").get().c >= 1, true, 'activity preserved, unlinked');
+  assert.equal((await db.prepare('SELECT user_id FROM devices WHERE id = ?').get(id('d1'))).user_id, null, 'device unlinked');
+  // activity preserved and KEEPS user_id (61d179c: user_id is part of each row's hash,
+  // so nulling it would break the audit chain); the chain over this row still verifies.
+  assert.equal((await db.prepare('SELECT user_id FROM activity_log WHERE id = ?').get(auditId)).user_id, id('u-member'), 'activity preserved, user_id retained');
+  const report = await verifyChain(db, { startId: auditId, endId: auditId });
+  assert.equal(report.ok, true, JSON.stringify(report.failures));
 });
 
 test('solo-org owner: org + workspace + contents hard-deleted with the user', async () => {
-  user('u-solo');
-  db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('orgS','Solo Org','u-solo')").run();
-  db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES ('orgS','u-solo','org_owner')").run();
-  db.prepare("INSERT INTO workspaces (id, organization_id, name, created_by) VALUES ('wsS','orgS','WS S','u-solo')").run();
-  db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('wsS','u-solo','workspace_admin')").run();
-  db.prepare("INSERT INTO playlists (id, user_id, workspace_id) VALUES ('pS','u-solo','wsS')").run();
-  db.prepare("INSERT INTO devices (id, user_id, workspace_id) VALUES ('dS','u-solo','wsS')").run();
-  db.prepare("INSERT INTO content (id, user_id, workspace_id) VALUES ('cS','u-solo','wsS')").run();
+  await user('u-solo');
+  await run('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)', id('orgS'), `${P} Solo Org`, id('u-solo'));
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", id('orgS'), id('u-solo'));
+  await run('INSERT INTO workspaces (id, organization_id, name, created_by) VALUES (?, ?, ?, ?)', id('wsS'), id('orgS'), 'WS S', id('u-solo'));
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", id('wsS'), id('u-solo'));
+  await run('INSERT INTO playlists (id, name, user_id, workspace_id) VALUES (?, ?, ?, ?)', id('pS'), 'PS', id('u-solo'), id('wsS'));
+  await run('INSERT INTO devices (id, user_id, workspace_id) VALUES (?, ?, ?)', id('dS'), id('u-solo'), id('wsS'));
+  await run("INSERT INTO content (id, filename, mime_type, user_id, workspace_id) VALUES (?, 'cs.png', 'image/png', ?, ?)", id('cS'), id('u-solo'), id('wsS'));
 
-  const res = await del('u-solo', tokens.admin);
+  const res = await del(id('u-solo'), tokens.admin);
   assert.equal(res.status, 200);
-  assert.equal(exists('users', 'u-solo'), false);
-  assert.equal(exists('organizations', 'orgS'), false, 'owned org deleted');
-  assert.equal(exists('workspaces', 'wsS'), false, 'workspace deleted');
-  assert.equal(exists('playlists', 'pS'), false);
-  assert.equal(exists('devices', 'dS'), false);
-  assert.equal(exists('content', 'cS'), false);
+  assert.equal(await exists('users', id('u-solo')), false);
+  assert.equal(await exists('organizations', id('orgS')), false, 'owned org deleted');
+  assert.equal(await exists('workspaces', id('wsS')), false, 'workspace deleted');
+  assert.equal(await exists('playlists', id('pS')), false);
+  assert.equal(await exists('devices', id('dS')), false);
+  assert.equal(await exists('content', id('cS')), false);
 });
 
 test('shared-org owner: refused (409), nothing deleted', async () => {
-  user('u-shared');
-  db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('orgH','Shared Org','u-shared')").run();
-  db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES ('orgH','u-shared','org_owner')").run();
-  db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('wsH','orgH','WS H')").run();
-  db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('wsH','u-shared','workspace_admin')").run();
-  db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('wsH','u-owner','workspace_editor')").run(); // OTHER member
+  await user('u-shared');
+  await run('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)', id('orgH'), `${P} Shared Org`, id('u-shared'));
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", id('orgH'), id('u-shared'));
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', id('wsH'), id('orgH'), 'WS H');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", id('wsH'), id('u-shared'));
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_editor')", id('wsH'), id('u-owner')); // OTHER member
 
-  const res = await del('u-shared', tokens.admin);
+  const res = await del(id('u-shared'), tokens.admin);
   assert.equal(res.status, 409);
-  assert.equal(exists('users', 'u-shared'), true, 'not deleted');
-  assert.equal(exists('organizations', 'orgH'), true, 'org intact');
+  assert.equal(await exists('users', id('u-shared')), true, 'not deleted');
+  assert.equal(await exists('organizations', id('orgH')), true, 'org intact');
 });
 
 test('cannot delete yourself (400) and non-superadmin denied (403)', async () => {
-  const self = await del('u-admin', tokens.admin);
+  const self = await del(id('u-admin'), tokens.admin);
   assert.equal(self.status, 400);
-  const denied = await del('u-owner', tokens.regular);
+  const denied = await del(id('u-owner'), tokens.regular);
   assert.equal(denied.status, 403);
-  assert.equal(exists('users', 'u-owner'), true);
+  assert.equal(await exists('users', id('u-owner')), true);
 });
 
 test('missing user -> 404', async () => {
-  const res = await del('does-not-exist', tokens.admin);
+  const res = await del(id('does-not-exist'), tokens.admin);
   assert.equal(res.status, 404);
 });
 
 // --- #36: deleteOrgCascade / deleteWorkspaceCascade (shared cascade helpers) ---
-const { deleteOrgCascade, deleteWorkspaceCascade } = require('../lib/user-deletion');
+test('deleteOrgCascade: org + all workspaces/resources/members gone; member users kept', async () => {
+  await user('u-cust');
+  await run('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)', id('orgD'), `${P} Cust`, id('u-cust'));
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", id('orgD'), id('u-cust'));
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?), (?, ?, ?)', id('wsD1'), id('orgD'), 'D1', id('wsD2'), id('orgD'), 'D2');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", id('wsD1'), id('u-cust'));
+  await run('INSERT INTO devices (id, workspace_id) VALUES (?, ?)', id('dvD'), id('wsD1'));
+  await run("INSERT INTO content (id, filename, mime_type, workspace_id) VALUES (?, 'ct.png', 'image/png', ?)", id('ctD'), id('wsD2'));
+  await run('INSERT INTO playlists (id, name, user_id, workspace_id) VALUES (?, ?, ?, ?)', id('plD'), 'PD', id('u-cust'), id('wsD1'));
 
-test('deleteOrgCascade: org + all workspaces/resources/members gone; member users kept', () => {
-  user('u-cust');
-  db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('orgD','Cust','u-cust')").run();
-  db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES ('orgD','u-cust','org_owner')").run();
-  db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('wsD1','orgD','D1'),('wsD2','orgD','D2')").run();
-  db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('wsD1','u-cust','workspace_admin')").run();
-  db.prepare("INSERT INTO devices (id, workspace_id) VALUES ('dvD','wsD1')").run();
-  db.prepare("INSERT INTO content (id, workspace_id) VALUES ('ctD','wsD2')").run();
-  db.prepare("INSERT INTO playlists (id, user_id, workspace_id) VALUES ('plD','u-cust','wsD1')").run();
+  await deleteOrgCascade(db, { orgId: id('orgD') });
 
-  deleteOrgCascade(db, { orgId: 'orgD' });
-
-  assert.equal(exists('organizations','orgD'), false, 'org gone');
-  assert.equal(exists('workspaces','wsD1') || exists('workspaces','wsD2'), false, 'workspaces gone');
-  assert.equal(exists('devices','dvD'), false, 'device gone');
-  assert.equal(exists('content','ctD'), false, 'content gone');
-  assert.equal(exists('playlists','plD'), false, 'playlist gone');
-  assert.equal(db.prepare("SELECT COUNT(*) c FROM organization_members WHERE organization_id='orgD'").get().c, 0, 'org members cascaded');
-  assert.equal(exists('users','u-cust'), true, 'member user is NOT deleted');
+  assert.equal(await exists('organizations', id('orgD')), false, 'org gone');
+  assert.equal((await exists('workspaces', id('wsD1'))) || (await exists('workspaces', id('wsD2'))), false, 'workspaces gone');
+  assert.equal(await exists('devices', id('dvD')), false, 'device gone');
+  assert.equal(await exists('content', id('ctD')), false, 'content gone');
+  assert.equal(await exists('playlists', id('plD')), false, 'playlist gone');
+  assert.equal(await count('SELECT COUNT(*) AS c FROM organization_members WHERE organization_id = ?', id('orgD')), 0, 'org members cascaded');
+  assert.equal(await exists('users', id('u-cust')), true, 'member user is NOT deleted');
 });
 
-test('deleteWorkspaceCascade: one workspace + resources gone; org + sibling intact', () => {
-  user('u-cust2');
-  db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('orgW','W','u-cust2')").run();
-  db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('wsW1','orgW','W1'),('wsW2','orgW','W2')").run();
-  db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('wsW1','u-cust2','workspace_admin')").run();
-  db.prepare("INSERT INTO devices (id, workspace_id) VALUES ('dvW','wsW1'),('dvW2','wsW2')").run();
+test('deleteWorkspaceCascade: one workspace + resources gone; org + sibling intact', async () => {
+  await user('u-cust2');
+  await run('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)', id('orgW'), `${P} W`, id('u-cust2'));
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?), (?, ?, ?)', id('wsW1'), id('orgW'), 'W1', id('wsW2'), id('orgW'), 'W2');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", id('wsW1'), id('u-cust2'));
+  await run('INSERT INTO devices (id, workspace_id) VALUES (?, ?), (?, ?)', id('dvW'), id('wsW1'), id('dvW2'), id('wsW2'));
 
-  deleteWorkspaceCascade(db, { workspaceId: 'wsW1' });
+  await deleteWorkspaceCascade(db, { workspaceId: id('wsW1') });
 
-  assert.equal(exists('workspaces','wsW1'), false, 'target ws gone');
-  assert.equal(exists('devices','dvW'), false, 'target ws device gone');
-  assert.equal(db.prepare("SELECT COUNT(*) c FROM workspace_members WHERE workspace_id='wsW1'").get().c, 0, 'members cascaded');
-  assert.equal(exists('organizations','orgW'), true, 'org intact');
-  assert.equal(exists('workspaces','wsW2'), true, 'sibling ws intact');
-  assert.equal(exists('devices','dvW2'), true, 'sibling device intact');
+  assert.equal(await exists('workspaces', id('wsW1')), false, 'target ws gone');
+  assert.equal(await exists('devices', id('dvW')), false, 'target ws device gone');
+  assert.equal(await count('SELECT COUNT(*) AS c FROM workspace_members WHERE workspace_id = ?', id('wsW1')), 0, 'members cascaded');
+  assert.equal(await exists('organizations', id('orgW')), true, 'org intact');
+  assert.equal(await exists('workspaces', id('wsW2')), true, 'sibling ws intact');
+  assert.equal(await exists('devices', id('dvW2')), true, 'sibling device intact');
+});
+
+test('isolation: the deletions touched no row outside this file\'s prefix', async () => {
+  assert.deepEqual(await outsideCounts(), outsideBefore);
 });
