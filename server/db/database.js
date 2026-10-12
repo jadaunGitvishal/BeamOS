@@ -319,10 +319,16 @@ function resolveBootLockWaitTimeout(raw) {
   return n;
 }
 
-// Runs one startup phase; a lock-wait timeout becomes an error naming the phase.
+// Runs one startup phase, logging "[db] <phase> ..." at the start and
+// "[db] <phase> done in <ms>ms" at the end (so a stall shows which phase it is in);
+// a lock-wait timeout becomes an error naming the phase.
 async function startupPhase(name, lockWaitS, fn) {
+  const t0 = performance.now();
+  console.log(`[db] ${name} ...`);
   try {
-    return await fn();
+    const result = await fn();
+    console.log(`[db] ${name} done in ${Math.round(performance.now() - t0)}ms`);
+    return result;
   } catch (e) {
     if (e && (e.code === "ER_LOCK_WAIT_TIMEOUT" || e.errno === 1205)) {
       throw new Error(
@@ -370,6 +376,7 @@ async function initDb() {
 
   // The startup statements run on one dedicated connection (runStartupSchema), which is
   // destroyed afterwards so its session lock_wait_timeout never reaches the pool.
+  console.log("[db] connecting");
   const conn = await pool.getConnection();
   try {
     // Ref 2: start-up proof that the pool really negotiated TLS (null when off).

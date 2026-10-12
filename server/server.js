@@ -1,3 +1,6 @@
+// Startup-stage lines ("[boot] ..." here, "[db] ..." in db/database.js initDb) so a slow
+// or stalled startup shows where it is. Times are ms since process start (performance.now()).
+console.log(`[boot] pid ${process.pid} starting (node ${process.version})`);
 const express = require("express");
 const http = require("http");
 const https = require("https");
@@ -1184,6 +1187,7 @@ async function boot() {
   const protocol = hasSsl ? "https" : "http";
 
   server.listen(listenPort, "0.0.0.0", () => {
+    console.log(`[boot] listening on :${listenPort} (${Math.round(performance.now())}ms since start)`);
     console.log(`
 ╔══════════════════════════════════════════════════╗
 ║       BeamOS Server v${VERSION.padEnd(22).slice(0, 22)}║
@@ -1218,6 +1222,7 @@ async function boot() {
   }
 }
 
+console.log(`[boot] modules loaded in ${Math.round(performance.now())}ms`);
 boot().catch((err) => {
   console.error("[boot] fatal error during startup:", err);
   process.exit(1);
