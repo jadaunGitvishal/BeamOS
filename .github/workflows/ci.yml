@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: "20"
       - name: Lint the public API spec
-        run: npx --yes @redocly/cli@latest lint docs/openapi.yaml
+        run: npx --yes @redocly/cli@2.62.1 lint docs/openapi.yaml
       # Contract integrity: the spec documents ONLY the token-reachable public surface.
       # A JWT-only router (admin/auth/provision/...) appearing here is a security flag,
       # not a convenience - fail loudly. (The runtime partition test is a separate suite
