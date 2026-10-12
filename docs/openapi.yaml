@@ -1634,7 +1634,7 @@ paths:
                   columns: { type: array, items: { type: string } }
                   rows: { type: array, items: { type: array } }
                   total: { type: integer }
-                  limit: { type: integer, nullable: true }
+                  limit: { type: [integer, 'null'] }
                   offset: { type: integer }
   /reports/uptime:
     get:
@@ -1950,7 +1950,7 @@ paths:
         - { name: owner_category, in: query, schema: { type: string } }
         - { name: ticket_category, in: query, schema: { type: string, enum: [reactive, proactive, emergency] } }
       responses:
-        '200': { description: Array of ticket rows, newest first. }
+        '200': { description: 'Array of ticket rows, newest first.' }
   /tickets/sla-summary:
     get:
       tags: [tickets]
@@ -1969,7 +1969,7 @@ paths:
         - { name: ticketId, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: Ticket object. }
-        '404': { description: Not found, or the ticket belongs to a different workspace. }
+        '404': { description: 'Not found, or the ticket belongs to a different workspace.' }
 
   # ---------------------------------------------------------- sim-inventory
   # Ref 73: only the GET routes are documented here (the read-only BI surface
@@ -1997,4 +1997,4 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: SIM inventory object. }
-        '404': { description: Not found, or belongs to a different workspace. }
+        '404': { description: 'Not found, or belongs to a different workspace.' }
