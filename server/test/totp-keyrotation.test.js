@@ -9,31 +9,22 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { authenticator } = require('otplib');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3980;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-totp-rot-' + crypto.randomBytes(4).toString('hex'));
+// Both boots share this DATA_DIR (passed explicitly; caller env wins over the helper's
+// fresh one) - only JWT_SECRET differs between them. Removed in the test's finally.
+const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'st-totp-rot-'));
+let BASE;
 
-function bootServer(jwtSecret) {
-  const logFd = fs.openSync(path.join(os.tmpdir(), 'st-rot-' + crypto.randomBytes(3).toString('hex') + '.log'), 'w');
-  return spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', JWT_SECRET: jwtSecret },
-    stdio: ['ignore', logFd, logFd],
-  });
-}
-async function waitUp() {
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) return; } catch { /* not yet */ }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  throw new Error('server did not boot');
+async function bootServer(jwtSecret) {
+  const srv = await startServer({ name: 'totp-keyrotation', env: { DATA_DIR, JWT_SECRET: jwtSecret } });
+  BASE = srv.base;
+  return srv;
 }
 async function jfetch(p, opts = {}) {
   const res = await fetch(BASE + p, opts);
@@ -44,20 +35,19 @@ const post = (o) => ({ method: 'POST', headers: { 'Content-Type': 'application/j
 const postAuth = (tok, o) => ({ method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify(o || {}) });
 
 test('#100 key rotation does NOT brick TOTP: recovery survives; TOTP fails cleanly (no 500)', async () => {
-  let proc = bootServer('keyA-' + crypto.randomBytes(8).toString('hex'));
+  let srv;
   try {
-    await waitUp();
+    srv = await bootServer('keyA-' + crypto.randomBytes(8).toString('hex'));
     const email = 'rot' + crypto.randomBytes(4).toString('hex') + '@x.local';
     const tok = (await jfetch('/api/auth/register', post({ email, password: 'Passw0rd123' }))).body.token;
     const secret = (await jfetch('/api/auth/totp/setup', postAuth(tok, {}))).body.secret;
     const recovery = (await jfetch('/api/auth/totp/enable', postAuth(tok, { code: authenticator.generate(secret) }))).body.recovery_codes;
     assert.equal(recovery.length, 10, 'enrolled under key A');
 
-    proc.kill('SIGKILL'); await new Promise(r => setTimeout(r, 600));
+    await srv.stop();
 
     // Reboot with a DIFFERENT key (same DATA_DIR) -> totp_secret_enc is now undecryptable.
-    proc = bootServer('keyB-' + crypto.randomBytes(8).toString('hex'));
-    await waitUp();
+    srv = await bootServer('keyB-' + crypto.randomBytes(8).toString('hex'));
 
     // password login still issues an MFA challenge
     const l1 = await jfetch('/api/auth/login', post({ email, password: 'Passw0rd123' }));
@@ -72,6 +62,7 @@ test('#100 key rotation does NOT brick TOTP: recovery survives; TOTP fails clean
     const rec = await jfetch('/api/auth/totp/verify', post({ mfa_token: l2.body.mfa_token, code: recovery[0] }));
     assert.ok(rec.body.token, 'recovery code survives the key change -> NOT hard-locked-out');
   } finally {
-    try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+    if (srv) await srv.stop();
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
   }
 });

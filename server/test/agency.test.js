@@ -6,30 +6,17 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3992;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-agency-' + crypto.randomBytes(4).toString('hex'));
-let proc;
+let srv, BASE;
 
+// A failed boot fails here, in before(), with the helper's diagnostics.
 before(async () => {
-  const logFd = fs.openSync(path.join(os.tmpdir(), 'st-agency.log'), 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) break; } catch { /* not yet */ }
-    await new Promise(r => setTimeout(r, 250));
-  }
+  srv = await startServer({ name: 'agency' });
+  BASE = srv.base;
 });
-after(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } });
+after(async () => { if (srv) await srv.stop(); });
 
 async function jfetch(p, opts = {}) {
   const res = await fetch(BASE + p, opts);

@@ -8,31 +8,21 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
 const WebSocket = require('../node_modules/ws');
 const ioClient = require('socket.io-client');
-const path = require('node:path'); const os = require('node:os'); const fs = require('node:fs'); const crypto = require('node:crypto');
+const crypto = require('node:crypto');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3957;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-ho-' + crypto.randomBytes(4).toString('hex'));
-let proc;
+let srv, PORT, BASE;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 before(async () => {
-  const logFd = fs.openSync(path.join(os.tmpdir(), 'st-ho.log'), 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
-      PING_INTERVAL: '400', PING_TIMEOUT: '400',            // half-open closed ~800ms
-      HEARTBEAT_INTERVAL: '400', HEARTBEAT_TIMEOUT: '800' },  // checker marks offline fast
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await sleep(250); }
-  if (!up) throw new Error('server did not boot');
+  srv = await startServer({ name: '148-half-open', env: {
+    PING_INTERVAL: '400', PING_TIMEOUT: '400',             // half-open closed ~800ms
+    HEARTBEAT_INTERVAL: '400', HEARTBEAT_TIMEOUT: '800' } }); // checker marks offline fast
+  PORT = srv.port; BASE = srv.base;
 });
-after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => { if (srv) await srv.stop(); });
 
 const connected = async () => (await (await fetch(BASE + '/api/status')).json()).devices_connected;
 
