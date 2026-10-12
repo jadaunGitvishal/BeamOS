@@ -1097,6 +1097,17 @@ module.exports = function setupDeviceSocket(io) {
         if (activeNow && activeNow.socketId !== closingSocketId) return;
 
         await db.prepare("UPDATE devices SET status = 'offline', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(deviceId);
+        // Race: the device can reconnect DURING the await above (register calls
+        // registerConnection synchronously, then UPDATEs 'online' on another pooled
+        // connection), so this 'offline' write may have landed last. A different socket
+        // now holds the device: restore 'online' and skip the offline log / dashboard
+        // event / wall reassignment, so no false 'offline' is left behind.
+        const nowConn = heartbeat.getConnection(deviceId);
+        if (nowConn && nowConn.socketId !== closingSocketId) {
+          await db.prepare("UPDATE devices SET status = 'online', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(deviceId);
+          console.log(`[device:disconnect] ${deviceId} reconnected (socket ${nowConn.socketId}) during the offline transition - race detected, kept online`);
+          return;
+        }
         // Only drop OUR entry: a new socket may have registered during the await above.
         const stillOurs = heartbeat.getConnection(deviceId);
         if (!stillOurs || stillOurs.socketId === closingSocketId) heartbeat.removeConnection(deviceId);

@@ -66,6 +66,17 @@ function startHeartbeatChecker(io, { maintenance = true } = {}) {
           }
           await db.prepare("UPDATE devices SET status = 'offline', updated_at = UNIX_TIMESTAMP() WHERE id = ?")
             .run(device.id);
+          // Race: the device can reconnect DURING the await above (register calls
+          // registerConnection synchronously, then UPDATEs 'online' on another pooled
+          // connection), so this 'offline' write may have landed last. A different
+          // connection now holds the device (conn may be undefined; any new entry counts):
+          // restore 'online' and skip the offline event / 'offline_timeout' log entry.
+          const cur = deviceConnections.get(device.id);
+          if (cur && cur !== conn) {
+            await db.prepare("UPDATE devices SET status = 'online', updated_at = UNIX_TIMESTAMP() WHERE id = ?").run(device.id);
+            console.log(`Device ${device.id} reconnected (socket ${cur.socketId}) during the heartbeat-timeout offline - race detected, kept online`);
+            continue;
+          }
           // Only drop the stale entry judged above: a new socket may have registered during the await.
           if (deviceConnections.get(device.id) === conn) deviceConnections.delete(device.id);
 
