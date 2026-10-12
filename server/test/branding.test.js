@@ -3,85 +3,96 @@
 // Issue #15: instance-level default branding. Tests the resolver order
 // (workspace row -> custom-domain -> platform default -> hardcoded) and the
 // platform-admin GET/PUT /api/admin/branding endpoints.
+//
+// In-process against the real MySQL test database (beamos_test via npm test): the
+// real /api/admin router and real auth. Users, org, workspaces and white_labels rows
+// are test-owned under a per-run prefix. The single platform-default row (fixed id) is
+// platform-wide: its prior state is captured first and put back exactly afterwards.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
+const crypto = require('node:crypto');
 
-process.env.JWT_SECRET = 'test-secret-branding';
+const { db, initDb } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { resolveBranding, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID } = require('../lib/branding');
+const { startInProcessApp } = require('./helpers/inprocess-app');
 
-const db = new Database(':memory:');
-db.pragma('foreign_keys = ON');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE white_labels (
-    id TEXT PRIMARY KEY, user_id TEXT, brand_name TEXT NOT NULL DEFAULT 'ScreenTinker',
-    logo_url TEXT, favicon_url TEXT, primary_color TEXT DEFAULT '#3B82F6',
-    secondary_color TEXT DEFAULT '#1E293B', bg_color TEXT DEFAULT '#111827',
-    custom_domain TEXT, custom_css TEXT, hide_branding INTEGER DEFAULT 0,
-    workspace_id TEXT, created_at INTEGER DEFAULT (strftime('%s','now')), updated_at INTEGER DEFAULT (strftime('%s','now'))
-  );
-  CREATE TABLE activity_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, device_id TEXT, action TEXT NOT NULL,
-    details TEXT, ip_address TEXT, workspace_id TEXT, created_at INTEGER DEFAULT (strftime('%s','now'))
-  );
-`);
+const P = 'BR-' + crypto.randomBytes(4).toString('hex');
+const id = (s) => `${P}-${s}`;
+// The hardcoded fallback brand (lib/branding.js) - 'BeamOS' since the rebrand.
+const HARDCODED_NAME = HARDCODED_BRANDING.brand_name;
 
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db, pruneTelemetry() {}, pruneScreenshots() {} } };
+let app, base, savedPlatformDefault;
+const tokens = {};
 
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveBranding } = require('../lib/branding');
-const adminRouter = require('../routes/admin');
+test.before(async () => {
+  await initDb();
+  app = await startInProcessApp({ only: ['/api/admin'] });
+  base = app.base;
+  savedPlatformDefault = (await db.prepare('SELECT * FROM white_labels WHERE id = ?').get(PLATFORM_DEFAULT_ID)) || null;
 
-db.prepare("INSERT INTO users (id, email, role, password_hash) VALUES ('u-admin','admin@test.local','platform_admin','x')").run();
-db.prepare("INSERT INTO users (id, email, role, password_hash) VALUES ('u-reg','reg@test.local','user','x')").run();
-const tokens = {
-  admin: generateToken({ id: 'u-admin', email: 'admin@test.local', role: 'platform_admin' }, null),
-  reg: generateToken({ id: 'u-reg', email: 'reg@test.local', role: 'user' }, null),
+  await db.prepare("INSERT INTO users (id, email, role, password_hash) VALUES (?, ?, 'platform_admin', 'x')").run(id('u-admin'), `${id('admin').toLowerCase()}@test.local`);
+  await db.prepare("INSERT INTO users (id, email, role, password_hash) VALUES (?, ?, 'user', 'x')").run(id('u-reg'), `${id('reg').toLowerCase()}@test.local`);
+  await db.prepare('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)').run(id('org'), `${P} Org`, id('u-admin'));
+  await db.prepare('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?), (?, ?, ?)')
+    .run(id('ws1'), id('org'), 'WS One', id('ws-dom'), id('org'), 'WS Dom');
+  tokens.admin = generateToken({ id: id('u-admin'), email: `${id('admin').toLowerCase()}@test.local`, role: 'platform_admin' }, null);
+  tokens.reg = generateToken({ id: id('u-reg'), email: `${id('reg').toLowerCase()}@test.local`, role: 'user' }, null);
+});
+
+// Restore the platform-default row exactly (or remove it if there was none), then
+// remove only this file's rows: its white_labels, its org (cascading its workspaces),
+// its users. Audit rows are kept (hash chain).
+test.after(async () => {
+  try {
+    if (app) {
+      await db.prepare('DELETE FROM white_labels WHERE id = ?').run(PLATFORM_DEFAULT_ID);
+      if (savedPlatformDefault) {
+        const cols = Object.keys(savedPlatformDefault);
+        await db.prepare(`INSERT INTO white_labels (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+          .run(...cols.map((c) => savedPlatformDefault[c]));
+      }
+      await db.prepare('DELETE FROM white_labels WHERE id LIKE ?').run(`${P}-%`);
+      await db.prepare('DELETE FROM organizations WHERE id = ?').run(id('org'));
+      await db.prepare('DELETE FROM users WHERE id LIKE ?').run(`${P}-%`);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
+
+// This file's rows + the platform-default row (restored in test.after).
+const clearRows = async () => {
+  await db.prepare('DELETE FROM white_labels WHERE id LIKE ? OR id = ?').run(`${P}-%`, PLATFORM_DEFAULT_ID);
 };
+const wl = (rowId, fields) => db.prepare(
+  'INSERT INTO white_labels (id, user_id, brand_name, custom_domain, workspace_id) VALUES (?, ?, ?, ?, ?)'
+).run(rowId, id('u-admin'), fields.brand_name, fields.custom_domain || null, fields.workspace_id || null);
 
-const app = express();
-app.use(express.json());
-app.use('/api/admin', requireAuth, adminRouter);
-const server = app.listen(0);
-let base;
-test.before(async () => { await new Promise(r => server.listening ? r() : server.once('listening', r)); base = `http://127.0.0.1:${server.address().port}`; });
-test.after(() => { server.close(); db.close(); });
-
-const wl = (id, fields) => db.prepare(
-  `INSERT INTO white_labels (id, user_id, brand_name, custom_domain, workspace_id) VALUES (?, 'u-admin', ?, ?, ?)`
-).run(id, fields.brand_name, fields.custom_domain || null, fields.workspace_id || null);
-
-test('resolver order: workspace row > domain > platform default > hardcoded', () => {
-  db.prepare('DELETE FROM white_labels').run();
-  wl('w1', { brand_name: 'WS One', workspace_id: 'ws1' });
+test('resolver order: workspace row > domain > platform default > hardcoded', async () => {
+  await clearRows();
+  await wl(id('w1'), { brand_name: 'WS One', workspace_id: id('ws1') });
   // a custom-domain row belongs to a workspace (realistic); also seed a legacy
   // null-workspace row to prove the fixed-id sentinel ignores it.
-  wl('dom', { brand_name: 'Domain Brand', custom_domain: 'cust.example', workspace_id: 'ws-dom' });
-  wl('legacy', { brand_name: 'Legacy Null WS', workspace_id: null });
-  wl('platform-default', { brand_name: 'Global Default', workspace_id: null }); // fixed-id platform default
+  await wl(id('dom'), { brand_name: 'Domain Brand', custom_domain: `${P.toLowerCase()}.cust.example`, workspace_id: id('ws-dom') });
+  await wl(id('legacy'), { brand_name: 'Legacy Null WS', workspace_id: null });
+  await wl(PLATFORM_DEFAULT_ID, { brand_name: 'Global Default', workspace_id: null }); // fixed-id platform default
 
-  assert.equal(resolveBranding(db, { workspaceId: 'ws1' }).brand_name, 'WS One', 'workspace row wins');
-  assert.equal(resolveBranding(db, { domain: 'cust.example' }).brand_name, 'Domain Brand', 'domain match');
-  assert.equal(resolveBranding(db, { workspaceId: 'ws-none' }).brand_name, 'Global Default', 'unbranded workspace inherits platform default (not the legacy null-ws row)');
-  assert.equal(resolveBranding(db, {}).brand_name, 'Global Default', 'no context -> platform default');
+  assert.equal((await resolveBranding(db, { workspaceId: id('ws1') })).brand_name, 'WS One', 'workspace row wins');
+  assert.equal((await resolveBranding(db, { domain: `${P.toLowerCase()}.cust.example` })).brand_name, 'Domain Brand', 'domain match');
+  assert.equal((await resolveBranding(db, { workspaceId: id('ws-none') })).brand_name, 'Global Default', 'unbranded workspace inherits platform default (not the legacy null-ws row)');
+  assert.equal((await resolveBranding(db, {})).brand_name, 'Global Default', 'no context -> platform default');
 
-  db.prepare("DELETE FROM white_labels WHERE id='platform-default'").run();
-  assert.equal(resolveBranding(db, {}).brand_name, 'ScreenTinker', 'no platform default -> hardcoded (legacy null-ws row not used)');
+  await db.prepare('DELETE FROM white_labels WHERE id = ?').run(PLATFORM_DEFAULT_ID);
+  assert.equal((await resolveBranding(db, {})).brand_name, HARDCODED_NAME, 'no platform default -> hardcoded (legacy null-ws row not used)');
 });
 
 test('GET /api/admin/branding returns hardcoded default when none set', async () => {
-  db.prepare('DELETE FROM white_labels').run();
+  await clearRows();
   const res = await fetch(base + '/api/admin/branding', { headers: { Authorization: `Bearer ${tokens.admin}` } });
   assert.equal(res.status, 200);
-  assert.equal((await res.json()).brand_name, 'ScreenTinker');
+  assert.equal((await res.json()).brand_name, HARDCODED_NAME);
 });
 
 test('PUT /api/admin/branding creates then updates the single platform-default row', async () => {
@@ -91,21 +102,22 @@ test('PUT /api/admin/branding creates then updates the single platform-default r
   let res = await put({ brand_name: 'Acme Signage', primary_color: '#10b981', hide_branding: true });
   assert.equal(res.status, 200);
   // exactly one platform-default row, with workspace_id NULL
-  let rows = db.prepare("SELECT * FROM white_labels WHERE id = 'platform-default'").all();
+  let rows = await db.prepare('SELECT * FROM white_labels WHERE id = ?').all(PLATFORM_DEFAULT_ID);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].brand_name, 'Acme Signage');
   assert.equal(rows[0].primary_color, '#10b981');
   assert.equal(rows[0].hide_branding, 1);
+  assert.equal(rows[0].workspace_id, null);
 
   // second PUT updates the same row (no second row)
   res = await put({ brand_name: 'Acme Displays' });
   assert.equal(res.status, 200);
-  rows = db.prepare("SELECT * FROM white_labels WHERE id = 'platform-default'").all();
+  rows = await db.prepare('SELECT * FROM white_labels WHERE id = ?').all(PLATFORM_DEFAULT_ID);
   assert.equal(rows.length, 1, 'still a single platform-default row');
   assert.equal(rows[0].brand_name, 'Acme Displays');
 
   // and now an unbranded workspace resolves to it
-  assert.equal(resolveBranding(db, { workspaceId: 'whatever' }).brand_name, 'Acme Displays');
+  assert.equal((await resolveBranding(db, { workspaceId: id('whatever') })).brand_name, 'Acme Displays');
 });
 
 test('branding endpoints are platform-admin only (403 for a regular user)', async () => {

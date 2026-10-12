@@ -13,14 +13,17 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const Database = require('better-sqlite3');
+// The spawned server and this process share the real MySQL test DB (beamos_test via
+// npm test): seed / read through the same db module, test-owned rows only.
+const { db } = require('../db/database');
+const { cleanupUser } = require('./helpers/disposable');
 
 const PORT = 3994;
 const BASE = `http://127.0.0.1:${PORT}`;
 const DATA_DIR = path.join(os.tmpdir(), 'st-mute-test-' + crypto.randomBytes(4).toString('hex'));
 const LOG = path.join(os.tmpdir(), 'st-mute-' + crypto.randomBytes(4).toString('hex') + '.log');
 const PW = 'Passw0rd123';
-let proc, db;
+let proc;
 const S = {};
 
 async function jfetch(p, opts = {}) {
@@ -46,27 +49,33 @@ before(async () => {
   }
   if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
 
-  const reg = await jfetch('/api/auth/register', post(null, { email: 'm' + crypto.randomBytes(4).toString('hex') + '@x.local', password: PW }));
+  const reg = await jfetch('/api/auth/register', post(null, { email: 'mute-' + crypto.randomBytes(4).toString('hex') + '@x.local', password: PW }));
   S.jwt = reg.body.token;
+  S.userId = reg.body.user.id;
   const pl = await jfetch('/api/playlists', post(S.jwt, { name: 'mute-pl' }));
   S.playlistId = pl.body.id;
 
-  // Seed a content row + a playlist_item on a single connection (avoids WAL visibility
-  // races; FK off so a NULL-workspace content row is fine for the test).
-  db = new Database(path.join(DATA_DIR, 'db', 'remote_display.db'), { timeout: 5000 });
-  db.pragma('foreign_keys = OFF');
+  // Seed a content row (a NULL-workspace remote clip, content.workspace_id is nullable)
+  // + a playlist_item on the real test DB.
   S.contentId = crypto.randomUUID();
-  db.prepare("INSERT INTO content (id, filename, filepath, mime_type, file_size, remote_url) VALUES (?,?,?,?,0,?)")
+  await db.prepare("INSERT INTO content (id, filename, filepath, mime_type, file_size, remote_url) VALUES (?,?,?,?,0,?)")
     .run(S.contentId, 'clip', '', 'video/mp4', 'https://example.com/clip.mp4');
-  const info = db.prepare('INSERT INTO playlist_items (playlist_id, content_id, sort_order, duration_sec) VALUES (?,?,0,10)')
+  const info = await db.prepare('INSERT INTO playlist_items (playlist_id, content_id, sort_order, duration_sec) VALUES (?,?,0,10)')
     .run(S.playlistId, S.contentId);
   S.itemId = info.lastInsertRowid;
 });
 
-after(() => {
-  try { db.close(); } catch { /* */ }
+// Only this file's rows: the content row (cascades its playlist_items), then the
+// registered user and everything their signup created (org, workspace, playlist).
+after(async () => {
   try { proc.kill('SIGKILL'); } catch { /* */ }
-  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  try {
+    if (S.contentId) await db.prepare('DELETE FROM content WHERE id = ?').run(S.contentId);
+    if (S.userId) await cleanupUser(db, S.userId);
+  } finally {
+    await db.close();
+    for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  }
 });
 
 test('PUT /assignments/:id persists muted and returns it (ITEM_SELECT)', async () => {
@@ -84,7 +93,7 @@ test('muted reaches the device via the published snapshot (buildSnapshotItems)',
   const pub = await jfetch(`/api/playlists/${S.playlistId}/publish`, post(S.jwt, {}));
   assert.equal(pub.status, 200);
 
-  const snapRow = db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(S.playlistId);
+  const snapRow = await db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(S.playlistId);
   const snap = JSON.parse(snapRow.published_snapshot);
   const item = snap.find((i) => i.content_id === S.contentId);
   assert.ok(item, 'the item is in the published snapshot');
@@ -95,18 +104,18 @@ test('mute toggle patches the published snapshot WITHOUT a manual republish (the
   // Baseline: publish once so the device has a snapshot carrying muted=0.
   await jfetch(`/api/assignments/${S.itemId}`, put(S.jwt, { muted: false }));
   await jfetch(`/api/playlists/${S.playlistId}/publish`, post(S.jwt, {}));
-  const read = () => JSON.parse(db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(S.playlistId).published_snapshot)
+  const read = async () => JSON.parse((await db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(S.playlistId)).published_snapshot)
     .find((i) => i.content_id === S.contentId).muted;
-  assert.equal(read(), 0, 'baseline: snapshot the device plays carries muted=0');
+  assert.equal(await read(), 0, 'baseline: snapshot the device plays carries muted=0');
 
   // The actual bug: a mute toggle ALONE (no /publish) must reach the played snapshot.
   // On beta7 this stayed 0 (markDraft only) so every loop re-applied full volume.
   await jfetch(`/api/assignments/${S.itemId}`, put(S.jwt, { muted: true }));
-  assert.equal(read(), 1, 'mute toggle patched the snapshot the device plays — no manual republish needed');
+  assert.equal(await read(), 1, 'mute toggle patched the snapshot the device plays — no manual republish needed');
 
   // Unmute toggle reverts the snapshot too.
   await jfetch(`/api/assignments/${S.itemId}`, put(S.jwt, { muted: false }));
-  assert.equal(read(), 0, 'unmute toggle patched the snapshot back to 0');
+  assert.equal(await read(), 0, 'unmute toggle patched the snapshot back to 0');
 });
 
 test('PUT ignoring muted (other field) leaves muted untouched', async () => {
