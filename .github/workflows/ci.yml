@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, version2]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 
-# main gets frequent pushes - cancel an in-flight run when a newer commit
+# main/version2 get frequent pushes - cancel an in-flight run when a newer commit
 # (or rerun) supersedes it, per ref.
 concurrency:
   group: ci-${{ github.ref }}
