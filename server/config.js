@@ -57,6 +57,11 @@ module.exports = {
   // boot when invalid) by lib/mysql-tls.js, not here.
   mysqlSsl: (process.env.MYSQL_SSL || "off").trim().toLowerCase(),
   mysqlSslCa: process.env.MYSQL_SSL_CA || "",
+  // Seconds the startup schema statements may wait for a metadata lock (DDL) before
+  // startup fails, instead of MySQL's default lock_wait_timeout of one year. Startup
+  // connection only; integer > 0, default 60. Validated (and refused at boot when
+  // invalid) by db/database.js initDb(), not here.
+  bootLockWaitTimeoutS: process.env.BOOT_LOCK_WAIT_TIMEOUT_S,
   uploadsDir,
   contentDir: path.join(uploadsDir, "content"),
   screenshotsDir: path.join(uploadsDir, "screenshots"),

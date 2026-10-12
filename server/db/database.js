@@ -182,7 +182,7 @@ const BENIGN_DDL_ERRORS = new Set([
   "ER_DUP_KEYNAME", // CREATE INDEX, index already exists
 ]);
 
-async function applyMigrations() {
+async function applyMigrations(h = db) {
   if (migrations.length === 0) return;
 
   // A real (non-empty) migration batch snapshots the DB first - see snapshotDatabase().
@@ -191,7 +191,7 @@ async function applyMigrations() {
   let applied = 0;
   for (const sql of migrations) {
     try {
-      await db.exec(sql);
+      await h.exec(sql);
       applied++;
     } catch (e) {
       if (!BENIGN_DDL_ERRORS.has(e.code)) {
@@ -254,17 +254,17 @@ async function snapshotDatabase(label) {
 
 // Boot-time invariants, re-asserted on EVERY start (not migrations - no schema_migrations
 // gating). Ported as-is from the SQLite version's unconditional post-migration UPDATEs.
-async function enforceBootInvariants() {
+async function enforceBootInvariants(h = db) {
   // BeamOS: force every plan tier to be unlimited on every boot, regardless of what's
   // already in the database (covers existing installs where old limited rows were
   // inserted before this was the default, and any future ones too).
-  await db.exec(`
+  await h.exec(`
     UPDATE plans SET max_devices = -1, max_storage_mb = -1,
       remote_control = 1, remote_url = 1, priority_support = 1
   `);
   // BeamOS: clear any trial timer on every account, every boot - permanently prevents the
   // (disabled) auto-downgrade logic from ever mattering.
-  await db.exec(`UPDATE users SET trial_started = NULL`);
+  await h.exec(`UPDATE users SET trial_started = NULL`);
 }
 
 // Splits a .sql file into individual executable statements: strips `--` comments
@@ -289,11 +289,11 @@ function splitSqlStatements(sql) {
 // above) so it can safely re-run on every boot: CREATE TABLE IF NOT EXISTS and INSERT
 // IGNORE are natively idempotent, and the standalone CREATE INDEX statements (MySQL has
 // no CREATE INDEX IF NOT EXISTS) fall back to swallowing "duplicate key name".
-async function applySchema() {
+async function applySchema(h = db) {
   const schemaSql = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   for (const stmt of splitSqlStatements(schemaSql)) {
     try {
-      await db.exec(stmt);
+      await h.exec(stmt);
     } catch (e) {
       if (!BENIGN_DDL_ERRORS.has(e.code)) {
         console.error(`[schema] FAILED: ${stmt}\n         -> ${e.message}`);
@@ -305,31 +305,82 @@ async function applySchema() {
 
 let _initialized = false;
 
-// Call once at boot (server.js), BEFORE registering routes/socket handlers. Creates the
-// schema (idempotent - safe on every restart), applies any pending forward migrations,
-// re-asserts boot invariants, and fails loudly (verifyAndRepairSchema) if the resulting
-// schema is still missing something the code requires.
-async function initDb() {
-  if (_initialized) return db;
+// BOOT_LOCK_WAIT_TIMEOUT_S: how long a startup schema statement may wait for a metadata
+// lock. Unset/empty -> 60. Anything but a whole number of seconds in 1..31536000
+// (MySQL's lock_wait_timeout range) is refused with a startup error.
+const BOOT_LOCK_WAIT_TIMEOUT_DEFAULT_S = 60;
+function resolveBootLockWaitTimeout(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return BOOT_LOCK_WAIT_TIMEOUT_DEFAULT_S;
+  const s = String(raw).trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isSafeInteger(n) || n < 1 || n > 31536000) {
+    throw new Error(`BOOT_LOCK_WAIT_TIMEOUT_S must be a whole number of seconds from 1 to 31536000 (got "${s}")`);
+  }
+  return n;
+}
 
-  // Ref 2: start-up proof that the pool really negotiated TLS (null when off).
-  // Runs before anything else touches the DB, and before server.js listens.
-  const cipher = await mysqlTls.assertMysqlTlsActive(pool, config);
-  if (cipher) console.log(`[db] MySQL TLS active: ${cipher} (${config.mysqlSsl})`);
+// Runs one startup phase; a lock-wait timeout becomes an error naming the phase.
+async function startupPhase(name, lockWaitS, fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e && (e.code === "ER_LOCK_WAIT_TIMEOUT" || e.errno === 1205)) {
+      throw new Error(
+        `startup phase ${name} gave up after ${lockWaitS}s waiting for a database lock ` +
+          `(ER_LOCK_WAIT_TIMEOUT / 1205: ${e.sqlMessage || e.message}). Another session holds a ` +
+          `conflicting lock on a table this phase changes; end that session and restart ` +
+          `(BOOT_LOCK_WAIT_TIMEOUT_S=${lockWaitS}).`,
+        { cause: e },
+      );
+    }
+    throw e;
+  }
+}
 
-  await applySchema();
-  await applyMigrations();
-  await enforceBootInvariants();
+// The startup schema phases, all on ONE connection whose session lock_wait_timeout is
+// lockWaitS - so a metadata-lock stall (DDL waiting behind another session's open
+// transaction) fails with ER_LOCK_WAIT_TIMEOUT instead of waiting MySQL's default of one
+// year. `conn` is a single connection (pool.getConnection() or mysql2 createConnection);
+// the caller owns it and must not hand it back to a pool with the setting still on.
+async function runStartupSchema(conn, lockWaitS) {
+  await conn.query("SET SESSION lock_wait_timeout = ?", [lockWaitS]);
+  const h = makeHandle(conn);
+  await startupPhase("applySchema", lockWaitS, () => applySchema(h));
+  await startupPhase("applyMigrations", lockWaitS, () => applyMigrations(h));
+  await startupPhase("enforceBootInvariants", lockWaitS, () => enforceBootInvariants(h));
 
   const { verifyAndRepairSchema } = require("../lib/schema-check");
-  await verifyAndRepairSchema(db);
+  await startupPhase("verifyAndRepairSchema", lockWaitS, () => verifyAndRepairSchema(h));
 
   // Ref 17: chain any pre-existing activity_log rows into the tamper-evident hash
   // chain (one-time per row; a no-op once every row is chained). Runs here -
   // after the columns are guaranteed present, before the server accepts requests
   // - so there are never concurrent writes racing the backfill.
   const { backfillChain } = require("../lib/activity-chain");
-  await backfillChain(db);
+  await startupPhase("backfillChain", lockWaitS, () => backfillChain(h));
+}
+
+// Call once at boot (server.js), BEFORE registering routes/socket handlers. Creates the
+// schema (idempotent - safe on every restart), applies any pending forward migrations,
+// re-asserts boot invariants, and fails loudly (verifyAndRepairSchema) if the resulting
+// schema is still missing something the code requires.
+async function initDb() {
+  if (_initialized) return db;
+  const lockWaitS = resolveBootLockWaitTimeout(config.bootLockWaitTimeoutS);
+
+  // The startup statements run on one dedicated connection (runStartupSchema), which is
+  // destroyed afterwards so its session lock_wait_timeout never reaches the pool.
+  const conn = await pool.getConnection();
+  try {
+    // Ref 2: start-up proof that the pool really negotiated TLS (null when off).
+    // Runs before anything else touches the DB, and before server.js listens.
+    const cipher = await mysqlTls.assertMysqlTlsActive(conn, config);
+    if (cipher) console.log(`[db] MySQL TLS active: ${cipher} (${config.mysqlSsl})`);
+
+    await runStartupSchema(conn, lockWaitS);
+  } finally {
+    conn.destroy();
+  }
 
   // Warm the app_settings in-memory cache (lib/app-settings.js) so its get()/getBool()
   // reads - called synchronously inline in the /api/status hot path - never race an
@@ -490,4 +541,6 @@ module.exports = {
   pruneScreenshots,
   pruneStatusLog,
   getMaintenanceStats,
+  resolveBootLockWaitTimeout,
+  runStartupSchema,
 };

@@ -270,6 +270,11 @@ async function repairRegionTree(db) {
   return actions;
 }
 
+// A metadata-lock wait timeout (startup's BOOT_LOCK_WAIT_TIMEOUT_S, ER_LOCK_WAIT_TIMEOUT /
+// 1205) is not a broken repair: the repair catches below rethrow it, so startup reports
+// the lock instead of "missing required schema - restore a backup".
+const isLockWaitTimeout = (e) => !!e && (e.code === 'ER_LOCK_WAIT_TIMEOUT' || e.errno === 1205);
+
 function defaultOnMissing(missing) {
   const bar = '='.repeat(72);
   console.error(`\n${bar}`);
@@ -305,6 +310,7 @@ async function verifyAndRepairSchema(db, opts = {}) {
     try {
       await repairRegionTree(db);
     } catch (e) {
+      if (isLockWaitTimeout(e)) throw e;
       console.error(`[schema-check] region tree repair FAILED: ${e.message}`);
     }
   }
@@ -316,6 +322,7 @@ async function verifyAndRepairSchema(db, opts = {}) {
       tableSet.add(t);
       console.warn(`[schema-check] created table ${t}`);
     } catch (e) {
+      if (isLockWaitTimeout(e)) throw e;
       console.error(`[schema-check] creating table ${t} FAILED: ${e.message}`);
     }
   }
@@ -331,6 +338,7 @@ async function verifyAndRepairSchema(db, opts = {}) {
         await db.exec(repair);
         console.warn(`[schema-check] repaired ${t}.${c}`);
       } catch (e) {
+        if (isLockWaitTimeout(e)) throw e;
         console.error(`[schema-check] repair of ${t}.${c} FAILED: ${e.message}`);
       }
       cols = await columns(t);
@@ -342,6 +350,7 @@ async function verifyAndRepairSchema(db, opts = {}) {
     try {
       await dropUserForeignKeys(db);
     } catch (e) {
+      if (isLockWaitTimeout(e)) throw e;
       console.error(`[schema-check] dropping activity_log -> users foreign keys FAILED: ${e.message}`);
     }
   }
