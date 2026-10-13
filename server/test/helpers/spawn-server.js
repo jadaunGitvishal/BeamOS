@@ -63,6 +63,14 @@ function installExitHooks() {
   }
 }
 
+// p's value, or `fallback` after ms - clearing the timer either way, so a long timeout
+// (e.g. expectExit's 60s) never keeps the test process alive after p has settled.
+function within(p, ms, fallback) {
+  let t;
+  const timer = new Promise((r) => { t = setTimeout(() => r(fallback), ms); });
+  return Promise.race([p, timer]).finally(() => clearTimeout(t));
+}
+
 function hintFor(text) {
   if (!/^\[boot\] pid \d+ starting/m.test(text)) return 'no "[boot] ... starting" line: the process never started server.js.';
   if (!/^\[boot\] modules loaded/m.test(text)) return 'no "[boot] modules loaded" line: module loading was slow or stuck (e.g. cold file cache / antivirus scanning after sleep).';
@@ -127,7 +135,7 @@ async function startServer(opts = {}) {
       stopped = true;
       killTree(child);
       await exited;
-      await Promise.race([closed, new Promise((r) => setTimeout(r, 2000))]);
+      await within(closed, 2000);
       try { fs.closeSync(logFd); } catch (_) { /* already closed */ }
     }
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -154,9 +162,9 @@ async function startServer(opts = {}) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   if (expectExit) {
-    const r = await Promise.race([exited, sleep(bootTimeoutMs).then(() => null)]);
+    const r = await within(exited, bootTimeoutMs, null);
     if (!r) return fail(`did not exit within ${bootTimeoutMs}ms (expectExit)`);
-    await Promise.race([closed, sleep(2000)]);
+    await within(closed, 2000);
     await stop();
     return { code: r.code, signal: r.signal, output: out + partial };
   }
@@ -177,7 +185,7 @@ async function startServer(opts = {}) {
       if (listening.test(out)) break;
       foreignAnswer = true;
     }
-    await Promise.race([exited, sleep(POLL_MS)]);
+    await within(exited, POLL_MS);
   }
 
   async function waitForOutput(re, ms = 10000) {
