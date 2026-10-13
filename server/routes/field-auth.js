@@ -49,6 +49,7 @@ const { asyncHandler } = require('../lib/async-handler');
 // typed any way (bare 10-digit, "+91…", "0…", spaces) resolves to the one
 // stored E.164 value. See lib/field-phone.js.
 const { normalizePhone } = require('../lib/field-phone');
+const { maskPhone } = require('../lib/mask');
 // Ref 17: failed OTP verification is an authentication event the RFP wants
 // captured. Same writer + label as password-login failures in routes/auth.js.
 const { logActivity, getClientIp } = require('../services/activity');
@@ -94,12 +95,13 @@ async function technicianOnlyRefusal(user) {
 }
 
 // The single refusal used for unknown phone, wrong code and ineligible account,
-// so the caller cannot tell them apart. Records phone + IP only, never the code.
+// so the caller cannot tell them apart. Records the MASKED phone ('***' + last 3
+// digits) + IP only, never the full number or the code.
 function refuse(req, res, phone, user, reason) {
   logActivity(
     user?.id || null,
     'auth:login_failed',
-    `${phone} - ${reason} (field OTP)`,
+    `${maskPhone(phone)} - ${reason} (field OTP)`,
     null,
     getClientIp(req),
     null,

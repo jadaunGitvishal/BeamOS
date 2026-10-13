@@ -38,16 +38,35 @@ function getClientIp(req) {
 // Most callers don't await it (the response goes out first), so every write is tracked
 // in pendingWrites until it settles; graceful shutdown waits for them via drainActivity
 // before closing the pool, instead of losing recent rows on every restart.
+//
+// Arguments: (userId, action, details, deviceId, ipAddress, workspaceId, organizationId).
+// Resolves true when the row was written, false when it wasn't (the error is logged);
+// never rejects.
 const pendingWrites = new Set();
 let writesWritten = 0;
 let writesFailed = 0;
 
 function logActivity(...args) {
   const p = writeActivity(...args)
-    .then((ok) => { if (ok) writesWritten++; else writesFailed++; })
+    .then((ok) => {
+      if (ok) writesWritten++;
+      else writesFailed++;
+      return ok;
+    })
     .finally(() => pendingWrites.delete(p));
   pendingWrites.add(p);
   return p;
+}
+
+// For changes that must not go unrecorded silently (revocations, removals): awaits the
+// audit write and, if it failed, prints one fixed, greppable line naming the action,
+// the actor and the target - ids only, never details or secrets. The change itself is
+// not undone. `target` is whatever identifies the changed object (user / token / device
+// id). Resolves to logActivity's true/false.
+async function auditOrWarn({ userId = null, action, details = null, target = null, deviceId = null, ipAddress = null, workspaceId = null, organizationId = null }) {
+  const ok = await logActivity(userId, action, details, deviceId, ipAddress, workspaceId, organizationId);
+  if (!ok) console.error(`[audit] NOT AUDITED: action=${action} actor=${userId ?? 'none'} target=${target ?? 'none'}`);
+  return ok;
 }
 
 // Waits until no audit write is pending, or timeoutMs has passed. Writes started while
@@ -78,7 +97,10 @@ async function drainActivity(timeoutMs = 10000) {
 }
 
 // Resolves true when the row was written, false on an error (logged, never thrown).
-async function writeActivity(userId, action, details = null, deviceId = null, ipAddress = null, workspaceId = null) {
+// organizationId fills activity_log.organization_id. Like workspace_id it is stored but
+// NOT covered by the hash chain (lib/activity-chain.js:30-35: an org deletion nulls it),
+// so it is not tamper-evident - org-level rows also name the org in `details`.
+async function writeActivity(userId, action, details = null, deviceId = null, ipAddress = null, workspaceId = null, organizationId = null) {
   try {
     let ws = workspaceId || null;
     if (!ws && deviceId) {
@@ -93,6 +115,7 @@ async function writeActivity(userId, action, details = null, deviceId = null, ip
       details: details || null,
       ip_address: ipAddress || null,
       workspace_id: ws,
+      organization_id: organizationId || null,
     });
     return true;
   } catch (e) {
@@ -244,4 +267,4 @@ function summarizeAction(req) {
   return parts.join(', ') || null;
 }
 
-module.exports = { logActivity, drainActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp };
+module.exports = { logActivity, auditOrWarn, drainActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp };

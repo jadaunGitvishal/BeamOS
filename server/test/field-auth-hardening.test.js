@@ -32,6 +32,8 @@ const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag } = require('./helpers/disposable');
 const { startServer } = require('./helpers/spawn-server');
+const { maxAuditId } = require('./helpers/wait-for-audit');
+const { maskPhone } = require('../lib/mask');
 
 const CODE = '000999';
 const GENERIC_401 = { error: 'Invalid or expired code' };
@@ -73,10 +75,11 @@ test.after(async () => {
 
 // ---------------------------------------------------------------- fixtures
 
+const phonesUsed = []; // every phone this file submits, for the no-full-phone check
 function randPhone() {
   for (;;) {
     const p = `+9197${String(crypto.randomInt(0, 1e8)).padStart(8, '0')}`;
-    if (!p.includes(CODE)) return p;
+    if (!p.includes(CODE)) { phonesUsed.push(p); return p; }
   }
 }
 
@@ -136,29 +139,44 @@ async function post(p, body) {
 }
 const verify = (phone, code = CODE) => post('/api/field-auth/verify-otp', { phone, code });
 
-// logActivity is fire-and-forget from the route - poll briefly for the row.
-async function failedLoginRows(phone) {
+// logActivity is fire-and-forget from the route - poll briefly for the row. The row
+// holds only the masked phone ('***' + last 3 digits), which other phones can share,
+// so it is matched by audit id (after `since`, read just before the request), the
+// masked prefix and the account: userId (a known account) or null (unknown phone ->
+// user_id IS NULL).
+async function failedLoginRows(phone, { since, userId }) {
+  let sql = "SELECT id, user_id, details, ip_address FROM activity_log WHERE id > ? AND action = 'auth:login_failed' AND details LIKE ?";
+  const params = [since, `${maskPhone(phone)} - %`];
+  if (userId === null) sql += ' AND user_id IS NULL';
+  else { sql += ' AND user_id = ?'; params.push(userId); }
   for (let i = 0; i < 40; i++) {
-    const rows = await app.db
-      .prepare("SELECT id, user_id, details, ip_address FROM activity_log WHERE id > ? AND action = 'auth:login_failed' AND details LIKE ?")
-      .all(auditFloor, `${phone}%`);
+    const rows = await app.db.prepare(sql).all(...params);
     if (rows.length) return rows;
     await new Promise((r) => setTimeout(r, 50));
   }
   return [];
 }
 
+// The row records the masked phone, never the full number (with or without '+').
+function assertMaskedPhone(row, phone, label) {
+  assert.ok(row.details.startsWith(`${maskPhone(phone)} - `), `${label}: details start with the masked phone (${row.details})`);
+  assert.ok(!row.details.includes(phone), `${label}: audit row must not contain the full phone`);
+  assert.ok(!row.details.includes(phone.replace(/\D/g, '')), `${label}: audit row must not contain the phone digits`);
+}
+
 // Asserts the generic 401 (status + exact body) and a failed-login audit row
-// (phone + IP, never the code).
-async function assertRefused(phone, label) {
+// (masked phone + IP, never the code or the full phone).
+async function assertRefused(phone, label, userId) {
+  const since = await maxAuditId(app.db);
   const r = await verify(phone);
   assert.equal(r.status, 401, `${label}: status`);
   assert.deepEqual(r.json, GENERIC_401, `${label}: body`);
-  const rows = await failedLoginRows(phone);
+  const rows = await failedLoginRows(phone, { since, userId });
   assert.ok(rows.length >= 1, `${label}: an auth:login_failed audit row was written`);
   for (const row of rows) {
     assert.ok(!row.details.includes(CODE), `${label}: audit row must not contain the code`);
     assert.ok(row.ip_address, `${label}: audit row records the IP`);
+    assertMaskedPhone(row, phone, label);
   }
   return r;
 }
@@ -256,17 +274,20 @@ test('generic 401 + audit row for every non-technician-only account holding a ph
   const tech = await mkUser(); await orgRole(orgId, tech.id, 'field_technician');
   const wrong = await verify(tech.phone, '123123');
   const unknownPhone = randPhone();
+  const unknownSince = await maxAuditId(app.db);
   const unknown = await verify(unknownPhone);
 
   for (const [label, u] of cases) {
-    const r = await assertRefused(u.phone, label);
+    const r = await assertRefused(u.phone, label, u.id);
     // indistinguishable from wrong code / unknown phone
     assert.equal(r.status, wrong.status, `${label} vs wrong code`);
     assert.equal(r.text, wrong.text, `${label} vs wrong code (body bytes)`);
     assert.equal(r.text, unknown.text, `${label} vs unknown phone (body bytes)`);
   }
   assert.equal(unknown.status, 401);
-  assert.equal((await failedLoginRows(unknownPhone)).length >= 1, true, 'unknown phone is audited too');
+  const unknownRows = await failedLoginRows(unknownPhone, { since: unknownSince, userId: null });
+  assert.equal(unknownRows.length >= 1, true, 'unknown phone is audited too');
+  for (const row of unknownRows) assertMaskedPhone(row, unknownPhone, 'unknown phone');
 });
 
 test('deactivated technician: refused with 403 after the code check, as before', async () => {
@@ -294,7 +315,7 @@ test('SSO-only org: technician-only user allowed; org_admin with a phone gets th
 
   const admin = await mkUser();
   await orgRole(sso.orgId, admin.id, 'org_admin');
-  await assertRefused(admin.phone, 'org_admin in SSO-only org');
+  await assertRefused(admin.phone, 'org_admin in SSO-only org', admin.id);
 });
 
 test('email/password fallback (unchanged): technician-only user with a password can log in; refused in an SSO-only org', async () => {
@@ -323,6 +344,18 @@ test('no audit row written during this file contains the submitted code', async 
     .prepare('SELECT COUNT(*) AS n FROM activity_log WHERE id > ? AND details LIKE ?')
     .get(auditFloor, `%${CODE}%`);
   assert.equal(Number(row.n), 0);
+});
+
+test('no audit row written during this file contains a full phone number', async () => {
+  await new Promise((r) => setTimeout(r, 200)); // let fire-and-forget writes land
+  assert.ok(phonesUsed.length > 0);
+  for (const phone of phonesUsed) {
+    const digits = phone.replace(/\D/g, '');
+    const row = await app.db
+      .prepare('SELECT COUNT(*) AS n FROM activity_log WHERE id > ? AND details LIKE ?')
+      .get(auditFloor, `%${digits}%`);
+    assert.equal(Number(row.n), 0, `no row contains ${maskPhone(phone)}'s full number`);
+  }
 });
 
 // =================================================================== B. server.js
