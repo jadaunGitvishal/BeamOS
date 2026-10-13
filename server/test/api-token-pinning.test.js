@@ -92,9 +92,23 @@ const removeMember = (wsKey, userId) =>
   app.db.prepare('DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?').run(W[wsKey], userId);
 const setRegion = (wsKey, regionKey) =>
   app.db.prepare('UPDATE workspaces SET region_id = ? WHERE id = ?').run(R[regionKey], W[wsKey]);
+// The PUT writes two fire-and-forget audit rows (region_scopes_set + the request row) after
+// it responds; wait until both have landed so a following auditOf() window can't catch them.
+const SCOPES_PUT_AUDIT = ['region_scopes_set', 'PUT /api/organizations/:orgId/members/:userId/region-scopes'];
 async function setScopes(regionKeys) {
+  const before = (await app.db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM activity_log').get()).m;
   const r = await j('PUT', `/api/organizations/${owner.orgId}/members/${rv.id}/region-scopes`, { token: owner.token, body: { region_ids: regionKeys.map((k) => R[k]) } });
   assert.equal(r.status, 200, JSON.stringify(r.body));
+  const landed = () => app.db
+    .prepare('SELECT action FROM activity_log WHERE id > ? AND user_id = ? AND action IN (?, ?) ORDER BY id')
+    .all(before, owner.id, ...SCOPES_PUT_AUDIT);
+  let seen = [];
+  for (let i = 0; i < 100; i++) {
+    seen = (await landed()).map((row) => row.action);
+    if (SCOPES_PUT_AUDIT.every((a) => seen.includes(a))) return;
+    await new Promise((res) => setTimeout(res, 50));
+  }
+  assert.fail(`setScopes: the PUT's audit rows did not all land within 5s; expected ${JSON.stringify(SCOPES_PUT_AUDIT)}, got ${JSON.stringify(seen)}`);
 }
 async function mint(sessionToken, wsKey, scope = 'write', name = 'pin test') {
   const r = await j('POST', '/api/tokens', { token: sessionToken, ws: W[wsKey], body: { name, scope } });
