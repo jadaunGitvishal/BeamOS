@@ -1,0 +1,8 @@
+# Known server test failures accepted by .github/scripts/check-test-summary.sh
+# (release.yml and server-tests.yml). One exact test name per line, as it appears
+# after "not ok <n> - " in the CI log. Blank lines and lines starting with '#' are
+# ignored.
+#
+# Remove a line as soon as that test is fixed (CI warns when a listed test passes).
+# Never add a line to hide a regression - only add a name confirmed from a CI run.
+endpointAllowed: blocks private/internal when hosted, allows public https
