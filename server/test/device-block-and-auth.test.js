@@ -7,7 +7,7 @@
 //     kill switch), settable by DIRECT DB edit while the server runs (no restart).
 //   - First pairing (token-less, no device_id) and normal auth still work.
 // Direct DB edits below mimic the operator hand-editing the database during an outage.
-// Unique PORT 3987 (not 3982-3986).
+// Server via test/helpers/spawn-server.js (fresh port).
 //
 // Spawns a REAL server.js subprocess (genuine socket.io connection lifecycle + live
 // process state — not something an in-process mock can fake) against the real MySQL
@@ -16,37 +16,21 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
 const { db } = require('../db/database');
 const { cleanupDevices } = require('./helpers/disposable');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3987;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-block-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-block-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc;
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+let srv, BASE;
 const created = { deviceIds: [] };
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await sleep(250); }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'device-block-and-auth' });
+  BASE = srv.base;
 });
 after(async () => {
-  try { proc.kill('SIGKILL'); } catch { /* */ }
-  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  if (srv) await srv.stop();
   // Devices provisioned here via a bare pairing_code (no claiming user/workspace)
   // don't cascade from anything - delete by the exact ids this file created.
   await cleanupDevices(db, created.deviceIds);

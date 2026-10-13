@@ -9,41 +9,23 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3983;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-thr-int-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-thr-int-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc;
+let srv, BASE;
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
-      // warm-up left at default (30s) so the whole test runs in the cold-start window
-      RECONNECT_HARD_CEILING: '8',
-      RECONNECT_WINDOW_MS: '5000',
-      RECONNECT_BASE_MAX: '3',
-    },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'reconnect-throttle-integration', env: {
+    // warm-up left at default (30s) so the whole test runs in the cold-start window
+    RECONNECT_HARD_CEILING: '8',
+    RECONNECT_WINDOW_MS: '5000',
+    RECONNECT_BASE_MAX: '3',
+  } });
+  BASE = srv.base;
 });
 
-after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => { if (srv) await srv.stop(); });
 
 // Provision a brand-new device via a UNIQUE pairing code -> returns {device_id, device_token}.
 function provision() {

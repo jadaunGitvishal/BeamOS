@@ -3,42 +3,28 @@
 // #142 step 5 — content-ack dedup. Repeated identical (device_id, content_id, status)
 // reports are suppressed within config.contentAckDedupMs; a status change or a report
 // after the window passes. Observed via the server log (the handler logs+emits only
-// when it does NOT dedup). Unique PORT (3984) to avoid the collision class.
+// when it does NOT dedup). Server via test/helpers/spawn-server.js (fresh port).
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3984;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-ack-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-ack-' + crypto.randomBytes(4).toString('hex') + '.log');
 const DEDUP_MS = 600;
-let proc;
+let srv, BASE;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Waits until `re` has matched n times in the server output (srv.waitForOutput's error,
+// with the output tail, if not within ms).
+const waitForCount = (re, n, ms = 5000) => srv.waitForOutput(new RegExp(`(?:${re.source}[\\s\\S]*?){${n}}`, re.flags.replace('g', '')), ms);
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', CONTENT_ACK_DEDUP_MS: String(DEDUP_MS) },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ }
-    await sleep(250);
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'content-ack-dedup', env: { CONTENT_ACK_DEDUP_MS: String(DEDUP_MS) } });
+  BASE = srv.base;
 });
 
-after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => { if (srv) await srv.stop(); });
 
 function provision() {
   const code = String(crypto.randomInt(100000, 1000000));
@@ -77,9 +63,15 @@ test('repeated identical content-acks are deduped; window-expiry and status-chan
   await sleep(400);
   try { sock.close(); } catch { /* */ }
 
-  const log = fs.readFileSync(LOG, 'utf8');
-  const ready = (log.match(new RegExp(`content ${cid}: ready`, 'g')) || []).length;
-  const err = (log.match(new RegExp(`content ${cid}: error`, 'g')) || []).length;
+  // The expected lines must APPEAR: wait for them rather than trusting the sleeps alone,
+  // then count exactly as before (the sleeps above are still the settle time).
+  const READY = new RegExp(`content ${cid}: ready`, 'g');
+  const ERROR = new RegExp(`content ${cid}: error`, 'g');
+  await waitForCount(READY, 2);
+  await waitForCount(ERROR, 1);
+  const log = srv.output();
+  const ready = (log.match(READY) || []).length;
+  const err = (log.match(ERROR) || []).length;
   assert.equal(ready, 2, 'a burst of identical "ready" collapses to one; a second after the window passes -> 2 total');
   assert.equal(err, 1, 'a status change is not deduped');
 });

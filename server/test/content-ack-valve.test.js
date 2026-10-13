@@ -4,41 +4,30 @@
 // forced to 0 so the band is CRITICAL from the first sample; rate budget is set high
 // so we isolate the VALVE (not the per-device rate limit). Under critical: content-
 // acks are shed (no log/emit), while a reconnect AND an HTTP/dashboard request still
-// process, and the valve edge is logged once. Unique PORT 3986.
+// process, and the valve edge is logged once. Server via test/helpers/spawn-server.js.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3986;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-valve-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-valve-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc;
+let srv, BASE;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Waits until `re` has matched n times in the server output (srv.waitForOutput's error,
+// with the output tail, if not within ms).
+const waitForCount = (re, n, ms = 5000) => srv.waitForOutput(new RegExp(`(?:${re.source}[\\s\\S]*?){${n}}`, re.flags.replace('g', '')), ms);
+const countOf = (re) => (srv.output().match(re) || []).length;   // re must carry the g flag
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
-      LAG_CRITICAL_MS: '1', LAG_ELEVATED_MS: '1', LAG_SAMPLE_INTERVAL_MS: '150', // tiny thresholds (NOT 0 — config uses `|| default`, 0 is falsy) -> band critical immediately
-      CONTENT_ACK_MAX_PER_WINDOW: '1000', CONTENT_ACK_RATE_WINDOW_MS: '10000',   // high, so the VALVE is what sheds
-    },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await sleep(250); }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'content-ack-valve', env: {
+    LAG_CRITICAL_MS: '1', LAG_ELEVATED_MS: '1', LAG_SAMPLE_INTERVAL_MS: '150', // tiny thresholds (NOT 0 — config uses `|| default`, 0 is falsy) -> band critical immediately
+    CONTENT_ACK_MAX_PER_WINDOW: '1000', CONTENT_ACK_RATE_WINDOW_MS: '10000',   // high, so the VALVE is what sheds
+  } });
+  BASE = srv.base;
   await sleep(600); // let the valve open (>=1 sample at 150ms in the critical band)
 });
-after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => { if (srv) await srv.stop(); });
 
 function provision() {
   const code = String(crypto.randomInt(100000, 1000000));
@@ -61,7 +50,8 @@ function openRegistered(dev) {
 }
 
 test('valve OPEN under critical: content-acks are shed, reconnect + HTTP still process', async () => {
-  const log0 = fs.readFileSync(LOG, 'utf8');
+  await srv.waitForOutput(/\[shed\] global valve OPEN/, 5000);   // the valve edge must APPEAR
+  const log0 = srv.output();
   assert.ok(/\[shed\] global valve OPEN/.test(log0), 'valve edge logged once on entering critical');
 
   // 1) content-acks under critical -> shed (no log/emit)
@@ -70,8 +60,15 @@ test('valve OPEN under critical: content-acks are shed, reconnect + HTTP still p
   assert.ok(registered, 'a device can still register/reconnect under critical (reconnects always processed)');
   for (let i = 0; i < 6; i++) { sock.emit('device:content-ack', { device_id: dev.id, content_id: 'v' + i, status: 'ready' }); await sleep(40); }
   await sleep(300);
+  // "None logged" needs a settle point: this socket's disconnect line. Socket.io handles a
+  // socket's events in order, so once its disconnect is logged every ack it sent has been
+  // processed. Count the device's disconnect lines first (its provisioning socket may
+  // already have logged one), then wait for the next.
+  const DISCONNECTED = new RegExp(`Device disconnected: ${dev.id}`, 'g');
+  const disconnectsBefore = countOf(DISCONNECTED);
   try { sock.close(); } catch { /* */ }
-  const contentLines = fs.readFileSync(LOG, 'utf8').split('\n').filter(l => l.includes(dev.id) && l.includes('content ')).length;
+  await waitForCount(DISCONNECTED, disconnectsBefore + 1);
+  const contentLines = srv.output().split('\n').filter(l => l.includes(dev.id) && l.includes('content ')).length;
   assert.equal(contentLines, 0, 'all content-acks shed by the valve under critical (none logged/emitted)');
 
   // 2) a fresh reconnect still registers (reconnects are never shed)

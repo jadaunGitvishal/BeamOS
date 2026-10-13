@@ -4,8 +4,8 @@
 // (no live socket + stale heartbeat) must be reclaimable; a genuinely-live device
 // must still be rejected; the deferral log must not flood. Devices are seeded
 // directly via the real db module (mimics the real DB state + avoids the
-// disconnect-debounce window leaving a stale liveConn). Unique PORT 3988 (not
-// 3982-3987).
+// disconnect-debounce window leaving a stale liveConn). Server via
+// test/helpers/spawn-server.js (fresh port).
 //
 // Spawns a REAL server.js subprocess (genuine socket.io connection lifecycle,
 // genuine in-memory liveConn/reclaim-deferral state, and real elapsed-time
@@ -15,37 +15,26 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
 const { db } = require('../db/database');
 const { randTag, cleanupDevices, cleanupFingerprints } = require('./helpers/disposable');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3988;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-recl-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-recl-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc;
+let srv, BASE;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Waits until `re` has matched n times in the server output (srv.waitForOutput's error,
+// with the output tail, if not within ms).
+const waitForCount = (re, n, ms = 5000) => srv.waitForOutput(new RegExp(`(?:${re.source}[\\s\\S]*?){${n}}`, re.flags.replace('g', '')), ms);
+const countOf = (re) => (srv.output().match(re) || []).length;   // re must carry the g flag
 const created = { deviceIds: [], fingerprints: [] };
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', RECLAIM_SETTLE_SECONDS: '300', RECLAIM_REJECT_LOG_WINDOW_MS: '60000' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await sleep(250); }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'fingerprint-reclaim', env: { RECLAIM_SETTLE_SECONDS: '300', RECLAIM_REJECT_LOG_WINDOW_MS: '60000' } });
+  BASE = srv.base;
 });
 after(async () => {
-  try { proc.kill('SIGKILL'); } catch { /* */ }
-  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  if (srv) await srv.stop();
   await cleanupFingerprints(db, created.fingerprints);
   await cleanupDevices(db, created.deviceIds);
   await db.close();
@@ -124,8 +113,13 @@ test('log noise: a retried reclaim logs at most once per device per window', asy
   const dev = await seedDevice(fp, { token: 'tok4', heartbeatAgo: 5 }); // recent -> reclaim deferred
   const live = await connectLive({ device_id: dev.id, device_token: 'tok4', device_info: {} });
   for (let i = 0; i < 4; i++) { const r = await attempt({ pairing_code: rnd(), fingerprint: fp }); assert.ok(r.authError, 'each retry is deferred'); }
+  // "At most one" needs a settle point: the live socket's disconnect line, logged after
+  // the server has handled everything before it. Count first, then wait for the next.
+  const DISCONNECTED = new RegExp(`Device disconnected: ${dev.id}`, 'g');
+  const disconnectsBefore = countOf(DISCONNECTED);
   try { live.sock.close(); } catch { /* */ }
   await sleep(200);
-  const lines = fs.readFileSync(LOG, 'utf8').split('\n').filter(l => l.includes('reclaim deferred for ' + dev.id)).length;
+  await waitForCount(DISCONNECTED, disconnectsBefore + 1);
+  const lines = srv.output().split('\n').filter(l => l.includes('reclaim deferred for ' + dev.id)).length;
   assert.ok(lines <= 1, `at most one deferral log per window (got ${lines}); no double-log / per-2s flood`);
 });
