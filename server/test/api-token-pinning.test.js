@@ -28,6 +28,7 @@ const { db, initDb } = require('../db/database');
 const { deleteUserCascade } = require('../lib/user-deletion');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
+const { waitForAuditRows, maxAuditId } = require('./helpers/wait-for-audit');
 
 const TAG = randTag();
 const PASSWORD = 'pin-test-pass-1';
@@ -96,19 +97,10 @@ const setRegion = (wsKey, regionKey) =>
 // it responds; wait until both have landed so a following auditOf() window can't catch them.
 const SCOPES_PUT_AUDIT = ['region_scopes_set', 'PUT /api/organizations/:orgId/members/:userId/region-scopes'];
 async function setScopes(regionKeys) {
-  const before = (await app.db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM activity_log').get()).m;
+  const sinceId = await maxAuditId(app.db);
   const r = await j('PUT', `/api/organizations/${owner.orgId}/members/${rv.id}/region-scopes`, { token: owner.token, body: { region_ids: regionKeys.map((k) => R[k]) } });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  const landed = () => app.db
-    .prepare('SELECT action FROM activity_log WHERE id > ? AND user_id = ? AND action IN (?, ?) ORDER BY id')
-    .all(before, owner.id, ...SCOPES_PUT_AUDIT);
-  let seen = [];
-  for (let i = 0; i < 100; i++) {
-    seen = (await landed()).map((row) => row.action);
-    if (SCOPES_PUT_AUDIT.every((a) => seen.includes(a))) return;
-    await new Promise((res) => setTimeout(res, 50));
-  }
-  assert.fail(`setScopes: the PUT's audit rows did not all land within 5s; expected ${JSON.stringify(SCOPES_PUT_AUDIT)}, got ${JSON.stringify(seen)}`);
+  await waitForAuditRows(app.db, { sinceId, userId: owner.id, actions: SCOPES_PUT_AUDIT });
 }
 async function mint(sessionToken, wsKey, scope = 'write', name = 'pin test') {
   const r = await j('POST', '/api/tokens', { token: sessionToken, ws: W[wsKey], body: { name, scope } });
@@ -253,6 +245,7 @@ test('unchanged: a token with access works, and X-Workspace-Id / ?workspace_id p
 });
 
 test('unchanged: revoked, expired (Ref 34), deactivated-owner and deleted-owner tokens', async () => {
+  const sinceId = await maxAuditId(app.db);
   const revoked = await mint(user.token, 'A', 'read', 'pin revoked');
   assert.equal((await j('DELETE', `/api/tokens/${revoked.id}`, { token: user.token })).status, 200);
   const r1 = await j('GET', '/api/devices', { token: revoked.token });
@@ -285,6 +278,10 @@ test('unchanged: revoked, expired (Ref 34), deactivated-owner and deleted-owner 
   const r4 = await j('GET', '/api/devices', { token: goneTok.token });
   assert.equal(r4.status, 401);
   assert.deepEqual(r4.body, { error: 'Invalid or revoked API token' }); // api_tokens cascade with the user
+
+  // The 4 mints + 1 revoke above each write a fire-and-forget request row; wait for all 5 so
+  // the next test's auditOf() window can't catch them. (Not by user: one owner is deleted.)
+  await waitForAuditRows(app.db, { sinceId, actions: ['POST /api/tokens/', 'DELETE /api/tokens/:id'], count: 5 });
 });
 
 // ------------------------------------------------------------- drift: owner removed from A

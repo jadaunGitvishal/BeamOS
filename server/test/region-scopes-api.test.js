@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
+const { waitForAuditRows } = require('./helpers/wait-for-audit');
 
 const TAG = randTag();
 let app;
@@ -139,7 +140,12 @@ test('changing the role away from regional_viewer deletes the scopes; switching 
   assert.deepEqual(await scopeRows(rv.id), [], 'old scopes do not come back');
   assert.equal((await j('PUT', scopesPath(rv.id), { token: owner.token, body: { region_ids: [R.r2] } })).status, 200);
 
-  await new Promise((r) => setTimeout(r, 250)); // activityLogger is fire-and-forget
+  // activityLogger is fire-and-forget: wait for all 8 rows of the 4 PUTs above
+  // (2 scopes PUTs: request row + region_scopes_set; 2 role PUTs: request row + org_member_role_changed).
+  await waitForAuditRows(app.db, {
+    sinceId: start, userId: owner.id, count: 8,
+    actions: ['PUT /api/organizations/:orgId/members/:userId/region-scopes', 'region_scopes_set', 'PUT /api/organizations/:id/members/:userId', 'org_member_role_changed'],
+  });
   const rows = await app.db
     .prepare('SELECT action, details FROM activity_log WHERE id > ? AND user_id = ? ORDER BY id')
     .all(start, owner.id);

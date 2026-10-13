@@ -15,6 +15,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
+const { waitForAuditRows, maxAuditId } = require('./helpers/wait-for-audit');
 
 process.env.JWT_SECRET = 'test-secret-tickets';
 
@@ -164,8 +165,10 @@ const auditCount = (action) =>
 
 test('workspace_editor can create a ticket; defaults + activity_log row', async () => {
   const before = auditCount('ticket_created');
+  const sinceId = await maxAuditId(db);
   const r = await call('POST', tix('ws-a'), T.editor, { title: 'Screen is black' });
   assert.equal(r.status, 201);
+  await waitForAuditRows(db, { sinceId, userId: 'u-editor', actions: ['ticket_created'] });
   const t = await r.json();
   assert.equal(t.title, 'Screen is black');
   assert.equal(t.workspace_id, 'ws-a');
@@ -237,6 +240,7 @@ test('PATCH: status/priority/owner transitions + resolved_at lifecycle + audit',
   const t = await (await call('POST', tix('ws-a'), T.editor, { title: 'lifecycle', priority: 'low' })).json();
   const url = `${tix('ws-a')}/${t.id}`;
   const before = auditCount('ticket_updated');
+  const sinceId = await maxAuditId(db);
 
   let u = await (await call('PATCH', url, T.editor, { status: 'in_progress', priority: 'high' })).json();
   assert.equal(u.status, 'in_progress');
@@ -259,6 +263,7 @@ test('PATCH: status/priority/owner transitions + resolved_at lifecycle + audit',
   u = await (await call('PATCH', url, T.editor, { owner_category: 'customer_it' })).json();
   assert.equal(u.owner_category, 'customer_it');
 
+  await waitForAuditRows(db, { sinceId, userId: 'u-editor', actions: ['ticket_updated'], count: 5 });
   assert.equal(auditCount('ticket_updated'), before + 5);
 });
 

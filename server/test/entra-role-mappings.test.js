@@ -12,6 +12,7 @@ const crypto = require('node:crypto');
 const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers, cleanupUser } = require('./helpers/disposable');
+const { waitForAuditRows, maxAuditId } = require('./helpers/wait-for-audit');
 
 const TAG = randTag();
 const PASSWORD = 'ref7-map-pass-1';
@@ -170,6 +171,7 @@ test("DELETE of another org's mapping (or a bad id) -> 404, mapping kept", async
 });
 
 test('happy path: org admin adds, lists (with workspace names) and deletes; mutations audit-logged', async () => {
+  const sinceId = await maxAuditId(app.db);
   const a = await j('POST', path(owner.orgId), { token: orgAdmin.token, body: { claim_value: claim('Happy'), role: 'org_admin' } });
   assert.equal(a.status, 201, JSON.stringify(a.body));
   assert.deepEqual(Object.keys(a.body).sort(), ['claim_value', 'id', 'role', 'workspace_id', 'workspace_name']);
@@ -191,8 +193,11 @@ test('happy path: org admin adds, lists (with workspace names) and deletes; muta
   assert.equal((await j('DELETE', path(owner.orgId, a.body.id), { token: orgAdmin.token })).status, 404, 'already gone');
   assert.equal((await j('DELETE', path(owner.orgId, b.body.id), { token: owner.token })).status, 200);
 
-  // activityLogger is fire-and-forget; give it a moment.
-  await new Promise((r) => setTimeout(r, 200));
+  // activityLogger is fire-and-forget: wait for the 2 POST + 1 DELETE request rows.
+  await waitForAuditRows(app.db, {
+    sinceId, userId: orgAdmin.id, count: 3,
+    actions: ['POST /api/organizations/:orgId/entra-role-mappings', 'DELETE /api/organizations/:orgId/entra-role-mappings/:id'],
+  });
   const audit = await app.db
     .prepare("SELECT action FROM activity_log WHERE user_id = ? AND action LIKE '% /api/organizations/:orgId/entra-role-mappings%' ORDER BY id")
     .all(orgAdmin.id);

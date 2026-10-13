@@ -11,6 +11,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
+const { waitForAuditRows, maxAuditId } = require('./helpers/wait-for-audit');
 
 process.env.JWT_SECRET = 'test-secret-campaigns';
 
@@ -153,10 +154,12 @@ const plusDays = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(
 
 test('editor creates a campaign; defaults + activity_log row', async () => {
   const before = auditCount('campaign_created');
+  const sinceId = await maxAuditId(db);
   const r = await call('POST', camps('ws-a'), T.editor, {
     name: 'Q3 Launch', start_date: plusDays(-1), end_date: plusDays(5),
   });
   assert.equal(r.status, 201);
+  await waitForAuditRows(db, { sinceId, userId: 'u-editor', actions: ['campaign_created'] });
   const c = await r.json();
   assert.equal(c.name, 'Q3 Launch');
   assert.equal(c.workspace_id, 'ws-a');
@@ -240,6 +243,7 @@ test('PATCH: fields + date-window revalidation + no-op + 404s', async () => {
   const c = await (await call('POST', camps('ws-a'), T.editor, { name: 'patch me', start_date: plusDays(1), end_date: plusDays(10) })).json();
   const url = `${camps('ws-a')}/${c.id}`;
   const before = auditCount('campaign_updated');
+  const sinceId = await maxAuditId(db);
 
   let u = await (await call('PATCH', url, T.editor, { name: 'patched', target_plays_per_day: 12, playlist_id: 'pl-a' })).json();
   assert.equal(u.name, 'patched');
@@ -261,6 +265,7 @@ test('PATCH: fields + date-window revalidation + no-op + 404s', async () => {
   db.prepare("INSERT INTO campaigns (id,workspace_id,name,start_date,end_date) VALUES ('c-b','ws-b','B camp','2026-01-01','2026-02-01')").run();
   assert.equal((await call('PATCH', `${camps('ws-a')}/c-b`, T.editor, { name: 'x' })).status, 404, 'campaign in ws-b not visible under ws-a');
 
+  await waitForAuditRows(db, { sinceId, userId: 'u-editor', actions: ['campaign_updated'], count: 3 });
   assert.equal(auditCount('campaign_updated'), before + 3);
 });
 
@@ -269,10 +274,12 @@ test('DELETE removes only the wrapper - the playlist survives; activity_log; 404
     name: 'doomed', playlist_id: 'pl-a', start_date: TODAY, end_date: plusDays(5),
   })).json();
   const before = auditCount('campaign_deleted');
+  const sinceId = await maxAuditId(db);
 
   const del = await call('DELETE', `${camps('ws-a')}/${c.id}`, T.editor);
   assert.equal(del.status, 200);
   assert.deepEqual(await del.json(), { success: true });
+  await waitForAuditRows(db, { sinceId, userId: 'u-editor', actions: ['campaign_deleted'] });
 
   assert.equal(db.prepare('SELECT COUNT(*) n FROM campaigns WHERE id = ?').get(c.id).n, 0, 'campaign gone');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM playlists WHERE id = 'pl-a'").get().n, 1, 'playlist untouched');

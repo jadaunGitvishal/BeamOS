@@ -28,6 +28,7 @@ const assert = require('node:assert/strict');
 const zlib = require('node:zlib');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
+const { waitForAuditRows, maxAuditId } = require('./helpers/wait-for-audit');
 const config = require('../config');
 const svc = require('../services/data-platform-export');
 
@@ -133,6 +134,7 @@ test('status: admin sees enabled flag + every domain, nothing exported yet', asy
 test('run-now: exports ONLY this workspace, advances its watermarks, returns written objects', async () => {
   const s3 = fakeS3();
   svc.__setS3Client(s3);
+  const sinceId = await maxAuditId(db);
   const r = await jf(runUrl(), authed(S.jwtB, 'POST'));
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.workspace_id, S.wsA);
@@ -150,6 +152,7 @@ test('run-now: exports ONLY this workspace, advances its watermarks, returns wri
   assert.deepEqual(st.body.domains, r.body.status.domains);
 
   // activity trail for the manual trigger
+  await waitForAuditRows(db, { sinceId, userId: S.userB, actions: ['data_platform_export_run'] });
   const act = await db
     .prepare("SELECT COUNT(*) AS n FROM activity_log WHERE user_id = ? AND action = 'data_platform_export_run'")
     .get(S.userB);
