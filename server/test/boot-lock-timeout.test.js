@@ -15,16 +15,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
 const mysql = require('mysql2/promise');
 
 const config = require('../config');
 const mysqlTls = require('../lib/mysql-tls');
 const { assertSafeTestDb, isAllowedTestDbName } = require('../lib/test-db-guard');
 const { resolveBootLockWaitTimeout, runStartupSchema } = require('../db/database');
-const { freePort } = require('./helpers/free-port');
+const { startServer } = require('./helpers/spawn-server');
 
 const DB_NAME = `beamos_test_boot_lock_${crypto.randomBytes(4).toString('hex')}`;
 const SERVER_DIR = path.join(__dirname, '..');
@@ -60,31 +58,6 @@ function within(p, ms, what) {
   let t;
   return Promise.race([p, new Promise((_, reject) => { t = setTimeout(() => reject(new Error(`${what} did not finish within ${ms}ms`)), ms); })])
     .finally(() => clearTimeout(t));
-}
-
-// Spawns server.js against the scratch database; resolves with its exit code and output.
-async function spawnServer(extraEnv, ms = 30000) {
-  const port = await freePort();
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'st-bootlock-'));
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: SERVER_DIR,
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', SELF_HOSTED: 'true', NODE_ENV: 'test', PORT: String(port), DATA_DIR: dataDir, MYSQL_DATABASE: DB_NAME, ...extraEnv },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let out = '';
-  child.stdout.on('data', (d) => { out += d; });
-  child.stderr.on('data', (d) => { out += d; });
-  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
-  try {
-    const r = await within(exited, ms, 'server.js');
-    return { ...r, out };
-  } catch (e) {
-    e.message += `\n--- server output ---\n${out.slice(-2000)}`;
-    throw e;
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
 }
 
 test.before(async () => {
@@ -134,10 +107,12 @@ test('BOOT_LOCK_WAIT_TIMEOUT_S: unset -> 60; whole seconds accepted; 0, -1, "abc
 
 test('server.js refuses to start with an invalid BOOT_LOCK_WAIT_TIMEOUT_S (non-zero exit, clear message)', async () => {
   for (const bad of ['0', '-1', 'abc']) {
-    const r = await spawnServer({ BOOT_LOCK_WAIT_TIMEOUT_S: bad });
+    const r = await startServer({
+      name: `boot-lock-invalid-${bad}`, env: { MYSQL_DATABASE: DB_NAME, BOOT_LOCK_WAIT_TIMEOUT_S: bad }, expectExit: true, bootTimeoutMs: 30000,
+    });
     assert.notEqual(r.code, 0, `exits non-zero for "${bad}" (code ${r.code}, signal ${r.signal})`);
-    assert.match(r.out, /\[boot\] fatal error during startup/, `startup failure reported for "${bad}"`);
-    assert.match(r.out, new RegExp(`BOOT_LOCK_WAIT_TIMEOUT_S must be a whole number of seconds from 1 to 31536000 \\(got "${bad}"\\)`));
+    assert.match(r.output, /\[boot\] fatal error during startup/, `startup failure reported for "${bad}"`);
+    assert.match(r.output, new RegExp(`BOOT_LOCK_WAIT_TIMEOUT_S must be a whole number of seconds from 1 to 31536000 \\(got "${bad}"\\)`));
   }
 });
 
@@ -158,12 +133,14 @@ test('startup schema phase gives up after BOOT_LOCK_WAIT_TIMEOUT_S with ER_LOCK_
 
 test('server.js exits non-zero with the lock-wait-timeout message while the lock is held', async () => {
   const t0 = Date.now();
-  const r = await spawnServer({ BOOT_LOCK_WAIT_TIMEOUT_S: '2' });
+  const r = await startServer({
+    name: 'boot-lock-held', env: { MYSQL_DATABASE: DB_NAME, BOOT_LOCK_WAIT_TIMEOUT_S: '2' }, expectExit: true, bootTimeoutMs: 30000,
+  });
   assert.notEqual(r.code, 0, `exits non-zero (code ${r.code}, signal ${r.signal})`);
-  assert.match(r.out, /\[boot\] fatal error during startup/);
-  assert.match(r.out, MESSAGE);
-  assert.doesNotMatch(r.out, /missing required schema/, 'reported as a lock wait, not as a broken schema');
-  assert.doesNotMatch(r.out, /MySQL ready/, 'never reported ready');
+  assert.match(r.output, /\[boot\] fatal error during startup/);
+  assert.match(r.output, MESSAGE);
+  assert.doesNotMatch(r.output, /missing required schema/, 'reported as a lock wait, not as a broken schema');
+  assert.doesNotMatch(r.output, /MySQL ready/, 'never reported ready');
   assert.ok(Date.now() - t0 < 25000, 'gave up instead of hanging');
 });
 
