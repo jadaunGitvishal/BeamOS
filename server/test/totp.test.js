@@ -6,18 +6,11 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { authenticator } = require('otplib');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3979;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-totp-test-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-totp-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc;
+let srv, BASE;
 
 async function jfetch(p, opts = {}) {
   const res = await fetch(BASE + p, opts);
@@ -28,20 +21,10 @@ const auth = (tok, extra = {}) => ({ headers: { Authorization: 'Bearer ' + tok, 
 const post = (tok, obj, extra) => ({ method: 'POST', ...auth(tok, extra), body: JSON.stringify(obj || {}) });
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* not yet */ }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'totp' });
+  BASE = srv.base;
 });
-after(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } });
+after(async () => { if (srv) await srv.stop(); });
 
 const PW = 'Passw0rd123';
 async function newUser() {

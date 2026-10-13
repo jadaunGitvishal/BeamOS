@@ -12,22 +12,14 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
 const { PUBLIC_ROUTERS, JWT_ONLY_ROUTERS } = require('../config/api-surface');
 const { db } = require('../db/database');
 const { deleteUserCascade } = require('../lib/user-deletion');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3978;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-api-test-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-api-test-' + crypto.randomBytes(4).toString('hex') + '.log');
-
-let proc;
+let srv, BASE;
 const S = {}; // shared fixtures populated in before()
 
 async function jfetch(p, opts = {}) {
@@ -40,19 +32,8 @@ const auth = (tok, extra = {}) => ({ headers: { Authorization: 'Bearer ' + tok, 
 const post = (tok, obj, extra) => ({ method: 'POST', ...auth(tok, extra), body: JSON.stringify(obj) });
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  // wait for the server to answer /api/status
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* not yet */ }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'api' });
+  BASE = srv.base;
 
   // user1 (first user -> platform_admin, workspace A); user2 (workspace B). Randomly
   // tagged (not the old fixed u1@test.local/u2@test.local) so a run against the real
@@ -118,8 +99,7 @@ before(async () => {
 });
 
 after(async () => {
-  if (proc) proc.kill('SIGKILL');
-  for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+  if (srv) await srv.stop();
   // Disposable-ID + cleanup discipline (test/helpers/disposable.js's pattern, inlined
   // here since this file spawns its own subprocess rather than using
   // helpers/inprocess-app.js): both users deleted via the real cascade path, which

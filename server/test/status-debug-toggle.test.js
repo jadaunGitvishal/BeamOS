@@ -15,20 +15,13 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
 const { db } = require('../db/database');
 const { cleanupUsers, cleanupDevices } = require('./helpers/disposable');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3998;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-statusdbg-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-statusdbg-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc;
+let srv, BASE;
 let priorDebugSetting;
 const created = { userIds: [], deviceIds: [] };
 
@@ -40,20 +33,12 @@ before(async () => {
   // previous run left behind.
   await db.prepare("INSERT INTO app_settings (`key`, value) VALUES ('status_debug_enabled', 'true') ON DUPLICATE KEY UPDATE value = 'true'").run();
 
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await new Promise(r => setTimeout(r, 250)); }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'status-debug-toggle' });
+  BASE = srv.base;
 });
 after(async () => {
   try {
-    try { proc.kill('SIGKILL'); } catch { /* */ }
-    for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+    if (srv) await srv.stop();
     if (priorDebugSetting === null) await db.prepare("DELETE FROM app_settings WHERE `key` = 'status_debug_enabled'").run();
     else if (priorDebugSetting !== undefined) await db.prepare("UPDATE app_settings SET value = ? WHERE `key` = 'status_debug_enabled'").run(priorDebugSetting); // undefined = never recorded: leave it
     await cleanupDevices(db, created.deviceIds);

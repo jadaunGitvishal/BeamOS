@@ -5,35 +5,24 @@
 // that to a LIVE socket at pair time, but a screen paired-while-disconnected or that
 // reconnects after pairing never got it and sat on Connect forever (Bold). Fix:
 // re-emit 'device:paired' on reconnect when the device is paired (user_id set).
-// Uses the EXISTING client event — no client/protocol change. Unique PORT 3989.
+// Uses the EXISTING client event — no client/protocol change. Server via test/helpers/spawn-server.js.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3989;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-pair-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-pair-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc, JWT;
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+let srv, BASE, JWT;
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' }, stdio: ['ignore', logFd, logFd] });
-  let up = false;
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await sleep(250); }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'device-pairing-notify' });
+  BASE = srv.base;
   // first user -> admin (self-hosted), gives a workspace for the pair endpoint
   const r = await fetch(BASE + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'op@test.local', password: 'test12345', name: 'Op' }) });
   JWT = (await r.json()).token;
 });
-after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => { if (srv) await srv.stop(); });
 
 // First pairing: device registers with a pairing code -> gets its device_id + token.
 function provisionWithCode(code) {

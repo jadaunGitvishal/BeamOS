@@ -7,17 +7,13 @@
 //   A. lib/device-token.js units.
 //   B. backfillDeviceTokens() core against an in-memory SQLite shim - NEVER the
 //      real DB: the backfill is irreversible and would hash every real device.
-//   C. A REAL server.js subprocess + real socket.io device client (PORT 3996):
+//   C. A REAL server.js subprocess (test/helpers/spawn-server.js) + real socket.io device client:
 //      first pairing stores the hash, reconnect with the raw token works and the
 //      echoed token is unchanged, a legacy plaintext row still works and is NOT
 //      silently rewritten, a wrong token is refused.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
 
@@ -110,13 +106,8 @@ test('backfill is compare-and-set: a token re-issued mid-run is not overwritten'
 
 // ------------------------------------------- C. real server.js + socket client
 
-const PORT = 3996;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-devtok-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-devtok-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc, db, ioClient, cleanupDevices;
+let srv, BASE, db, ioClient, cleanupDevices;
 const created = [];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function register(payload) {
   return new Promise((resolve) => {
@@ -136,19 +127,12 @@ test.describe('real server: device_token at rest', () => {
     ({ db } = require('../db/database'));
     ioClient = require('socket.io-client');
     ({ cleanupDevices } = require('./helpers/disposable'));
-    const logFd = fs.openSync(LOG, 'w');
-    proc = spawn(process.execPath, ['server.js'], {
-      cwd: path.join(__dirname, '..'),
-      env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-      stdio: ['ignore', logFd, logFd],
-    });
-    let up = false;
-    for (let i = 0; i < 80; i++) { try { if ((await fetch(BASE + '/api/status')).ok) { up = true; break; } } catch { /* */ } await sleep(250); }
-    if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+    const { startServer } = require('./helpers/spawn-server');
+    srv = await startServer({ name: 'device-token' });
+    BASE = srv.base;
   });
   test.after(async () => {
-    try { proc.kill('SIGKILL'); } catch { /* */ }
-    for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+    if (srv) await srv.stop();
     await cleanupDevices(db, created);
     await db.close();
   });

@@ -8,22 +8,15 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 // The spawned server and this process share the real MySQL test DB (beamos_test via
 // npm test): seed / read through the same db module, test-owned rows only.
 const { db } = require('../db/database');
 const { cleanupUser } = require('./helpers/disposable');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3994;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-mute-test-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-mute-' + crypto.randomBytes(4).toString('hex') + '.log');
 const PW = 'Passw0rd123';
-let proc;
+let srv, BASE;
 const S = {};
 
 async function jfetch(p, opts = {}) {
@@ -36,18 +29,8 @@ const post = (tok, obj) => ({ method: 'POST', ...auth(tok), body: JSON.stringify
 const put = (tok, obj) => ({ method: 'PUT', ...auth(tok), body: JSON.stringify(obj || {}) });
 
 before(async () => {
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'mute' });
+  BASE = srv.base;
 
   const reg = await jfetch('/api/auth/register', post(null, { email: 'mute-' + crypto.randomBytes(4).toString('hex') + '@x.local', password: PW }));
   S.jwt = reg.body.token;
@@ -68,13 +51,12 @@ before(async () => {
 // Only this file's rows: the content row (cascades its playlist_items), then the
 // registered user and everything their signup created (org, workspace, playlist).
 after(async () => {
-  try { proc.kill('SIGKILL'); } catch { /* */ }
+  if (srv) await srv.stop();
   try {
     if (S.contentId) await db.prepare('DELETE FROM content WHERE id = ?').run(S.contentId);
     if (S.userId) await cleanupUser(db, S.userId);
   } finally {
     await db.close();
-    for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
   }
 });
 

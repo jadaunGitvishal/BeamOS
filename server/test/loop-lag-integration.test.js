@@ -6,18 +6,10 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
-const crypto = require('node:crypto');
 const { db } = require('../db/database');
+const { startServer } = require('./helpers/spawn-server');
 
-const PORT = 3982;
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = path.join(os.tmpdir(), 'st-lag-int-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-lag-int-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc;
+let srv, BASE;
 let startId; // event_loop_lag.id watermark, so the row-count assertion below counts
              // only THIS test's own sampling - the real shared database already has
              // a large pre-existing event_loop_lag history from genuine server
@@ -35,31 +27,19 @@ before(async () => {
   priorDebugSetting = existing ? existing.value : null; // null = "no row" (falls back to config default)
   await db.prepare("INSERT INTO app_settings (`key`, value) VALUES ('status_debug_enabled', 'true') ON DUPLICATE KEY UPDATE value = 'true'").run();
 
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test',
-      LAG_SAMPLE_INTERVAL_MS: '200',          // sample fast
-      LAG_FLUSH_MS: '200',                    // #146 Item E: batch-insert fast so persistence is observable in-test
-      LAG_TELEMETRY_RETENTION_DAYS: '0.00001', // ~0.86s retention
-      LAG_PRUNE_INTERVAL_MS: '400',           // prune often
-    },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* not yet */ }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'loop-lag-integration', env: {
+    LAG_SAMPLE_INTERVAL_MS: '200',          // sample fast
+    LAG_FLUSH_MS: '200',                    // #146 Item E: batch-insert fast so persistence is observable in-test
+    LAG_TELEMETRY_RETENTION_DAYS: '0.00001', // ~0.86s retention
+    LAG_PRUNE_INTERVAL_MS: '400',           // prune often
+  } });
+  BASE = srv.base;
   startId = (await db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM event_loop_lag').get()).id;
 });
 
 after(async () => {
   try {
-    try { proc.kill('SIGKILL'); } catch { /* */ }
-    for (const f of [DATA_DIR, LOG]) { try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* */ } }
+    if (srv) await srv.stop();
     // Restore the real, global status_debug_enabled setting to whatever it was
     // before this test touched it (see `before()`) - not a disposable row this
     // file owns, so "cleanup" here means putting it back, not deleting it.

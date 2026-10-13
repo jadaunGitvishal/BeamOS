@@ -2,23 +2,18 @@
 
 // #144 — HTTP integration: the real /api/update/check endpoint with the breaker wired.
 // Proves end-to-end behavior + the device_id passthrough/keying. Rapid requests stay
-// within the 60s rate window, so THRESHOLD(3) trips on the 4th. Port from freePort().
+// within the 60s rate window, so THRESHOLD(3) trips on the 4th. Server (and port) via
+// test/helpers/spawn-server.js.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
-const crypto = require('node:crypto');
 
-const { freePort } = require('./helpers/free-port');
+const { startServer } = require('./helpers/spawn-server');
 
-let PORT, BASE; // assigned in before() from freePort()
-const DATA_DIR = path.join(os.tmpdir(), 'st-ota-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-ota-' + crypto.randomBytes(4).toString('hex') + '.log');
-let proc, LATEST;
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+let srv, BASE, DATA_DIR, LATEST;
 const check = async (version, deviceId) => {
   const q = `version=${encodeURIComponent(version)}` + (deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : '');
   const r = await fetch(`${BASE}/api/update/check?${q}`);
@@ -26,21 +21,19 @@ const check = async (version, deviceId) => {
 };
 
 before(async () => {
-  PORT = await freePort();
-  BASE = `http://127.0.0.1:${PORT}`;
   // the breaker only reports update_available when an APK actually exists — give the
   // test server a dummy one. lib/apk-cache.js checks DATA_DIR/BeamOS.apk FIRST, so
-  // this fake wins over any real repo-root APK.
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  // this fake wins over any real repo-root APK. The DATA_DIR has to exist before boot,
+  // so this file creates it and passes it in (caller env wins over the helper's own).
+  DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'st-ota-'));
   fs.writeFileSync(path.join(DATA_DIR, 'BeamOS.apk'), Buffer.alloc(1024, 1));
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' }, stdio: ['ignore', logFd, logFd] });
-  let up = false;
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ } await sleep(250); }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-2000));
+  srv = await startServer({ name: 'ota-check', env: { DATA_DIR } });
+  BASE = srv.base;
   LATEST = (await check('0.0.1')).latest_version;   // an ancient version reads back the server's latest
 });
-after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
+after(async () => {
+  try { if (srv) await srv.stop(); } finally { if (DATA_DIR) fs.rmSync(DATA_DIR, { recursive: true, force: true }); }
+});
 
 test('a device already on latest gets no offer (up-to-date)', async () => {
   const r = await check(LATEST);
