@@ -18,7 +18,8 @@ const {
   ACCOUNT_DEACTIVATED_MESSAGE,
 } = require("../middleware/auth");
 const { resolveTenancy, accessContext, accessibleWorkspaceIds } = require("../lib/tenancy");
-const { logActivity, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
+const { maskPhone } = require("../lib/mask");
 const totp = require("../lib/totp");
 const totpLockout = require("../lib/totp-lockout");
 const { sendSignupEmails } = require("../services/signupEmails");
@@ -234,6 +235,21 @@ router.post("/register", asyncHandler(async (req, res) => {
   });
   const token = generateToken(user, workspaceId);
 
+  // Audit (awaited): a brand-new user owns an org only if it was just created for them.
+  const ownOrg = await db
+    .prepare("SELECT id, name FROM organizations WHERE owner_user_id = ? LIMIT 1")
+    .get(id);
+  await auditOrWarn({
+    userId: id,
+    action: "user_registered",
+    details: `email: ${user.email}, role: ${role}, org_created: ${!!ownOrg}` +
+      (ownOrg ? `, org: ${ownOrg.name} (${ownOrg.id})` : ""),
+    target: id,
+    ipAddress: getClientIp(req),
+    workspaceId,
+    organizationId: ownOrg ? ownOrg.id : null,
+  });
+
   res.status(201).json({ token, user, current_workspace_id: workspaceId });
 
   // Welcome + admin-notify emails (hosted instance only, idempotent, async).
@@ -413,7 +429,16 @@ router.post("/totp/enable", requireAuth, asyncHandler(async (req, res) => {
   await db.prepare(
     "UPDATE users SET totp_enabled = 1, totp_last_step = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
   ).run(step, req.user.id);
-  res.json({ enabled: true, recovery_codes: await resetRecoveryCodes(req.user.id) }); // shown ONCE
+  const recoveryCodes = await resetRecoveryCodes(req.user.id);
+  // Audit (awaited): the count only - never the codes or the secret.
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "totp_enabled",
+    details: `recovery_codes: ${recoveryCodes.length}`,
+    target: req.user.id,
+    ipAddress: getClientIp(req),
+  });
+  res.json({ enabled: true, recovery_codes: recoveryCodes }); // shown ONCE
 }));
 
 // Disable: re-auth with a current code (or a recovery code) so a hijacked session
@@ -426,12 +451,12 @@ router.post("/totp/disable", requireAuth, asyncHandler(async (req, res) => {
     .get(req.user.id);
   if (!u.totp_enabled)
     return res.status(400).json({ error: "TOTP is not enabled." });
-  const ok =
-    !!totp.verifyCode(
-      req.body.code,
-      totp.decryptSecret(u.totp_secret_enc),
-      u.totp_last_step,
-    ) || await consumeRecoveryCode(req.user.id, req.body.code);
+  const viaTotpCode = !!totp.verifyCode(
+    req.body.code,
+    totp.decryptSecret(u.totp_secret_enc),
+    u.totp_last_step,
+  );
+  const ok = viaTotpCode || await consumeRecoveryCode(req.user.id, req.body.code);
   if (!ok) return res.status(400).json({ error: "Invalid code" });
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
   // must be prepared from it, not the outer db, to actually participate in the transaction.
@@ -443,6 +468,15 @@ router.post("/totp/disable", requireAuth, asyncHandler(async (req, res) => {
       req.user.id,
     );
   })();
+  // Audit (awaited): disabling MFA weakens the account. Which kind of code was
+  // used, never the code itself.
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "totp_disabled",
+    details: `via: ${viaTotpCode ? "totp_code" : "recovery_code"}`,
+    target: req.user.id,
+    ipAddress: getClientIp(req),
+  });
   res.json({ enabled: false });
 }));
 
@@ -465,7 +499,16 @@ router.post("/totp/recovery-codes/regenerate", requireAuth, asyncHandler(async (
     step,
     req.user.id,
   );
-  res.json({ recovery_codes: await resetRecoveryCodes(req.user.id) });
+  const recoveryCodes = await resetRecoveryCodes(req.user.id);
+  // Audit (awaited): the count only - never the codes.
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "totp_recovery_codes_regenerated",
+    details: `count: ${recoveryCodes.length}`,
+    target: req.user.id,
+    ipAddress: getClientIp(req),
+  });
+  res.json({ recovery_codes: recoveryCodes });
 }));
 
 // Second login step: exchange an mfa_pending token + a code (TOTP or recovery) for a
@@ -594,6 +637,13 @@ router.post("/google", async (req, res) => {
       );
 
       user = await db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+      await auditOrWarn({
+        userId: id,
+        action: "user_created_sso",
+        details: `email: ${user.email}, provider: google, role: ${role}`,
+        target: id,
+        ipAddress: getClientIp(req),
+      });
     } else if (user.auth_provider !== "google") {
       // Existing account with different provider — do NOT silently overwrite auth_provider.
       // If they have a local password, require them to log in locally and link from settings.
@@ -608,6 +658,13 @@ router.post("/google", async (req, res) => {
         "UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?",
       ).run("google", googleId, picture || user.avatar_url, user.id);
       user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+      await auditOrWarn({
+        userId: user.id,
+        action: "account_linked_google",
+        details: user.email,
+        target: user.id,
+        ipAddress: getClientIp(req),
+      });
     }
 
     const workspaceId = await ensureDefaultOrgForUser(user, {
@@ -766,6 +823,13 @@ router.post("/microsoft", async (req, res) => {
       );
 
       user = await db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+      await auditOrWarn({
+        userId: id,
+        action: "user_created_sso",
+        details: `email: ${user.email}, provider: microsoft, role: ${role}`,
+        target: id,
+        ipAddress: getClientIp(req),
+      });
     } else if (user.auth_provider !== "microsoft") {
       // Existing account with different provider — do NOT silently overwrite auth_provider.
       if (user.password_hash) {
@@ -790,6 +854,13 @@ router.post("/microsoft", async (req, res) => {
           "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
         ).run("microsoft", microsoftId, user.id);
         user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+        await auditOrWarn({
+          userId: user.id,
+          action: "account_linked_microsoft",
+          details: user.email,
+          target: user.id,
+          ipAddress: getClientIp(req),
+        });
       }
     }
 
@@ -991,23 +1062,37 @@ router.put("/me", requireAuth, asyncHandler(async (req, res) => {
   // (lib/field-phone.js) so it always matches whatever format the login screen
   // sends. "" / null clears it. users.phone is UNIQUE -> 409 on collision.
   if (phone !== undefined) {
-    if (phone === null || String(phone).trim() === "") {
-      await db.prepare(
-        "UPDATE users SET phone = NULL, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
-      ).run(req.user.id);
-    } else {
-      const canonical = normalizePhone(String(phone));
-      if (!canonical) return res.status(400).json({ error: "Enter a valid phone number" });
-      try {
-        await db.prepare(
+    let next = null; // null / "" clears it
+    if (!(phone === null || String(phone).trim() === "")) {
+      next = normalizePhone(String(phone));
+      if (!next) return res.status(400).json({ error: "Enter a valid phone number" });
+    }
+    // The audited "before" is read under a row lock in the same transaction as the
+    // UPDATE, so concurrent changes are recorded in the order they actually applied.
+    let before;
+    try {
+      before = await db.transaction(async (tx) => {
+        const cur = await tx.prepare("SELECT phone FROM users WHERE id = ? FOR UPDATE").get(req.user.id);
+        await tx.prepare(
           "UPDATE users SET phone = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
-        ).run(canonical, req.user.id);
-      } catch (e) {
-        if (isDuplicateKeyError(e)) {
-          return res.status(409).json({ error: "That phone number is already used by another account" });
-        }
-        throw e;
+        ).run(next, req.user.id);
+        return cur ? cur.phone : null;
+      })();
+    } catch (e) {
+      if (isDuplicateKeyError(e)) {
+        return res.status(409).json({ error: "That phone number is already used by another account" });
       }
+      throw e;
+    }
+    if ((before || null) !== next) {
+      // Audit (awaited): the phone is the field-OTP login identifier - masked both ways.
+      await auditOrWarn({
+        userId: req.user.id,
+        action: "phone_changed",
+        details: `phone: ${maskPhone(before)} -> ${maskPhone(next)}`,
+        target: req.user.id,
+        ipAddress: getClientIp(req),
+      });
     }
   }
   if (password) {
@@ -1016,7 +1101,7 @@ router.put("/me", requireAuth, asyncHandler(async (req, res) => {
         .status(400)
         .json({ error: "Password must be at least 8 characters" });
     const row = await db
-      .prepare("SELECT password_hash, auth_provider FROM users WHERE id = ?")
+      .prepare("SELECT password_hash, auth_provider, must_change_password FROM users WHERE id = ?")
       .get(req.user.id);
     if (!row) return res.status(404).json({ error: "User not found" });
     if (row.auth_provider !== "local") {
@@ -1038,6 +1123,14 @@ router.put("/me", requireAuth, asyncHandler(async (req, res) => {
     await db.prepare(
       "UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
     ).run(hash, req.user.id);
+    // Audit (awaited): that it changed - never the password or its hash.
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "password_changed",
+      details: `self, must_change_password cleared: ${!!row.must_change_password}`,
+      target: req.user.id,
+      ipAddress: getClientIp(req),
+    });
   }
   const user = await db
     .prepare(
@@ -1109,13 +1202,15 @@ router.delete("/users/:id", requireAuth, requireSuperAdmin, asyncHandler(async (
       return res.status(409).json({ error: e.message });
     throw e;
   }
-  logActivity(
-    req.user.id,
-    "delete_user",
-    `target: ${target.email}`,
-    null,
-    getClientIp(req),
-  );
+  // Audit (awaited; a revocation - the deletion stands even if the row fails, and
+  // auditOrWarn prints the NOT AUDITED marker).
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "delete_user",
+    details: `target: ${target.email}`,
+    target: target.id,
+    ipAddress: getClientIp(req),
+  });
   res.json({ success: true });
 }));
 
@@ -1141,7 +1236,22 @@ router.put("/users/:id/role", requireAuth, requireSuperAdmin, asyncHandler(async
   // (would lock themselves out of platform admin actions).
   if (req.params.id === req.user.id && !isPlatformRole(role))
     return res.status(400).json({ error: "Cannot demote yourself" });
-  await db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
+  // The audited "before" is read under a row lock in the same transaction as the
+  // UPDATE, so concurrent changes are recorded in the order they actually applied.
+  const before = await db.transaction(async (tx) => {
+    const cur = await tx.prepare("SELECT email, role FROM users WHERE id = ? FOR UPDATE").get(req.params.id);
+    await tx.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
+    return cur || null;
+  })();
+  if (before && before.role !== role) {
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "platform_role_changed",
+      details: `target: ${before.email}, role: ${before.role} -> ${role}`,
+      target: req.params.id,
+      ipAddress: getClientIp(req),
+    });
+  }
   res.json({ success: true });
 }));
 
@@ -1203,16 +1313,16 @@ router.put("/users/:id/password", requireAuth, requireAdmin, asyncHandler(async 
     "UPDATE users SET password_hash = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
   ).run(hash, req.params.id);
 
-  // Explicit audit entry — the generic activity logger captures the route
-  // and target id, but a labeled detail string makes the audit log readable.
-  // Never include the password; just who reset whose password.
-  logActivity(
-    req.user.id,
-    "password_reset_for_user",
-    `target: ${target.email}`,
-    null,
-    getClientIp(req),
-  );
+  // Explicit audit entry (awaited). The auth router is mounted before the generic
+  // activity logger, so this is the only record. Never include the password; just
+  // who reset whose password.
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "password_reset_for_user",
+    details: `target: ${target.email}`,
+    target: target.id,
+    ipAddress: getClientIp(req),
+  });
   res.json({ success: true });
 }));
 
@@ -1302,8 +1412,20 @@ router.post("/accept-invite/:inviteId", requireAuth, asyncHandler(async (req, re
   });
   await txn();
 
-  // Stamp workspaceId so activityLogger captures tenant attribution.
-  req.workspaceId = ws.id;
+  // Explicit audit row (awaited). The auth router is mounted BEFORE the generic
+  // activityLogger (server.js), so nothing else records this grant. Never the
+  // invite id: it is the accept link.
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "workspace_invite_accepted",
+    details: existing
+      ? `workspace: ${ws.name} (${ws.id}), already_member, role kept: ${existing.role}`
+      : `workspace: ${ws.name} (${ws.id}), role: ${invite.role}`,
+    target: req.user.id,
+    ipAddress: getClientIp(req),
+    workspaceId: ws.id,
+    organizationId: ws.organization_id,
+  });
 
   res.json({
     workspace_id: ws.id,
