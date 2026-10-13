@@ -365,6 +365,13 @@ module.exports = function setupDeviceSocket(io) {
 
       // Track device fingerprint to prevent reinstall abuse
       if (fingerprint) {
+        // Progress markers for the catch below. reclaimId: a reclaim passed the liveness
+        // gate and started changing state for that device. reclaimOnline: its
+        // status='online' UPDATE committed (device:registered is emitted right after).
+        // fpNewDevice: the lookup completed and found no fingerprint row (a new device).
+        let reclaimId = null;
+        let reclaimOnline = false;
+        let fpNewDevice = false;
         try {
           const existing = await db.prepare('SELECT * FROM device_fingerprints WHERE fingerprint = ?').get(fingerprint);
           if (existing) {
@@ -401,6 +408,7 @@ module.exports = function setupDeviceSocket(io) {
                   return;
                 }
                 lastReclaimRejectLogAt.delete(existing.device_id); // reclaim proceeding — clear any deferral log state
+                reclaimId = existing.device_id;
 
                 // Fingerprint matched — this is a reinstalled app reconnecting to its old device.
                 // Issue a fresh token so the app can authenticate going forward.
@@ -420,6 +428,7 @@ module.exports = function setupDeviceSocket(io) {
                 heartbeat.registerConnection(existing.device_id, socket.id);
                 await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP(), ip_address = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
                   .run(getClientIp(socket), existing.device_id);
+                reclaimOnline = true;
                 socket.emit('device:registered', { device_id: existing.device_id, device_token: newToken, status: 'online' });
                 // If device was already claimed by a user, tell the player it's paired
                 if (oldDevice.user_id) {
@@ -441,6 +450,7 @@ module.exports = function setupDeviceSocket(io) {
               }
             }
           } else if (device_id || pairing_code) {
+            fpNewDevice = true;
             // device_id can be stale (e.g. a reconnect after the device row was
             // deleted). device_fingerprints.device_id has an FK to devices(id) - null
             // out an unknown id instead of letting the insert throw (was a caught,
@@ -453,6 +463,36 @@ module.exports = function setupDeviceSocket(io) {
           }
         } catch (e) {
           console.error('Fingerprint tracking error:', e.message);
+          // A failed reclaim must never fall through to the new-device pairing path below:
+          // that minted a second (ghost) devices row and a second device:registered for it.
+          if (reclaimOnline) {
+            // The device already has its id + new token: fail exactly like the reconnect
+            // path - protectSocket emits server:error and disconnects, and the disconnect
+            // handler runs the normal offline debounce for this incumbent.
+            throw e;
+          }
+          if (reclaimId) {
+            // Not online yet and the device got nothing: undo this socket's incumbency
+            // (only if it is still ours) so its reconnect isn't deferred by our own stale
+            // entry, then disconnect like protectSocket does. The row is still offline, so
+            // there is nothing for the disconnect handler to do.
+            const conn = heartbeat.getConnection(reclaimId);
+            if (conn && conn.socketId === socket.id) heartbeat.removeConnection(reclaimId);
+            if (currentDeviceId === reclaimId) currentDeviceId = null;
+            authenticated = false;
+            try { socket.emit('server:error', { event: 'device:register', error: 'internal error, please reconnect' }); } catch (_) { /* */ }
+            process.nextTick(() => { try { socket.disconnect(true); } catch (_) { /* */ } });
+            return;
+          }
+          if (!device_id && pairing_code && !fpNewDevice) {
+            // The lookup itself failed, so this pairing request may be a reinstall of a
+            // known device: refuse rather than pair it as new (same reply as the pairing
+            // INSERT failure below).
+            socket.emit('device:auth-error', { error: 'Registration failed, please retry.' });
+            return;
+          }
+          // Reconnects with a device_id (and a failed fingerprint INSERT for a new device)
+          // carry on: fingerprint tracking isn't needed to authenticate them.
         }
       }
 
