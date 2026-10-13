@@ -5,13 +5,16 @@
 // stored E.164 form. Closes the India-format gap found in Stage B1 live testing:
 // a bare 10-digit number never matched the stored "+91…" value.
 //
-// In-memory sqlite, real routers mounted as server.js mounts them.
+// The integration half runs the REAL routers in-process (helpers/inprocess-app.js:
+// /api/auth, plus /api/field-auth mounted as server.js mounts it) against the REAL
+// MySQL test DB (beamos_test via npm test). Fixtures are test-owned (fpn- prefix) and
+// removed afterwards. Phone numbers are random per run (so no collision with other
+// files' rows) but go through exactly the same five real-world formats.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
+const crypto = require('node:crypto');
 
-process.env.JWT_SECRET = 'test-secret-field-phone';
 process.env.FIELD_AUTH_DEFAULT_CC = '91';
 // PMI: the placeholder OTP route is off unless FIELD_OTP_ENABLED (dev/test only).
 process.env.FIELD_OTP_ENABLED = 'true';
@@ -59,76 +62,97 @@ test('the CC is configurable per call', () => {
 });
 
 // ---------------- integration: write path + login lookup ----------------
-const db = new Database(':memory:');
-db.function('UNIX_TIMESTAMP', () => Math.floor(Date.now() / 1000));
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, phone TEXT UNIQUE, last_login INTEGER,
-    updated_at INTEGER DEFAULT 0, deactivated_at INTEGER, totp_enabled INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT, user_id TEXT, role TEXT, joined_at INTEGER DEFAULT 0
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT, user_id TEXT, role TEXT
-  );
-`);
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
+const config = require('../config');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
+const P = `fpn-${randTag()}`;
+// A random 10-digit Indian mobile (national significant number) per run, and the
+// five ways a person might type it.
+const nsn = () => `9${String(crypto.randomInt(0, 1e9)).padStart(9, '0')}`;
+const TECH_NSN = nsn();
+let OTHER_NSN = nsn();
+while (OTHER_NSN === TECH_NSN) OTHER_NSN = nsn();
+const E164 = `+91${TECH_NSN}`;
+const FORMATS = [E164, `91${TECH_NSN}`, TECH_NSN, `+91 ${TECH_NSN.slice(0, 5)} ${TECH_NSN.slice(5)}`, `0${TECH_NSN}`];
 
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-tech','tech@t.test','user')").run();
-// PMI: field OTP is technician-only - u-tech holds just an org-wide field_technician row.
-db.prepare("INSERT INTO organization_members (organization_id,user_id,role) VALUES ('org-x','u-tech','field_technician')").run();
-db.prepare("INSERT INTO users (id,email,role,phone) VALUES ('u-other','other@t.test','user','+919999900000')").run();
+let app;
+let tech;
+let techTok;
+const userIds = [];
+const savedFlag = config.fieldOtpEnabled;
 
-const app = express();
-app.use(express.json());
-app.use('/api/auth', require('../routes/auth'));
-app.use('/api/field-auth', require('../routes/field-auth'));
-app.use((err, req, res, _next) => { res.status(500).json({ error: err.message }); });
-const server = app.listen(0);
-let base;
+async function mkUser(suffix, phone = null) {
+  const id = `${P}-${suffix}`;
+  const email = `${id}@t.test`;
+  await app.db.prepare("INSERT INTO users (id, email, name, password_hash, auth_provider, role, phone) VALUES (?, ?, ?, NULL, 'local', 'user', ?)")
+    .run(id, email, id, phone);
+  userIds.push(id);
+  return { id, email };
+}
+
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: [] }); // /api/auth
+  app.app.use('/api/field-auth', require('../routes/field-auth'));
+  config.fieldOtpEnabled = true;
+  // Precondition: nobody else in the shared test DB holds these numbers.
+  const taken = await app.db.prepare('SELECT COUNT(*) AS n FROM users WHERE phone IN (?, ?)').get(E164, `+91${OTHER_NSN}`);
+  assert.equal(Number(taken.n), 0, 'the random test phones are unused');
+
+  // PMI: field OTP is technician-only - the tech holds just an org-wide field_technician row.
+  const owner = await mkUser('owner');
+  const orgId = crypto.randomUUID();
+  await app.db.prepare("INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')")
+    .run(orgId, `${P} Org`, owner.id);
+  tech = await mkUser('tech');
+  await app.db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'field_technician')").run(orgId, tech.id);
+  await mkUser('other', `+91${OTHER_NSN}`);
+  techTok = generateToken({ id: tech.id, email: tech.email, role: 'user' }, null);
 });
-test.after(() => { server.close(); db.close(); });
+
+test.after(async () => {
+  try {
+    if (app) {
+      config.fieldOtpEnabled = savedFlag;
+      // Newest first: the org owner is deletable once the tech's membership is gone.
+      await cleanupUsers(app.db, [...userIds].reverse());
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
 
 const call = (method, path, token, body) =>
-  fetch(base + path, {
+  fetch(app.base + path, {
     method,
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-const techTok = generateToken({ id: 'u-tech', email: 'tech@t.test', role: 'user' }, null);
+const techPhone = async () => (await app.db.prepare('SELECT phone FROM users WHERE id = ?').get(tech.id)).phone;
 
 test('write path: PUT /api/auth/me stores the phone CANONICALIZED, not as typed', async () => {
-  const r = await call('PUT', '/api/auth/me', techTok, { phone: '09876543210' }); // messy input
+  const r = await call('PUT', '/api/auth/me', techTok, { phone: `0${TECH_NSN}` }); // messy input
   assert.equal(r.status, 200);
-  assert.equal((await r.json()).phone, '+919876543210');
-  assert.equal(db.prepare("SELECT phone FROM users WHERE id='u-tech'").get().phone, '+919876543210');
+  assert.equal((await r.json()).phone, E164);
+  assert.equal(await techPhone(), E164);
 });
 
 test('login then works with EVERY format, because both sides canonicalized', async () => {
-  for (const fmt of ['+919876543210', '919876543210', '9876543210', '+91 98765 43210', '09876543210']) {
+  for (const fmt of FORMATS) {
     const v = await call('POST', '/api/field-auth/verify-otp', null, { phone: fmt, code: '000999' });
     assert.equal(v.status, 200, `login with "${fmt}" should succeed`);
-    assert.equal((await v.json()).user.id, 'u-tech');
+    assert.equal((await v.json()).user.id, tech.id);
   }
 });
 
 test('write path: a bad phone is rejected 400; a collision is rejected 409', async () => {
   assert.equal((await call('PUT', '/api/auth/me', techTok, { phone: 'xyz' })).status, 400);
-  assert.equal((await call('PUT', '/api/auth/me', techTok, { phone: '9999900000' })).status, 409); // u-other has +919999900000
+  assert.equal((await call('PUT', '/api/auth/me', techTok, { phone: OTHER_NSN })).status, 409); // the other user has +91<OTHER_NSN>
 });
 
 test('write path: "" clears the phone', async () => {
   assert.equal((await call('PUT', '/api/auth/me', techTok, { phone: '' })).status, 200);
-  assert.equal(db.prepare("SELECT phone FROM users WHERE id='u-tech'").get().phone, null);
+  assert.equal(await techPhone(), null);
 });
