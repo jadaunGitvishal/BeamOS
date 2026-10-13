@@ -17,49 +17,43 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
 const ioClient = require('socket.io-client');
-const path = require('node:path'); const os = require('node:os'); const fs = require('node:fs'); const crypto = require('node:crypto');
+const path = require('node:path'); const crypto = require('node:crypto');
 const { db } = require('../db/database');
 const { cleanupUser } = require('./helpers/disposable');
-const { freePort } = require('./helpers/free-port');
+const { startServer } = require('./helpers/spawn-server');
 
 const HELPER = path.join(__dirname, 'helpers', 'slow-offline-update.js');
 const SLOW_MS = 1500;           // width of the race window held open by the helper
 const DEBOUNCE_MS = 5000;       // ws/deviceSocket.js OFFLINE_DEBOUNCE_MS
 const FLUSH_MS = 200;           // STATUS_LOG_FLUSH_MS: status-log writer flush interval
 const TAG = crypto.randomBytes(4).toString('hex');
-const DATA_DIR = path.join(os.tmpdir(), 'st-offrace-' + TAG);
 const PW = 'Passw0rd123';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-let proc, BASE, out = '';
+let srv, BASE;
 let JWT, userId, dash;
 const deviceIds = [];
 const sockets = [];
 const dashEvents = [];          // every dashboard:device-status the owner's dashboard received
 
 before(async () => {
-  const port = await freePort();
-  BASE = `http://127.0.0.1:${port}`;
-  proc = spawn(process.execPath, ['--require', HELPER, 'server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(port), NODE_ENV: 'test',
+  srv = await startServer({
+    name: 'offline-race',
+    nodeArgs: ['--require', HELPER],
+    env: {
       SLOW_OFFLINE_MS: String(SLOW_MS),
       STATUS_LOG_FLUSH_MS: String(FLUSH_MS),
       // Fast checker ticks for Path B. HEARTBEAT_TIMEOUT stays at its 45s default, so the
       // checker never touches a just-disconnected device (its map entry is recent) and
       // Path A is driven by the disconnect debounce alone.
-      HEARTBEAT_INTERVAL: '300' },
-    stdio: ['ignore', 'pipe', 'pipe'],
+      HEARTBEAT_INTERVAL: '300',
+    },
+    // Up to 60s: a normal boot answers in ~1s, but a cold first boot on this machine has
+    // been seen to take 10-20s before printing anything.
+    bootTimeoutMs: 60000,
   });
-  proc.stdout.on('data', (d) => { out += d; });
-  proc.stderr.on('data', (d) => { out += d; });
-  let up = false;
-  // Up to 60s: a normal boot answers in ~1s, but a cold first boot on this machine has
-  // been seen to take 10-20s before printing anything.
-  for (let i = 0; i < 240; i++) { try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* not yet */ } await sleep(250); }
-  if (!up) throw new Error('server did not boot:\n' + out.slice(-2000));
+  BASE = srv.base;
 
   const reg = await fetch(BASE + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: `offrace-${TAG}@x.local`, password: PW, name: 'Offline race' }) });
@@ -78,7 +72,7 @@ before(async () => {
 // device_status_log), plus any device that never got paired into that workspace.
 after(async () => {
   for (const s of [...sockets, dash]) { try { s && s.close(); } catch { /* */ } }
-  try { proc && proc.kill('SIGKILL'); } catch { /* */ }
+  if (srv) await srv.stop();
   try {
     if (userId) await cleanupUser(db, userId);
     for (const id of deviceIds) {
@@ -87,7 +81,6 @@ after(async () => {
     }
   } finally {
     await db.close();
-    try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch { /* */ }
   }
 });
 
@@ -130,16 +123,15 @@ async function reconnect(id, token) {
   return s;
 }
 
-// Wait until the helper prints its marker for this device's offline UPDATE, counting only
-// output after `from` (an offset into the server output).
-async function waitForSlowOffline(id, from, timeoutMs) {
-  const marker = `[slow-offline-update] delaying ${SLOW_MS}ms for ${id}`;
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    if (out.indexOf(marker, from) !== -1) return Date.now();
-    await sleep(20);
-  }
-  throw new Error(`no delayed offline UPDATE for ${id} within ${timeoutMs}ms:\n` + out.slice(-2000));
+// The preload's marker for one device, printed just before it holds that device's
+// offline UPDATE open.
+const markerRe = (id) => new RegExp(`\\[slow-offline-update\\] delaying ${SLOW_MS}ms for ${id}`, 'g');
+const markersFor = (id) => (srv.output().match(markerRe(id)) || []).length;
+// Wait until this device's NEXT marker appears (one more than `before`, the count taken
+// before the action); returns the time it was seen.
+async function waitForSlowOffline(id, before, timeoutMs) {
+  await srv.waitForOutput(new RegExp(`(?:${markerRe(id).source}[\\s\\S]*?){${before + 1}}`), timeoutMs);
+  return Date.now();
 }
 
 const dbStatus = async (id) => (await db.prepare('SELECT status FROM devices WHERE id = ?').get(id)).status;
@@ -170,7 +162,7 @@ test('Path A: a reconnect during the debounced offline UPDATE leaves the device 
   await sleep(500);
   assert.equal(await dbStatus(d.id), 'online', 'precondition: paired + connected -> online');
 
-  const from = out.length;
+  const from = markersFor(d.id);
   const closedAt = Date.now();
   d.sock.close();                                         // -> offlineTransition after the 5s debounce
   const startedAt = await waitForSlowOffline(d.id, from, DEBOUNCE_MS + 4000);
@@ -191,14 +183,14 @@ test('Path B: a reconnect during the heartbeat-timeout offline UPDATE leaves the
   const d = await provisionAndPair('Race B');
   await sleep(500);
   // Get to "no live socket": disconnect and let the ordinary offline transition finish.
-  let from = out.length;
+  let from = markersFor(d.id);
   d.sock.close();
   await waitForSlowOffline(d.id, from, DEBOUNCE_MS + 4000);
   await sleep(SLOW_MS + 1000);
   assert.equal(await dbStatus(d.id), 'offline', 'precondition: the plain disconnect ended offline');
 
   // Now "online in DB, stale heartbeat, no live socket" — the checker's case.
-  from = out.length;
+  from = markersFor(d.id);
   await db.prepare("UPDATE devices SET status = 'online', last_heartbeat = UNIX_TIMESTAMP() - 3600 WHERE id = ?").run(d.id);
   const startedAt = await waitForSlowOffline(d.id, from, 5000);
 

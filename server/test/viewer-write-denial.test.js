@@ -24,8 +24,8 @@
 //   C. Socket.IO: write-type dashboard events are refused for all three roles and the
 //      device receives nothing; the read event (request-screenshot) behaves as today.
 //
-// Runs against the REAL server.js, spawned on its own port (same pattern as
-// device-pairing-notify.test.js), because /api/provision/pair is an inline
+// Runs against the REAL server.js, spawned on its own port by test/helpers/spawn-server.js
+// (same as device-pairing-notify.test.js), because /api/provision/pair is an inline
 // server.js route that no in-process harness mounts. Real MySQL; every fixture is
 // disposable and deleted in after(). server.js rate-limits per (client IP + path);
 // the server trusts CF-Connecting-IP from a loopback peer, so each request carries
@@ -33,7 +33,6 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
@@ -42,19 +41,16 @@ const ioClient = require('socket.io-client');
 
 const { db, initDb } = require('../db/database');
 const { randTag, cleanupUsers, cleanupDevices } = require('./helpers/disposable');
+const { startServer } = require('./helpers/spawn-server');
 
 const SERVER_DIR = path.join(__dirname, '..');
-const PORT = 39100 + crypto.randomInt(0, 800);
-const BASE = `http://127.0.0.1:${PORT}`;
+let srv, BASE;
 const TAG = randTag();
-const DATA_DIR = path.join(os.tmpdir(), `st-vwd-${TAG}`);
-const LOG = path.join(os.tmpdir(), `st-vwd-${TAG}.log`);
 const PASSWORD = 'viewer-write-denial-1';
 const READ_ONLY = { error: 'Read-only access' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fakeIp = () => `10.${crypto.randomInt(1, 255)}.${crypto.randomInt(1, 255)}.${crypto.randomInt(1, 255)}`;
 
-let proc;
 const cleanupUserIds = [];
 const cleanupDeviceIds = [];
 const sockets = [];
@@ -377,32 +373,19 @@ const importCounts = async () => Object.fromEntries(await Promise.all(IMPORT_TAB
 
 test.before(async () => {
   await initDb();
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: SERVER_DIR,
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 160 && !up; i++) {
-    try { up = (await fetch(`${BASE}/api/status`)).ok; } catch { /* booting */ }
-    if (!up) await sleep(250);
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-3000));
+  srv = await startServer({ name: 'viewer-write-denial', bootTimeoutMs: 60000 });   // was a 40s boot loop
+  BASE = srv.base;
   await buildFixtures();
 });
 
 test.after(async () => {
   for (const s of sockets) { try { s.close(); } catch { /* */ } }
-  try { proc.kill('SIGKILL'); } catch { /* */ }
+  if (srv) await srv.stop();
   // Members first (the owner's org can only be deleted once it has no other members).
   const [ownerId, ...rest] = cleanupUserIds;
   await cleanupUsers(db, [...rest.reverse(), ownerId]);
   await cleanupDevices(db, cleanupDeviceIds);
   await db.close();
-  try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch { /* */ }
-  try { fs.rmSync(LOG, { force: true }); } catch { /* */ }
 });
 
 // =============================================================== A. targeted

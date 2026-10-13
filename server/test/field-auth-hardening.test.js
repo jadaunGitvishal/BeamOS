@@ -25,14 +25,13 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const net = require('node:net');
-const { spawn } = require('node:child_process');
 const bcrypt = require('bcryptjs');
 
 const config = require('../config');
 const { db, initDb } = require('../db/database');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag } = require('./helpers/disposable');
+const { startServer } = require('./helpers/spawn-server');
 
 const CODE = '000999';
 const GENERIC_401 = { error: 'Invalid or expired code' };
@@ -328,62 +327,34 @@ test('no audit row written during this file contains the submitted code', async 
 
 // =================================================================== B. server.js
 
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.unref();
-    s.on('error', reject);
-    s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
-  });
-}
-
-const SERVER_DIR = path.join(__dirname, '..');
 const CERTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fah-certs-')); // no certs -> plain HTTP
 
-function bootServer(env) {
-  const child = spawn(process.execPath, ['--env-file-if-exists=.env', 'server.js'], {
-    cwd: SERVER_DIR,
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', CERTS_DIR, JWT_SECRET: 'fah-child-secret', ...env },
-    stdio: ['ignore', 'pipe', 'pipe'],
+// Real server.js children via test/helpers/spawn-server.js: same node flag and env as
+// before (the helper adds its own temp DATA_DIR and SELF_HOSTED, which change nothing
+// here - config.selfHosted is hardcoded true, and certs come from CERTS_DIR). 60s
+// boot / exit timeouts, as before.
+function bootServer(name, env, opts = {}) {
+  return startServer({
+    name,
+    nodeArgs: ['--env-file-if-exists=.env'],
+    env: { SCHEDULERS_ENABLED: 'false', CERTS_DIR, JWT_SECRET: 'fah-child-secret', ...env },
+    bootTimeoutMs: 60000,
+    ...opts,
   });
-  let out = '';
-  child.stdout.on('data', (d) => { out += d; });
-  child.stderr.on('data', (d) => { out += d; });
-  const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
-  return { child, exited, output: () => out };
-}
-
-async function waitUp(base, exited) {
-  let dead = false;
-  exited.then(() => { dead = true; });
-  for (let i = 0; i < 300 && !dead; i++) {
-    try { const r = await fetch(`${base}/api/status`); if (r.ok) return true; } catch { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  return false;
-}
-
-async function stopServer(s) {
-  if (s.child.exitCode === null) s.child.kill();
-  await s.exited;
 }
 
 test('startup guard: NODE_ENV=production + FIELD_OTP_ENABLED=true refuses to start (non-zero exit, clear message)', async () => {
-  const port = await freePort();
-  const s = bootServer({ NODE_ENV: 'production', FIELD_OTP_ENABLED: 'true', PORT: String(port) });
-  const code = await Promise.race([s.exited, new Promise((r) => setTimeout(() => r('timeout'), 60000))]);
-  if (code === 'timeout') await stopServer(s);
-  assert.notEqual(code, 'timeout', `server should have exited; output:\n${s.output()}`);
-  assert.notEqual(code, 0);
-  assert.match(s.output(), /FIELD_OTP_ENABLED cannot be used in production: the field OTP is a development\/test placeholder/);
+  // expectExit: resolves when the child exits by itself; a child still running at 60s
+  // rejects (killed first) with its output - "server should have exited".
+  const r = await bootServer('fah-prod-guard', { NODE_ENV: 'production', FIELD_OTP_ENABLED: 'true' }, { expectExit: true });
+  assert.notEqual(r.code, 0);
+  assert.match(r.output, /FIELD_OTP_ENABLED cannot be used in production: the field OTP is a development\/test placeholder/);
 });
 
 test('production + disabled: starts, and both field-auth routes 404', async () => {
-  const port = await freePort();
-  const s = bootServer({ NODE_ENV: 'production', FIELD_OTP_ENABLED: 'false', PORT: String(port) });
-  const base = `http://127.0.0.1:${port}`;
+  const s = await bootServer('fah-prod-disabled', { NODE_ENV: 'production', FIELD_OTP_ENABLED: 'false' });
+  const base = s.base;
   try {
-    assert.ok(await waitUp(base, s.exited), `server did not start; output:\n${s.output()}`);
     for (const p of ['/api/field-auth/send-otp', '/api/field-auth/verify-otp']) {
       const r = await fetch(base + p, {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -392,23 +363,22 @@ test('production + disabled: starts, and both field-auth routes 404', async () =
       assert.equal(r.status, 404, p);
     }
   } finally {
-    await stopServer(s);
+    await s.stop();
   }
 });
 
 test('non-production + enabled: server.js mounts the route (send-otp answers 200)', async () => {
-  const port = await freePort();
-  const s = bootServer({ NODE_ENV: 'test', FIELD_OTP_ENABLED: 'true', PORT: String(port) });
-  const base = `http://127.0.0.1:${port}`;
+  let s;
   try {
-    assert.ok(await waitUp(base, s.exited), `server did not start; output:\n${s.output()}`);
+    s = await bootServer('fah-nonprod-enabled', { NODE_ENV: 'test', FIELD_OTP_ENABLED: 'true' });
+    const base = s.base;
     const r = await fetch(`${base}/api/field-auth/send-otp`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone: randPhone() }),
     });
     assert.equal(r.status, 200);
     assert.deepEqual(await r.json(), { sent: true });
   } finally {
-    await stopServer(s);
+    if (s) await s.stop();
     fs.rmSync(CERTS_DIR, { recursive: true, force: true });
   }
 });

@@ -8,45 +8,32 @@
 //   2. on-demand dashboard:request-screenshot still streams dashboard:screenshot-ready
 //      and does NOT add a persisted row (unchanged behaviour)
 //
-// Hits the same MySQL the dev server uses. Port from freePort().
+// Real MySQL test database (beamos_test via npm test). Server via test/helpers/spawn-server.js.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
 const path = require('node:path');
-const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
 
-const { freePort } = require('./helpers/free-port');
+const { startServer } = require('./helpers/spawn-server');
 
-let PORT, BASE; // assigned in before() from freePort()
+let srv, BASE;
 const SWEEP_MS = 6000;
-const DATA_DIR = path.join(os.tmpdir(), 'st-shot-' + crypto.randomBytes(4).toString('hex'));
-const LOG = path.join(os.tmpdir(), 'st-shot-' + crypto.randomBytes(4).toString('hex') + '.log');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rnd = () => String(crypto.randomInt(100000, 1000000));
 // ~300 chars of base64 - passes the server's `image_b64` truthiness + <2MB checks.
 const FAKE_JPEG_B64 = Buffer.from('x'.repeat(220)).toString('base64');
 
-let proc, JWT, db, deviceSock;
+let JWT, db, deviceSock;
 
 before(async () => {
-  PORT = await freePort();
-  BASE = `http://127.0.0.1:${PORT}`;
-  const logFd = fs.openSync(LOG, 'w');
-  proc = spawn(process.execPath, ['server.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: { ...process.env, SCHEDULERS_ENABLED: 'false', SCREENSHOT_SCHEDULER_ENABLED: 'true', DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', SCREENSHOT_PREVIEW_INTERVAL_MS: String(SWEEP_MS) },
-    stdio: ['ignore', logFd, logFd],
-  });
-  let up = false;
-  for (let i = 0; i < 120; i++) {
-    try { const r = await fetch(BASE + '/api/status'); if (r.ok) { up = true; break; } } catch { /* */ }
-    await sleep(250);
-  }
-  if (!up) throw new Error('server did not boot:\n' + fs.readFileSync(LOG, 'utf8').slice(-3000));
+  // Boot timeout: the helper's default 60s (was 30s here).
+  srv = await startServer({ name: 'screenshot-preview', env: {
+    SCHEDULERS_ENABLED: 'false', SCREENSHOT_SCHEDULER_ENABLED: 'true', SCREENSHOT_PREVIEW_INTERVAL_MS: String(SWEEP_MS),
+  } });
+  BASE = srv.base;
 
   const r = await fetch(BASE + '/api/auth/register', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -60,7 +47,7 @@ before(async () => {
 
 after(async () => {
   try { deviceSock && deviceSock.close(); } catch { /* */ }
-  try { proc.kill('SIGKILL'); } catch { /* */ }
+  if (srv) await srv.stop();
   try { await db.close(); } catch { /* */ }
 });
 
@@ -113,7 +100,7 @@ test('sweep persists a screenshots row per cycle; on-demand stays relay-only', a
 
   // files actually written (spawned server resolves screenshotsDir under its DATA_DIR)
   for (const row of rows) {
-    const fp = path.join(DATA_DIR, 'uploads', 'screenshots', path.basename(row.filepath));
+    const fp = path.join(srv.dataDir, 'uploads', 'screenshots', path.basename(row.filepath));
     assert.ok(fs.existsSync(fp), `backing file exists: ${row.filepath}`);
   }
 
