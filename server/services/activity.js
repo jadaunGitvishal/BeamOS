@@ -34,7 +34,51 @@ function getClientIp(req) {
 // when known; the middleware below sources it from resolveTenancy. When
 // workspaceId is null but a device_id is provided, fall back to the device's
 // workspace - matches the backfill rule for consistency.
-async function logActivity(userId, action, details = null, deviceId = null, ipAddress = null, workspaceId = null) {
+//
+// Most callers don't await it (the response goes out first), so every write is tracked
+// in pendingWrites until it settles; graceful shutdown waits for them via drainActivity
+// before closing the pool, instead of losing recent rows on every restart.
+const pendingWrites = new Set();
+let writesWritten = 0;
+let writesFailed = 0;
+
+function logActivity(...args) {
+  const p = writeActivity(...args)
+    .then((ok) => { if (ok) writesWritten++; else writesFailed++; })
+    .finally(() => pendingWrites.delete(p));
+  pendingWrites.add(p);
+  return p;
+}
+
+// Waits until no audit write is pending, or timeoutMs has passed. Writes started while
+// waiting are waited for too. Returns { drained, failed, timedOut, remaining }: drained =
+// writes that settled meanwhile (failed of them hit an error, already logged by
+// writeActivity), remaining = still pending when it returned.
+async function drainActivity(timeoutMs = 10000) {
+  const written0 = writesWritten;
+  const failed0 = writesFailed;
+  const deadline = Date.now() + timeoutMs;
+  let timer;
+  try {
+    while (pendingWrites.size > 0) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      await Promise.race([
+        Promise.allSettled([...pendingWrites]),
+        new Promise((r) => { timer = setTimeout(r, left); }),
+      ]);
+      clearTimeout(timer);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+  const failed = writesFailed - failed0;
+  const remaining = pendingWrites.size;
+  return { drained: writesWritten - written0 + failed, failed, timedOut: remaining > 0, remaining };
+}
+
+// Resolves true when the row was written, false on an error (logged, never thrown).
+async function writeActivity(userId, action, details = null, deviceId = null, ipAddress = null, workspaceId = null) {
   try {
     let ws = workspaceId || null;
     if (!ws && deviceId) {
@@ -50,8 +94,10 @@ async function logActivity(userId, action, details = null, deviceId = null, ipAd
       ip_address: ipAddress || null,
       workspace_id: ws,
     });
+    return true;
   } catch (e) {
     console.error('Activity log error:', e.message);
+    return false;
   }
 }
 
@@ -198,4 +244,4 @@ function summarizeAction(req) {
   return parts.join(', ') || null;
 }
 
-module.exports = { logActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp };
+module.exports = { logActivity, drainActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp };

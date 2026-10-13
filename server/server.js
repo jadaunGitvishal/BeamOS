@@ -888,12 +888,32 @@ app.use(
   express.static(config.contentDir),
 );
 
-// Graceful shutdown: flush buffered audit rows, then drain + close the MySQL pool.
+// Graceful shutdown: stop accepting connections, wait for pending audit writes (most are
+// fire-and-forget, so the response went out before the row was written), flush buffered
+// status rows, then drain + close the MySQL pool. Capped at the audit drain + 5s.
 let _shuttingDown = false;
 async function gracefulShutdown(sig) {
   if (_shuttingDown) return;
   _shuttingDown = true;
   console.log(`[shutdown] ${sig} — flushing + closing DB pool`);
+  const drainMs = config.shutdownAuditDrainMs;
+  setTimeout(() => {
+    console.error(`[shutdown] still running after ${drainMs + 5000} ms — forcing exit`);
+    process.exit(1);
+  }, drainMs + 5000);
+  // No new HTTP requests; io.close() disconnects every socket so devices and dashboards
+  // reconnect to whichever instance comes up next. Neither is awaited: open keep-alive
+  // connections would hold server.close()'s callback until they time out.
+  try {
+    server.close();
+  } catch (_) {}
+  try {
+    io.close();
+  } catch (_) {}
+  const t0 = Date.now();
+  const { drainActivity } = require("./services/activity");
+  const d = await drainActivity(drainMs);
+  console.log(`[shutdown] audit drain: ${d.drained - d.failed} written, ${d.failed} failed, ${d.remaining} remaining after ${Date.now() - t0} ms`);
   try {
     await require("./lib/status-log-writer").flush();
   } catch (_) {}

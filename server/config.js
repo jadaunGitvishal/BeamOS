@@ -590,6 +590,11 @@ module.exports = {
   // breaking the storm -> table-growth -> slow-writes -> more-lag feedback loop.
   statusLogFlushMs: parseInt(process.env.STATUS_LOG_FLUSH_MS) || 1000,
 
+  // Graceful shutdown (server.js): how long to wait for pending audit writes
+  // (services/activity.js drainActivity) before closing the DB pool. The whole
+  // shutdown is capped at this + 5s, so a stuck drain can't hang a deploy.
+  shutdownAuditDrainMs: parseInt(process.env.SHUTDOWN_AUDIT_DRAIN_MS) || 10000,
+
   // #142 content-ack dedup window (deviceSocket.js). A device (esp. older apps)
   // can spam "content <id>: ready" for the same item; suppress identical
   // (device_id, content_id, status) reports within this window. A status CHANGE

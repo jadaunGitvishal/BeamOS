@@ -4,6 +4,7 @@
 //
 //   const srv = await startServer({ name, env, nodeArgs, bootTimeoutMs, expectExit });
 //   srv.port / srv.base / srv.logPath / srv.output() / await srv.waitForOutput(re, ms) / await srv.stop()
+//   srv.pid / await srv.exited (-> { code, signal } once the child exits by itself or is killed)
 //
 // - Port: always a fresh free port. "Ready" means /api/status answered AND this child
 //   printed "[boot] listening on :<port>" itself, so an orphaned server still holding a
@@ -198,7 +199,7 @@ async function startServer(opts = {}) {
     }
   }
 
-  return { name, port, base, logPath, dataDir, pid: child.pid, output, waitForOutput, stop };
+  return { name, port, base, logPath, dataDir, pid: child.pid, exited, output, waitForOutput, stop };
 }
 
 module.exports = { startServer };
