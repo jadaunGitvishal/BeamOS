@@ -18,6 +18,16 @@
 // nothing - so truncated cells looked like clean, complete text and a real
 // truncation bug went unnoticed. Always decode through this map, not a
 // direct byte->charCode pass-through.
+//
+// Streams are located by walking the PDF's objects and reading exactly /Length
+// bytes after `stream`. An earlier version found them by searching for
+// "stream\n" ... "endstream", trimmed a trailing "\n" AND then a trailing "\r",
+// and silently skipped any stream that failed to inflate. pdfkit writes
+// "stream\n" + data + "\nendstream", so when the compressed data's own last byte
+// was 0x0D (~1 in 256 streams - it is the last byte of the zlib checksum) that
+// second trim cut real data, inflate failed, and the whole page's text vanished
+// without an error (field-ops-report's PDF-cap test failed in CI that way). Now
+// a stream that cannot be decoded throws, naming the object.
 const fs = require('fs');
 const zlib = require('zlib');
 
@@ -37,24 +47,73 @@ function hexToWinAnsiString(hex) {
   return out;
 }
 
+// Index just past the `>>` closing the dictionary that opens at text[i] ('<<'),
+// skipping literal strings `( ... )` and hex strings `< ... >`; -1 if unterminated.
+function dictEnd(text, i) {
+  let depth = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '(') {                       // literal string: nested parens, backslash escapes
+      let nest = 0;
+      for (; i < text.length; i++) {
+        if (text[i] === '\\') { i++; continue; }
+        if (text[i] === '(') nest++;
+        else if (text[i] === ')' && --nest === 0) break;
+      }
+      i++;
+    } else if (c === '<' && text[i + 1] === '<') { depth++; i += 2; }
+    else if (c === '>' && text[i + 1] === '>') { depth--; i += 2; if (depth === 0) return i; }
+    else if (c === '<') { const j = text.indexOf('>', i); if (j === -1) return -1; i = j + 1; }
+    else i++;
+  }
+  return -1;
+}
+
+// Every stream in the file, in document order: { obj: 'N G', dict, data }, where
+// data is exactly the /Length bytes after `stream` + EOL.
+function readStreams(buf) {
+  const text = buf.toString('latin1');   // 1 char per byte, so indices are byte offsets
+  const objRe = /(\d+) (\d+) obj\b/g;
+  const streams = [];
+  let m;
+  while ((m = objRe.exec(text))) {
+    const obj = `${m[1]} ${m[2]}`;
+    let i = m.index + m[0].length;
+    while (/\s/.test(text[i] || '')) i++;
+    if (!text.startsWith('<<', i)) continue;
+    const dEnd = dictEnd(text, i);
+    if (dEnd === -1) throw new Error(`pdf-text-dump: object ${obj}: unterminated dictionary`);
+    const after = /^\s*stream(\r\n|\n)/.exec(text.slice(dEnd, dEnd + 16));
+    if (!after) { objRe.lastIndex = dEnd; continue; }   // not a stream object
+    const dict = text.slice(i, dEnd);
+    const len = /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(dict);
+    if (!len) throw new Error(`pdf-text-dump: object ${obj}: stream without a direct /Length`);
+    const start = dEnd + after[0].length;
+    const end = start + Number(len[1]);
+    if (!/^(\r\n|\n|\r)?endstream/.test(text.slice(end, end + 12))) {
+      throw new Error(`pdf-text-dump: object ${obj}: no "endstream" after /Length ${len[1]} bytes`);
+    }
+    streams.push({ obj, dict, data: buf.slice(start, end) });
+    objRe.lastIndex = end;
+  }
+  return streams;
+}
+
 function extractCells(file) {
   const buf = fs.readFileSync(file);
-  const text = buf.toString('latin1');
-  const streamRe = /stream\r?\n/g;
-  let m;
   const cells = [];
-  while ((m = streamRe.exec(text))) {
-    const start = m.index + m[0].length;
-    const end = text.indexOf('endstream', start);
-    if (end === -1) continue;
-    let raw = buf.slice(start, end);
-    if (raw[raw.length - 1] === 0x0a) raw = raw.slice(0, -1);
-    if (raw[raw.length - 1] === 0x0d) raw = raw.slice(0, -1);
+  for (const { obj, dict, data } of readStreams(buf)) {
     let inflated;
-    try {
-      inflated = zlib.inflateSync(raw).toString('latin1');
-    } catch (e) {
-      continue;
+    if (/\/Filter\s*\/FlateDecode\b/.test(dict)) {
+      try {
+        inflated = zlib.inflateSync(data).toString('latin1');
+      } catch (e) {
+        throw new Error(`pdf-text-dump: object ${obj}: FlateDecode stream failed to inflate (${e.code || 'error'}: ${e.message})`);
+      }
+    } else if (!/\/Filter\b/.test(dict)) {
+      inflated = data.toString('latin1');   // unfiltered stream
+    } else {
+      continue;                             // other filters (e.g. DCTDecode images) carry no text
     }
     if (!/Tj|TJ/.test(inflated)) continue;
 
@@ -130,4 +189,4 @@ if (require.main === module) {
   dumpGrid(file);
 }
 
-module.exports = { extractCells, dumpGrid };
+module.exports = { extractCells, dumpGrid, readStreams };
