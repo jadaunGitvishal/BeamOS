@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings even on Windows checkouts (core.autocrlf=true),
+# otherwise bash fails on the "\r" characters (e.g. .github/scripts/check-test-summary.sh).
+*.sh text eol=lf
+gradlew text eol=lf
