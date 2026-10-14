@@ -20,6 +20,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const ioClient = require('socket.io-client');
+const config = require('../config');
 const { db } = require('../db/database');
 const { generateToken } = require('../middleware/auth');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
@@ -43,7 +44,10 @@ before(async () => {
   srv = await startServer({
     name: 'dashboard-connect-failure',
     nodeArgs: ['--require', path.join(__dirname, 'helpers', 'fail-query.js')],
-    env: { FAIL_QUERY_SQL: LOOKUP_SQL, FAIL_QUERY_ID: ID.user },
+    // JWT_SECRET: this file signs the dashboard token itself, so the server must verify
+    // with the same secret. Without JWT_SECRET (as in CI) each process would derive its
+    // own from <DATA_DIR>/certs/.jwt_secret, and the child has its own DATA_DIR.
+    env: { FAIL_QUERY_SQL: LOOKUP_SQL, FAIL_QUERY_ID: ID.user, JWT_SECRET: config.jwtSecret },
   });
 });
 
@@ -106,6 +110,7 @@ test('a DB failure during a dashboard connect fails only that socket: server sta
   assert.ok(deviceId, 'device registered');
 
   const first = await connectDashboard();
+  assert.equal(first.connectError, undefined, `dashboard handshake rejected: ${first.connectError}`);
   assert.match(srv.output(), /\[fail-query\] failing /, 'the injected lookup failure fired');
   assert.equal(first.connected, true, 'the handshake itself succeeded');
   assert.deepEqual(first.serverErrors, [{ event: 'connection', error: 'internal error, please reconnect' }], 'the socket is told');
