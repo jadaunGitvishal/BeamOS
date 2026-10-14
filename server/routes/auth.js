@@ -27,6 +27,11 @@ const {
   deleteUserCascade,
   OrgHasOtherMembersError,
 } = require("../lib/user-deletion");
+const {
+  LastPlatformAdminError,
+  lockPlatformAdmins,
+  assertNotLastActivePlatformAdmin,
+} = require("../lib/platform-admin-guard");
 const config = require("../config");
 const { asyncHandler } = require("../lib/async-handler");
 // Ref 43: canonicalize a technician's phone to the SAME E.164 form the
@@ -1195,10 +1200,12 @@ router.delete("/users/:id", requireAuth, requireSuperAdmin, asyncHandler(async (
   // deleteUserCascade resolves every reference in one transaction: hard-deletes
   // orgs the user solely owns, preserves (unlinks/reassigns) resources in orgs
   // they don't own, and refuses if they own a shared org.
+  // protectLastPlatformAdmin: refused (409) when the target is the last active
+  // platform admin, decided under the platform-admin lock (lib/platform-admin-guard.js).
   try {
-    await deleteUserCascade(db, { targetId: target.id, actingAdminId: req.user.id });
+    await deleteUserCascade(db, { targetId: target.id, actingAdminId: req.user.id, protectLastPlatformAdmin: true });
   } catch (e) {
-    if (e instanceof OrgHasOtherMembersError)
+    if (e instanceof OrgHasOtherMembersError || e instanceof LastPlatformAdminError)
       return res.status(409).json({ error: e.message });
     throw e;
   }
@@ -1236,13 +1243,23 @@ router.put("/users/:id/role", requireAuth, requireSuperAdmin, asyncHandler(async
   // (would lock themselves out of platform admin actions).
   if (req.params.id === req.user.id && !isPlatformRole(role))
     return res.status(400).json({ error: "Cannot demote yourself" });
-  // The audited "before" is read under a row lock in the same transaction as the
-  // UPDATE, so concurrent changes are recorded in the order they actually applied.
-  const before = await db.transaction(async (tx) => {
-    const cur = await tx.prepare("SELECT email, role FROM users WHERE id = ? FOR UPDATE").get(req.params.id);
-    await tx.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
-    return cur || null;
-  })();
+  // One transaction, starting with the platform-admin lock (lib/platform-admin-guard.js):
+  // a demotion of the last active platform admin is refused (409), decided one change
+  // at a time. The audited "before" is read under the target's row lock, so concurrent
+  // changes are recorded in the order they actually applied.
+  let before;
+  try {
+    before = await db.transaction(async (tx) => {
+      await lockPlatformAdmins(tx); // MUST be this transaction's first statement
+      const cur = await tx.prepare("SELECT email, role, deactivated_at FROM users WHERE id = ? FOR UPDATE").get(req.params.id);
+      if (cur && !isPlatformRole(role)) await assertNotLastActivePlatformAdmin(tx, cur);
+      await tx.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
+      return cur || null;
+    })();
+  } catch (e) {
+    if (e instanceof LastPlatformAdminError) return res.status(409).json({ error: e.message });
+    throw e;
+  }
   if (before && before.role !== role) {
     await auditOrWarn({
       userId: req.user.id,

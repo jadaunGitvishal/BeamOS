@@ -20,6 +20,7 @@
 // audit history are untouched, so reactivation restores exactly the prior access.
 
 const { logActivity } = require('../services/activity');
+const { lockPlatformAdmins, assertNotLastActivePlatformAdmin } = require('./platform-admin-guard');
 
 // Close every live /dashboard socket authenticated as this user. `io` is the
 // socket.io server (req.app.get('io')); optional so library callers without one
@@ -39,12 +40,26 @@ function disconnectUserSockets(io, userId) {
 // Set (deactivated=true) or clear (false) users.deactivated_at. Idempotent: an
 // already-deactivated user keeps their ORIGINAL deactivated_at timestamp. Returns
 // { changed, deactivated_at }. `via` labels the audit row (e.g. 'scim').
-async function setUserDeactivated(db, userId, deactivated, { io = null, via = 'admin', actorId = null, ip = null } = {}) {
+//
+// protectLastPlatformAdmin (SCIM's three deactivation paths pass it): the deactivation
+// runs in one transaction that first takes the platform-admin lock and throws
+// LastPlatformAdminError if the user is the last active platform admin
+// (lib/platform-admin-guard.js) - nothing is changed then.
+async function setUserDeactivated(db, userId, deactivated, { io = null, via = 'admin', actorId = null, ip = null, protectLastPlatformAdmin = false } = {}) {
   const before = await db.prepare('SELECT id, email, deactivated_at FROM users WHERE id = ?').get(userId);
   if (!before) return { changed: false, deactivated_at: null, notFound: true };
 
   if (deactivated) {
-    if (!before.deactivated_at) {
+    if (protectLastPlatformAdmin) {
+      await db.transaction(async (tx) => {
+        await lockPlatformAdmins(tx); // MUST be this transaction's first statement
+        const target = await tx.prepare('SELECT role, deactivated_at FROM users WHERE id = ? FOR UPDATE').get(userId);
+        await assertNotLastActivePlatformAdmin(tx, target);
+        await tx.prepare(
+          'UPDATE users SET deactivated_at = UNIX_TIMESTAMP(), updated_at = UNIX_TIMESTAMP() WHERE id = ? AND deactivated_at IS NULL',
+        ).run(userId);
+      })();
+    } else if (!before.deactivated_at) {
       await db.prepare(
         'UPDATE users SET deactivated_at = UNIX_TIMESTAMP(), updated_at = UNIX_TIMESTAMP() WHERE id = ? AND deactivated_at IS NULL',
       ).run(userId);

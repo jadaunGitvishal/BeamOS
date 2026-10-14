@@ -29,6 +29,8 @@
 // A table-existence guard keeps this resilient to partial/older schemas (and
 // makes it unit-testable without standing up all ~25 tables).
 
+const { lockPlatformAdmins, assertNotLastActivePlatformAdmin } = require('./platform-admin-guard');
+
 class OrgHasOtherMembersError extends Error {
   constructor(message, sharedOrgCount) {
     super(message);
@@ -131,7 +133,13 @@ async function listOwnedOrgsWithSharing(db, userId) {
 
 // Throws OrgHasOtherMembersError if the user owns a shared org. Otherwise
 // deletes the user and resolves every reference in one transaction.
-async function deleteUserCascade(db, { targetId, actingAdminId }) {
+//
+// protectLastPlatformAdmin (opt-in; routes/auth.js DELETE /users/:id passes it): the
+// transaction first takes the platform-admin lock and throws LastPlatformAdminError
+// if the target is the last active platform admin (lib/platform-admin-guard.js). Off
+// by default so test cleanup (helpers/disposable.js cleanupUser) can still remove a
+// lone test admin.
+async function deleteUserCascade(db, { targetId, actingAdminId, protectLastPlatformAdmin = false }) {
   const owned = await listOwnedOrgsWithSharing(db, targetId);
   const shared = owned.filter(o => o.shared);
   if (shared.length > 0) {
@@ -143,6 +151,13 @@ async function deleteUserCascade(db, { targetId, actingAdminId }) {
   const soloOrgIds = owned.map(o => o.id);
 
   const run = db.transaction(async (tx) => {
+    if (protectLastPlatformAdmin) {
+      // MUST precede every other statement in this transaction (including the
+      // tablesPresent read below) - see lib/platform-admin-guard.js.
+      await lockPlatformAdmins(tx);
+      const target = await tx.prepare('SELECT role, deactivated_at FROM users WHERE id = ? FOR UPDATE').get(targetId);
+      await assertNotLastActivePlatformAdmin(tx, target);
+    }
     const have = await tablesPresent(tx);
 
     // 1) Hard-delete the orgs the user solely owns (and everything inside).

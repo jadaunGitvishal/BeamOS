@@ -871,6 +871,16 @@ CREATE TABLE IF NOT EXISTS activity_log_chain (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 INSERT IGNORE INTO activity_log_chain (id, last_hash, entry_count) VALUES (1, REPEAT('0', 64), 0);
 
+-- Named application locks. A transaction that must serialize with others of its kind
+-- takes a row lock on its name (SELECT name FROM app_locks WHERE name = ? FOR UPDATE)
+-- as its FIRST statement. 'platform_admins': every path that can remove an active
+-- platform admin (lib/platform-admin-guard.js), so "is this the last one?" is decided
+-- one change at a time. Re-seeded at boot by lib/schema-check.js as a backstop.
+CREATE TABLE IF NOT EXISTS app_locks (
+    name VARCHAR(64) PRIMARY KEY
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT IGNORE INTO app_locks (name) VALUES ('platform_admins');
+
 -- ===================== WHITE LABEL =====================
 
 CREATE TABLE IF NOT EXISTS white_labels (

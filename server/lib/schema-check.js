@@ -29,6 +29,7 @@ const REQUIRED_TABLES = [
   'scim_tokens', // Ref 8: SCIM provisioning bearer secrets (hashed)
   'entra_role_mappings', // Ref 7: Entra app role -> org/workspace role (repairable, below)
   'region_viewer_scopes', // Refs 49/67: regional_viewer scopes (repairable, below)
+  'app_locks', // named row locks, e.g. 'platform_admins' (repairable + re-seeded, below)
 ];
 
 // Ref 7: tables the repair below may CREATE when missing (same DDL as schema.sql,
@@ -61,7 +62,16 @@ const REPAIRABLE_TABLES = [
     FOREIGN KEY (organization_id, user_id) REFERENCES organization_members(organization_id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`],
+  // Named application locks (lib/platform-admin-guard.js). Its rows are re-seeded
+  // below (APP_LOCK_NAMES) on every boot.
+  ['app_locks', `CREATE TABLE IF NOT EXISTS app_locks (
+    name VARCHAR(64) PRIMARY KEY
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`],
 ];
+
+// Rows app_locks must hold: a missing row would make its lock unusable (the guard
+// refuses to run without it), so they are re-asserted at every boot.
+const APP_LOCK_NAMES = ['platform_admins'];
 
 // [table, column, repairSQL] — columns the code SELECTs / gates on. repairSQL is
 // the idempotent ALTER that adds it if missing (null = base column, assert only).
@@ -324,6 +334,14 @@ async function verifyAndRepairSchema(db, opts = {}) {
     } catch (e) {
       if (isLockWaitTimeout(e)) throw e;
       console.error(`[schema-check] creating table ${t} FAILED: ${e.message}`);
+    }
+  }
+  if (tableSet.has('app_locks')) {
+    try {
+      for (const name of APP_LOCK_NAMES) await db.prepare('INSERT IGNORE INTO app_locks (name) VALUES (?)').run(name);
+    } catch (e) {
+      if (isLockWaitTimeout(e)) throw e;
+      console.error(`[schema-check] seeding app_locks FAILED: ${e.message}`);
     }
   }
   for (const t of REQUIRED_TABLES) if (!tableSet.has(t)) missing.push(`table "${t}"`);

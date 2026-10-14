@@ -332,6 +332,10 @@ test('manual takeover: org member role change sets source NULL; later syncs leav
 });
 
 test('manual takeover: platform admin re-add and role change (admin.js) set source NULL', async () => {
+  // A standing W2 admin, so demoting u below is not "the workspace's last admin"
+  // (which admin.js refuses) - this test is about the manual takeover only.
+  const w2Admin = await registerUser('ref7sitakew2adm', false);
+  await app.db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')").run(W2, w2Admin.id);
   const email = newEmail('ref7sitakeadm');
   const u = (await msSignIn(email, [R('Editors'), R('W2Admins')])).body.user;
   assert.deepEqual(await memberships(u.id), [`ws:${W1}:workspace_editor:entra`, `ws:${W2}:workspace_admin:entra`].sort());

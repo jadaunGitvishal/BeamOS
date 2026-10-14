@@ -348,15 +348,30 @@ router.put("/users/:id/workspace", requirePlatformAdmin, asyncHandler(async (req
   // the DELETE removes at most one row. db.transaction()'s callback gets a
   // transaction-scoped handle (tx) - statements must be prepared from it, not the
   // outer db, to actually participate in the transaction.
+  // Moving a workspace's LAST admin out of it is refused (409): the old workspace's
+  // member rows are locked first and the admins counted from them (same locked
+  // check-then-act as routes/workspaces.js).
+  const oldWorkspaceId = memberships.length === 1 ? memberships[0].workspace_id : null;
   const txn = db.transaction(async (tx) => {
+    if (oldWorkspaceId) {
+      const rows = await lockWorkspaceMembers(tx, oldWorkspaceId);
+      const leaving = rows.find((r) => r.user_id === target.id);
+      if (leaving && leaving.role === "workspace_admin" && adminCount(rows) <= 1) {
+        return { status: 409, body: { error: "Cannot remove the last admin" } };
+      }
+    }
     await tx.prepare("DELETE FROM workspace_members WHERE user_id = ?").run(
       target.id,
     );
     await tx.prepare(
       "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
     ).run(ws.id, target.id, "workspace_viewer", req.user.id);
+    return null;
   });
-  await txn();
+  // A deadlock is possible here (gap locks + the INSERT into the new workspace - see
+  // lockWorkspaceMembers); InnoDB rolls the victim back and the retry re-decides.
+  const refused = await db.retryOnDeadlock(() => txn());
+  if (refused) return res.status(refused.status).json(refused.body);
 
   logActivity(
     req.user.id,
@@ -382,6 +397,21 @@ router.put("/users/:id/workspace", requirePlatformAdmin, asyncHandler(async (req
 // belong to several workspaces, each with its own role - from the platform Users
 // page "Manage workspaces" modal. requirePlatformAdmin excludes platform_operator
 // (no user/role management, #13).
+
+// Locks every member row of a workspace (FOR UPDATE) inside `tx` and returns them,
+// so a "last admin" count taken from these rows can't race another change to this
+// workspace's members - the same locked check-then-act routes/workspaces.js uses.
+// Platform admins are bound by it too: no route leaves a workspace without an admin.
+// Callers run their transaction through db.retryOnDeadlock: under REPEATABLE READ a
+// waiter can hold a gap lock next to these rows, and an INSERT by the holder (the
+// move route's new membership, an add) can then deadlock with it; InnoDB rolls the
+// victim back and the retry decides again, under the lock.
+function lockWorkspaceMembers(tx, workspaceId) {
+  return tx
+    .prepare("SELECT user_id, role FROM workspace_members WHERE workspace_id = ? FOR UPDATE")
+    .all(workspaceId);
+}
+const adminCount = (rows) => rows.filter((r) => r.role === "workspace_admin").length;
 
 async function userMembershipList(userId) {
   return db
@@ -429,21 +459,28 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, asyncHandler(async (r
   if (!ws) return res.status(404).json({ error: "Workspace not found" });
   req.workspaceId = ws.id;
 
-  const existing = await db
-    .prepare(
-      "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-    )
-    .get(ws.id, target.id);
-  if (existing) {
-    // Ref 7: manual re-add takes the membership over from the Entra role sync.
-    await db.prepare(
-      "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
-    ).run(role, ws.id, target.id);
-  } else {
-    await db.prepare(
-      "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
-    ).run(ws.id, target.id, role, req.user.id);
-  }
+  // Locked check-then-act: re-adding the workspace's LAST admin with a lower role
+  // would demote them - refused (409).
+  const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+    const rows = await lockWorkspaceMembers(tx, ws.id);
+    const existing = rows.find((r) => r.user_id === target.id);
+    if (existing) {
+      if (existing.role === "workspace_admin" && role !== "workspace_admin" && adminCount(rows) <= 1) {
+        return { status: 409, body: { error: "Cannot demote the last admin" } };
+      }
+      // Ref 7: manual re-add takes the membership over from the Entra role sync.
+      await tx.prepare(
+        "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
+      ).run(role, ws.id, target.id);
+    } else {
+      await tx.prepare(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
+      ).run(ws.id, target.id, role, req.user.id);
+    }
+    return { existing: !!existing };
+  })());
+  if (outcome.status) return res.status(outcome.status).json(outcome.body);
+  const existing = outcome.existing;
   logActivity(
     req.user.id,
     "admin_add_user_workspace",
@@ -475,16 +512,21 @@ router.put(
           "Role must be workspace_admin, workspace_editor, or workspace_viewer",
       });
     }
-    const member = await db
-      .prepare(
-        "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-      )
-      .get(req.params.workspaceId, req.params.id);
-    if (!member) return res.status(404).json({ error: "Membership not found" });
-    // Ref 7: manual role change takes the membership over from the Entra role sync.
-    await db.prepare(
-      "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
-    ).run(role, req.params.workspaceId, req.params.id);
+    // Locked check-then-act: demoting the workspace's LAST admin is refused (409).
+    const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+      const rows = await lockWorkspaceMembers(tx, req.params.workspaceId);
+      const member = rows.find((r) => r.user_id === req.params.id);
+      if (!member) return { status: 404, body: { error: "Membership not found" } };
+      if (member.role === "workspace_admin" && role !== "workspace_admin" && adminCount(rows) <= 1) {
+        return { status: 409, body: { error: "Cannot demote the last admin" } };
+      }
+      // Ref 7: manual role change takes the membership over from the Entra role sync.
+      await tx.prepare(
+        "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
+      ).run(role, req.params.workspaceId, req.params.id);
+      return null;
+    })());
+    if (outcome) return res.status(outcome.status).json(outcome.body);
     req.workspaceId = req.params.workspaceId;
     const target = await db
       .prepare("SELECT email FROM users WHERE id = ?")
@@ -502,20 +544,26 @@ router.put(
 );
 
 // DELETE - remove the user from a workspace. Allowed even if it's their last one
-// (they become Unassigned - the no-workspace state from #12).
+// (they become Unassigned - the no-workspace state from #12), but not if they are
+// the workspace's last admin (409).
 router.delete(
   "/users/:id/workspaces/:workspaceId",
   requirePlatformAdmin,
   asyncHandler(async (req, res) => {
-    const member = await db
-      .prepare(
-        "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-      )
-      .get(req.params.workspaceId, req.params.id);
-    if (!member) return res.status(404).json({ error: "Membership not found" });
-    await db.prepare(
-      "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-    ).run(req.params.workspaceId, req.params.id);
+    // Locked check-then-act: removing the workspace's LAST admin is refused (409).
+    const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+      const rows = await lockWorkspaceMembers(tx, req.params.workspaceId);
+      const member = rows.find((r) => r.user_id === req.params.id);
+      if (!member) return { status: 404, body: { error: "Membership not found" } };
+      if (member.role === "workspace_admin" && adminCount(rows) <= 1) {
+        return { status: 409, body: { error: "Cannot remove the last admin" } };
+      }
+      await tx.prepare(
+        "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+      ).run(req.params.workspaceId, req.params.id);
+      return null;
+    })());
+    if (outcome) return res.status(outcome.status).json(outcome.body);
     req.workspaceId = req.params.workspaceId;
     const target = await db
       .prepare("SELECT email FROM users WHERE id = ?")

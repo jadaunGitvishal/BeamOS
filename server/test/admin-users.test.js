@@ -96,6 +96,10 @@ test.before(async () => {
   await addWsMember(WS_A, id('u-ws-multi'), 'workspace_viewer');
   await addWsMember(WS_B, id('u-ws-multi'), 'workspace_viewer');
   await seedUser('mgmt');
+  // WS_A's standing admin: the membership-mgmt tests make MGMT a WS_A admin and then
+  // demote / remove them, which admin.js refuses for a workspace's LAST admin.
+  await seedUser('ws-a-admin');
+  await addWsMember(WS_A, id('u-ws-a-admin'), 'workspace_admin');
 
   tokens.admin = generateToken(adminUser, null);
   tokens.orgAdminA = generateToken(orgAdminA, WS_A);
@@ -305,6 +309,18 @@ test('membership mgmt: remove memberships, including the last one (-> unassigned
   assert.equal((await ws('DELETE', MGMT, tokens.admin, { suffix: `/${WS_A}` })).status, 200);
   assert.equal((await ws('DELETE', MGMT, tokens.admin, { suffix: `/${WS_B}` })).status, 200); // last one allowed
   assert.equal((await (await ws('GET', MGMT, tokens.admin)).json()).length, 0, 'user now unassigned');
+});
+
+test('membership mgmt: a workspace\'s SOLE admin cannot be demoted or removed (409)', async () => {
+  await seedUser('ws-b-sole-admin');
+  const sole = id('u-ws-b-sole-admin');
+  await addWsMember(WS_B, sole, 'workspace_admin'); // WS_B's only admin
+  const demote = await ws('PUT', sole, tokens.admin, { role: 'workspace_viewer', suffix: `/${WS_B}` });
+  assert.equal(demote.status, 409);
+  const remove = await ws('DELETE', sole, tokens.admin, { suffix: `/${WS_B}` });
+  assert.equal(remove.status, 409);
+  const row = await db.prepare('SELECT role FROM workspace_members WHERE user_id = ? AND workspace_id = ?').get(sole, WS_B);
+  assert.equal(row.role, 'workspace_admin', 'still the admin');
 });
 
 test('membership mgmt: bad role 400, missing workspace 404, unknown user 404', async () => {

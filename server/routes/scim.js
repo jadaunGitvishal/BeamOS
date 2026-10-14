@@ -44,6 +44,7 @@ const { asyncHandler } = require('../lib/async-handler');
 const { isPlatformRole } = require('../middleware/auth');
 const { scimAuth, scimError } = require('../middleware/scimAuth');
 const { setUserDeactivated } = require('../lib/user-deactivation');
+const { LastPlatformAdminError } = require('../lib/platform-admin-guard');
 const { logActivity, getClientIp } = require('../services/activity');
 const { isDuplicateKeyError } = require('../lib/outage-format');
 
@@ -135,13 +136,33 @@ async function findMember(orgId, userId) {
 // last remaining active platform admin, which would leave the deployment with no one
 // able to administer it (or to fix a misconfigured provisioning job). Same spirit as
 // routes/auth.js's "Cannot demote yourself" guard.
+//
+// Two layers: this early check refuses a doomed request before it changes anything
+// else (the membership insert of an adoption, PATCH attribute updates). The
+// AUTHORITATIVE check is the locked one inside setUserDeactivated
+// (deactivateViaScim below): it serializes against every other path that can remove
+// a platform admin, so two concurrent deactivations can't both pass. Both answer with
+// the same 403 - Entra's documented contract for this refusal.
+const LAST_ADMIN_SCIM_MESSAGE = 'Refusing to deactivate the last active platform admin of this BeamOS deployment. Promote another platform admin first.';
 async function assertNotLastPlatformAdmin(user) {
   if (!isPlatformRole(user.role) || user.deactivated_at) return;
   const others = await db.prepare(
     "SELECT COUNT(*) AS n FROM users WHERE role IN ('platform_admin','superadmin') AND deactivated_at IS NULL AND id <> ?",
   ).get(user.id);
   if (Number(others.n) === 0) {
-    throw new ScimError(403, 'Refusing to deactivate the last active platform admin of this BeamOS deployment. Promote another platform admin first.');
+    throw new ScimError(403, LAST_ADMIN_SCIM_MESSAGE);
+  }
+}
+
+// The one SCIM write path for users.deactivated_at, with the locked last-admin guard.
+async function deactivateViaScim(req, userId, deactivated) {
+  try {
+    return await setUserDeactivated(db, userId, deactivated, {
+      io: req.app.get('io'), via: 'scim', ip: getClientIp(req), protectLastPlatformAdmin: true,
+    });
+  } catch (e) {
+    if (e instanceof LastPlatformAdminError) throw new ScimError(403, LAST_ADMIN_SCIM_MESSAGE);
+    throw e;
   }
 }
 
@@ -467,7 +488,6 @@ router.post('/Users', asyncHandler(async (req, res) => {
   const orgId = req.scim.organizationId;
   const input = readUserBody(req.body);
   const email = input.userName.toLowerCase();
-  const io = req.app.get('io');
 
   const existing = await db.prepare(
     `SELECT ${USER_COLS}, om.id AS membership_id FROM users u
@@ -487,7 +507,7 @@ router.post('/Users', asyncHandler(async (req, res) => {
         `UPDATE users SET scim_user_name = ?, scim_external_id = ?, name = COALESCE(?, name), updated_at = UNIX_TIMESTAMP() WHERE id = ?`,
       ).run(input.userName, input.externalId ?? null, input.displayName ?? null, userId);
     })();
-    if (input.active !== undefined) await setUserDeactivated(db, userId, !input.active, { io, via: 'scim', ip: getClientIp(req) });
+    if (input.active !== undefined) await deactivateViaScim(req, userId, !input.active);
     auditScim(req, 'scim:user_linked', email);
   } else {
     userId = crypto.randomUUID();
@@ -547,7 +567,7 @@ async function applyChanges(req, row, changes) {
   // through Stage 2's single write path - existing sessions, st_ tokens, Entra SP
   // registrations and open dashboard sockets all die on their next request.
   if (changes.active !== undefined) {
-    await setUserDeactivated(db, row.id, !changes.active, { io: req.app.get('io'), via: 'scim', ip: getClientIp(req) });
+    await deactivateViaScim(req, row.id, !changes.active);
   }
 }
 
@@ -602,7 +622,7 @@ router.delete('/Users/:id', asyncHandler(async (req, res) => {
   const row = await findMember(orgId, req.params.id);
   if (!row) return scimError(res, 404, `User ${req.params.id} not found`);
   await assertNotLastPlatformAdmin(row);
-  await setUserDeactivated(db, row.id, true, { io: req.app.get('io'), via: 'scim', ip: getClientIp(req) });
+  await deactivateViaScim(req, row.id, true);
   await db.prepare('DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?').run(orgId, row.id);
   auditScim(req, 'scim:user_deleted', row.email);
   res.status(204).end();
