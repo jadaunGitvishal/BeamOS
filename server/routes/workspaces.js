@@ -25,7 +25,7 @@ const {
 } = require("../lib/ticket-query");
 const { campaignStatus, todayStr } = require("../lib/campaign-status");
 const { computeCampaignDelivery } = require("../lib/campaign-delivery");
-const { logActivity, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
@@ -183,16 +183,6 @@ async function loadWorkspace(req, res, requireAdmin) {
   }
   req.workspaceId = ws.id;
   return ws;
-}
-
-async function countWorkspaceAdmins(workspaceId) {
-  return (
-    await db
-      .prepare(
-        "SELECT COUNT(*) AS c FROM workspace_members WHERE workspace_id = ? AND role = 'workspace_admin'",
-      )
-      .get(workspaceId)
-  ).c;
 }
 
 // Members listing: direct workspace_members + the org_owner/admin users who
@@ -490,6 +480,17 @@ router.post(
         .json({ error: "Email send failed - invite not created" });
     }
 
+    // Explicit audit row (awaited), only for an invite that exists. Never the invite
+    // id: it is the accept link.
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "workspace_invite_created",
+      details: `workspace: ${ws.name} (${ws.id}), email: ${email}, role: ${role}, expires_at: ${expiresAt}`,
+      target: email,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
     res.status(201).json({ id: inviteId, email, role, expires_at: expiresAt });
   }),
 );
@@ -502,13 +503,24 @@ router.delete(
     if (!ws) return;
     const invite = await db
       .prepare(
-        "SELECT id FROM workspace_invites WHERE id = ? AND workspace_id = ?",
+        "SELECT id, email, role FROM workspace_invites WHERE id = ? AND workspace_id = ?",
       )
       .get(req.params.inviteId, ws.id);
     if (!invite) return res.status(404).json({ error: "Invite not found" });
     await db
       .prepare("DELETE FROM workspace_invites WHERE id = ?")
       .run(invite.id);
+    // Explicit audit row (awaited; a revocation - the cancel stands, a failed write
+    // prints the NOT AUDITED marker). Never the invite id.
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "workspace_invite_cancelled",
+      details: `workspace: ${ws.name} (${ws.id}), email: ${invite.email}, role: ${invite.role}`,
+      target: invite.email,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
     res.json({ success: true });
   }),
 );
@@ -526,24 +538,39 @@ router.put(
           "Role must be workspace_admin, workspace_editor, or workspace_viewer",
       });
     }
-    const member = await db
-      .prepare(
-        "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-      )
-      .get(ws.id, req.params.userId);
-    if (!member) return res.status(404).json({ error: "Member not found" });
-    if (member.role === "workspace_admin" && newRole !== "workspace_admin") {
-      if ((await countWorkspaceAdmins(ws.id)) <= 1) {
-        return res.status(409).json({ error: "Cannot demote the last admin" });
+    // Checks + change in ONE transaction that first locks all of this workspace's
+    // member rows (FOR UPDATE): the last-admin count and the audited "before" role are
+    // then exact, so two concurrent demotions can't both see "2 admins".
+    const outcome = await db.transaction(async (tx) => {
+      const rows = await tx
+        .prepare("SELECT user_id, role FROM workspace_members WHERE workspace_id = ? FOR UPDATE")
+        .all(ws.id);
+      const member = rows.find((r) => r.user_id === req.params.userId);
+      if (!member) return { status: 404, body: { error: "Member not found" } };
+      if (member.role === "workspace_admin" && newRole !== "workspace_admin"
+        && rows.filter((r) => r.role === "workspace_admin").length <= 1) {
+        return { status: 409, body: { error: "Cannot demote the last admin" } };
       }
+      // Ref 7: a manual role change makes the membership manual (source NULL), so
+      // the Entra role sync never changes or removes it afterwards.
+      await tx
+        .prepare("UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?")
+        .run(newRole, ws.id, req.params.userId);
+      return { before: member.role };
+    })();
+    if (outcome.status) return res.status(outcome.status).json(outcome.body);
+    if (outcome.before !== newRole) {
+      const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
+      await auditOrWarn({
+        userId: req.user.id,
+        action: "workspace_member_role_changed",
+        details: `workspace: ${ws.name} (${ws.id}), target: ${target?.email}, role: ${outcome.before} -> ${newRole}`,
+        target: req.params.userId,
+        ipAddress: getClientIp(req),
+        workspaceId: ws.id,
+        organizationId: ws.organization_id,
+      });
     }
-    // Ref 7: a manual role change makes the membership manual (source NULL), so
-    // the Entra role sync never changes or removes it afterwards.
-    await db
-      .prepare(
-        "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
-      )
-      .run(newRole, ws.id, req.params.userId);
     res.json({ user_id: req.params.userId, role: newRole });
   }),
 );
@@ -557,33 +584,41 @@ router.delete(
   asyncHandler(async (req, res) => {
     const ws = await loadWorkspace(req, res, true);
     if (!ws) return;
-    const member = await db
-      .prepare(
-        "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-      )
-      .get(ws.id, req.params.userId);
-    if (!member) return res.status(404).json({ error: "Member not found" });
-    const orgOwner = await db
-      .prepare(
-        "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ? AND role = 'org_owner'",
-      )
-      .get(ws.organization_id, req.params.userId);
-    if (orgOwner) {
-      return res
-        .status(403)
-        .json({ error: "Cannot remove the organization owner" });
-    }
-    if (
-      member.role === "workspace_admin" &&
-      (await countWorkspaceAdmins(ws.id)) <= 1
-    ) {
-      return res.status(409).json({ error: "Cannot remove the last admin" });
-    }
-    await db
-      .prepare(
-        "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-      )
-      .run(ws.id, req.params.userId);
+    // Same locked check-then-act as PUT: the last-admin count is taken with every
+    // member row of this workspace locked, in the transaction that deletes.
+    const outcome = await db.transaction(async (tx) => {
+      const rows = await tx
+        .prepare("SELECT user_id, role FROM workspace_members WHERE workspace_id = ? FOR UPDATE")
+        .all(ws.id);
+      const member = rows.find((r) => r.user_id === req.params.userId);
+      if (!member) return { status: 404, body: { error: "Member not found" } };
+      const orgOwner = await tx
+        .prepare(
+          "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ? AND role = 'org_owner'",
+        )
+        .get(ws.organization_id, req.params.userId);
+      if (orgOwner) return { status: 403, body: { error: "Cannot remove the organization owner" } };
+      if (member.role === "workspace_admin" && rows.filter((r) => r.role === "workspace_admin").length <= 1) {
+        return { status: 409, body: { error: "Cannot remove the last admin" } };
+      }
+      await tx
+        .prepare("DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?")
+        .run(ws.id, req.params.userId);
+      return { role: member.role };
+    })();
+    if (outcome.status) return res.status(outcome.status).json(outcome.body);
+    const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
+    // Explicit audit row (awaited; a revocation - the removal stands, a failed write
+    // prints the NOT AUDITED marker).
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "workspace_member_removed",
+      details: `workspace: ${ws.name} (${ws.id}), target: ${target?.email}, role: ${outcome.role}`,
+      target: req.params.userId,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
     res.json({ success: true });
   }),
 );
@@ -617,9 +652,27 @@ router.patch(
       }
     }
 
-    await db
-      .prepare("UPDATE workspaces SET region_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
-      .run(regionId, ws.id);
+    // "before" from a locked read in the UPDATE's transaction, so concurrent changes
+    // are recorded in the order they applied.
+    const before = await db.transaction(async (tx) => {
+      const cur = await tx.prepare("SELECT region_id FROM workspaces WHERE id = ? FOR UPDATE").get(ws.id);
+      await tx
+        .prepare("UPDATE workspaces SET region_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+        .run(regionId, ws.id);
+      return cur ? cur.region_id || null : null;
+    })();
+    if (before !== regionId) {
+      // Explicit audit row (awaited): which regional viewers can see this workspace.
+      await auditOrWarn({
+        userId: req.user.id,
+        action: "workspace_region_changed",
+        details: `workspace: ${ws.name} (${ws.id}), region: ${before || "none"} -> ${regionId || "none"}`,
+        target: ws.id,
+        ipAddress: getClientIp(req),
+        workspaceId: ws.id,
+        organizationId: ws.organization_id,
+      });
+    }
     res.json({ id: ws.id, region_id: regionId });
   }),
 );

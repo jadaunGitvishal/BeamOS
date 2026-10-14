@@ -6,7 +6,7 @@ const { canAdminOrg, canAccessOrg, canManageOrgRegions } = require("../lib/permi
 const { accessibleWorkspaceIds } = require("../lib/tenancy");
 const { isoDate, slaUptimeTarget, deviceAvailabilityRows, meanAvailability, slaStatus } = require("../lib/sla");
 const { isPlatformRole } = require("../middleware/auth");
-const { logActivity, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
@@ -66,16 +66,6 @@ async function loadOrg(req, res, requireAdmin) {
     return null;
   }
   return org;
-}
-
-async function countOrgOwners(organizationId) {
-  return (
-    await db
-      .prepare(
-        "SELECT COUNT(*) AS c FROM organization_members WHERE organization_id = ? AND role = 'org_owner'",
-      )
-      .get(organizationId)
-  ).c;
 }
 
 // Only platform_admin may grant/hold the org_owner role via this router - an
@@ -248,59 +238,54 @@ router.put(
       return res.status(400).json({ error: `Role must be one of: ${ORG_ROLES.join(", ")}` });
     }
 
-    const member = await db
-      .prepare(
-        "SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?",
-      )
-      .get(org.id, req.params.userId);
-    if (!member) return res.status(404).json({ error: "Member not found" });
+    // Every check and the change run in ONE transaction that first locks all of this
+    // org's member rows (FOR UPDATE): the last-owner count is then exact, so two
+    // concurrent demotions can't both see "2 owners" and leave none. Refusals return
+    // { status, body } and commit nothing.
+    const outcome = await db.transaction(async (tx) => {
+      const rows = await tx
+        .prepare("SELECT user_id, role FROM organization_members WHERE organization_id = ? FOR UPDATE")
+        .all(org.id);
+      const member = rows.find((r) => r.user_id === req.params.userId);
+      if (!member) return { status: 404, body: { error: "Member not found" } };
 
-    // Primary-owner lock: organizations.owner_user_id is a separate NOT NULL FK
-    // (billing/cascade-delete authority - see lib/user-deletion.js) that this
-    // router does not manage. Changing the role of that specific member would
-    // desync RBAC from it, so it's blocked here regardless of caller tier.
-    // Ownership transfer is a deliberately separate, not-yet-built feature.
-    if (req.params.userId === org.owner_user_id) {
-      return res.status(403).json({
-        error: "Cannot change the organization's primary owner - transfer ownership first",
-      });
-    }
-
-    if (!callerMayGrantRole(req, newRole)) {
-      return res.status(403).json({ error: "Only a platform admin can grant the organization owner role" });
-    }
-    // An org_owner caller may only touch org_admin rows (not other org_owner
-    // rows) - canAdminOrg already let them in, but role-scope them here too.
-    if (member.role === "org_owner" && !isPlatformRole(req.user.role)) {
-      return res.status(403).json({ error: "Only a platform admin can change another organization owner" });
-    }
-
-    if (member.role === "org_owner" && newRole !== "org_owner") {
-      if ((await countOrgOwners(org.id)) <= 1) {
-        return res.status(409).json({ error: "Cannot demote the last organization owner" });
+      // Primary-owner lock: organizations.owner_user_id is a separate NOT NULL FK
+      // (billing/cascade-delete authority - see lib/user-deletion.js) that this
+      // router does not manage. Changing the role of that specific member would
+      // desync RBAC from it, so it's blocked here regardless of caller tier.
+      // Ownership transfer is a deliberately separate, not-yet-built feature.
+      if (req.params.userId === org.owner_user_id) {
+        return { status: 403, body: { error: "Cannot change the organization's primary owner - transfer ownership first" } };
       }
-    }
 
-    // Ref 7: a manual role change makes the membership manual (source NULL), so
-    // the Entra role sync never changes or removes it afterwards.
-    // Refs 49/67: leaving regional_viewer drops the member's region scopes in the
-    // same transaction, so old scopes can never come back with the role.
-    if (member.role === REGIONAL_VIEWER && newRole !== REGIONAL_VIEWER) {
-      await db.transaction(async (tx) => {
-        await tx
-          .prepare("UPDATE organization_members SET role = ?, source = NULL WHERE organization_id = ? AND user_id = ?")
-          .run(newRole, org.id, req.params.userId);
+      if (!callerMayGrantRole(req, newRole)) {
+        return { status: 403, body: { error: "Only a platform admin can grant the organization owner role" } };
+      }
+      // An org_owner caller may only touch org_admin rows (not other org_owner
+      // rows) - canAdminOrg already let them in, but role-scope them here too.
+      if (member.role === "org_owner" && !isPlatformRole(req.user.role)) {
+        return { status: 403, body: { error: "Only a platform admin can change another organization owner" } };
+      }
+
+      if (member.role === "org_owner" && newRole !== "org_owner" && rows.filter((r) => r.role === "org_owner").length <= 1) {
+        return { status: 409, body: { error: "Cannot demote the last organization owner" } };
+      }
+
+      // Ref 7: a manual role change makes the membership manual (source NULL), so
+      // the Entra role sync never changes or removes it afterwards.
+      await tx
+        .prepare("UPDATE organization_members SET role = ?, source = NULL WHERE organization_id = ? AND user_id = ?")
+        .run(newRole, org.id, req.params.userId);
+      // Refs 49/67: leaving regional_viewer drops the member's region scopes in the
+      // same transaction, so old scopes can never come back with the role.
+      if (member.role === REGIONAL_VIEWER && newRole !== REGIONAL_VIEWER) {
         await tx
           .prepare("DELETE FROM region_viewer_scopes WHERE organization_id = ? AND user_id = ?")
           .run(org.id, req.params.userId);
-      })();
-    } else {
-      await db
-        .prepare(
-          "UPDATE organization_members SET role = ?, source = NULL WHERE organization_id = ? AND user_id = ?",
-        )
-        .run(newRole, org.id, req.params.userId);
-    }
+      }
+      return null;
+    })();
+    if (outcome) return res.status(outcome.status).json(outcome.body);
 
     const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
     logActivity(
@@ -323,33 +308,34 @@ router.delete(
     const org = await loadOrg(req, res, true);
     if (!org) return;
 
-    const member = await db
-      .prepare(
-        "SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?",
-      )
-      .get(org.id, req.params.userId);
-    if (!member) return res.status(404).json({ error: "Member not found" });
+    // Same locked check-then-act as PUT: the last-owner count is taken with every
+    // member row of this org locked, in the transaction that deletes.
+    const outcome = await db.transaction(async (tx) => {
+      const rows = await tx
+        .prepare("SELECT user_id, role FROM organization_members WHERE organization_id = ? FOR UPDATE")
+        .all(org.id);
+      const member = rows.find((r) => r.user_id === req.params.userId);
+      if (!member) return { status: 404, body: { error: "Member not found" } };
 
-    // Same primary-owner lock as PUT.
-    if (req.params.userId === org.owner_user_id) {
-      return res.status(403).json({
-        error: "Cannot remove the organization's primary owner - transfer ownership first",
-      });
-    }
+      // Same primary-owner lock as PUT.
+      if (req.params.userId === org.owner_user_id) {
+        return { status: 403, body: { error: "Cannot remove the organization's primary owner - transfer ownership first" } };
+      }
 
-    if (member.role === "org_owner" && !isPlatformRole(req.user.role)) {
-      return res.status(403).json({ error: "Only a platform admin can remove another organization owner" });
-    }
+      if (member.role === "org_owner" && !isPlatformRole(req.user.role)) {
+        return { status: 403, body: { error: "Only a platform admin can remove another organization owner" } };
+      }
 
-    if (member.role === "org_owner" && (await countOrgOwners(org.id)) <= 1) {
-      return res.status(409).json({ error: "Cannot remove the last organization owner" });
-    }
+      if (member.role === "org_owner" && rows.filter((r) => r.role === "org_owner").length <= 1) {
+        return { status: 409, body: { error: "Cannot remove the last organization owner" } };
+      }
 
-    await db
-      .prepare(
-        "DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?",
-      )
-      .run(org.id, req.params.userId);
+      await tx
+        .prepare("DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?")
+        .run(org.id, req.params.userId);
+      return null;
+    })();
+    if (outcome) return res.status(outcome.status).json(outcome.body);
 
     const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
     logActivity(
@@ -879,19 +865,27 @@ router.patch(
     const parsed = parseLifetimeDays(req.body.max_token_lifetime_days);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
-    await db
-      .prepare("UPDATE organizations SET max_token_lifetime_days = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
-      .run(parsed.value, org.id);
-    const before = org.max_token_lifetime_days ?? null;
+    // "before" is read under a row lock in the same transaction as the UPDATE (not from
+    // the org row loaded above, which a concurrent change can make stale - that let a
+    // real change go unlogged), so changes are recorded in the order they applied.
+    const before = await db.transaction(async (tx) => {
+      const cur = await tx
+        .prepare("SELECT max_token_lifetime_days FROM organizations WHERE id = ? FOR UPDATE")
+        .get(org.id);
+      await tx
+        .prepare("UPDATE organizations SET max_token_lifetime_days = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+        .run(parsed.value, org.id);
+      return cur ? cur.max_token_lifetime_days ?? null : null;
+    })();
     if (before !== parsed.value) {
-      logActivity(
-        req.user.id,
-        "org_token_lifetime_changed",
-        `org: ${org.name} (${org.id}), max_token_lifetime_days: ${before ?? "none"} -> ${parsed.value ?? "none"}`,
-        null,
-        getClientIp(req),
-        null,
-      );
+      await auditOrWarn({
+        userId: req.user.id,
+        action: "org_token_lifetime_changed",
+        details: `org: ${org.name} (${org.id}), max_token_lifetime_days: ${before ?? "none"} -> ${parsed.value ?? "none"}`,
+        target: org.id,
+        ipAddress: getClientIp(req),
+        organizationId: org.id,
+      });
     }
     res.json(tokenPolicyView({ ...org, max_token_lifetime_days: parsed.value }));
   }),
@@ -948,19 +942,23 @@ router.patch(
       }
     }
 
-    await db
-      .prepare("UPDATE organizations SET sso_only = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
-      .run(next ? 1 : 0, org.id);
-    const before = !!org.sso_only;
+    // "before" from a locked read in the UPDATE's transaction (see token-policy above).
+    const before = await db.transaction(async (tx) => {
+      const cur = await tx.prepare("SELECT sso_only FROM organizations WHERE id = ? FOR UPDATE").get(org.id);
+      await tx
+        .prepare("UPDATE organizations SET sso_only = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+        .run(next ? 1 : 0, org.id);
+      return !!(cur && cur.sso_only);
+    })();
     if (before !== next) {
-      await logActivity(
-        req.user.id,
-        "org_sso_only_changed",
-        `org: ${org.name} (${org.id}), sso_only: ${before} -> ${next}`,
-        null,
-        getClientIp(req),
-        null,
-      );
+      await auditOrWarn({
+        userId: req.user.id,
+        action: "org_sso_only_changed",
+        details: `org: ${org.name} (${org.id}), sso_only: ${before} -> ${next}`,
+        target: org.id,
+        ipAddress: getClientIp(req),
+        organizationId: org.id,
+      });
     }
     res.json(authPolicyView({ ...org, sso_only: next ? 1 : 0 }, req.user));
   }),
@@ -1053,6 +1051,16 @@ router.post(
       }
       throw e;
     }
+    // Explicit audit row (awaited) - the generic activityLogger row carries no claim/role.
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "entra_role_mapping_created",
+      details: `org: ${org.name} (${org.id}), claim: ${claimValue}, role: ${role}, workspace: ${ws ? ws.id : "org-level"}`,
+      target: String(result.lastInsertRowid),
+      ipAddress: getClientIp(req),
+      workspaceId: ws ? ws.id : null,
+      organizationId: org.id,
+    });
     res.status(201).json({
       id: result.lastInsertRowid,
       claim_value: claimValue,
@@ -1073,10 +1081,21 @@ router.delete(
     const mapping =
       id &&
       (await db
-        .prepare("SELECT id FROM entra_role_mappings WHERE id = ? AND organization_id = ?")
+        .prepare("SELECT id, claim_value, role, workspace_id FROM entra_role_mappings WHERE id = ? AND organization_id = ?")
         .get(id, org.id));
     if (!mapping) return res.status(404).json({ error: "Mapping not found" });
     await db.prepare("DELETE FROM entra_role_mappings WHERE id = ? AND organization_id = ?").run(mapping.id, org.id);
+    // Explicit audit row (awaited; a revocation - the delete stands, a failed write
+    // prints the NOT AUDITED marker).
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "entra_role_mapping_deleted",
+      details: `org: ${org.name} (${org.id}), claim: ${mapping.claim_value}, role: ${mapping.role}, workspace: ${mapping.workspace_id || "org-level"}`,
+      target: String(mapping.id),
+      ipAddress: getClientIp(req),
+      workspaceId: mapping.workspace_id || null,
+      organizationId: org.id,
+    });
     res.json({ success: true });
   }),
 );
