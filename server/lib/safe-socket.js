@@ -45,4 +45,6 @@ function bail(socket, event, err, ctxFn) {
   process.nextTick(() => { try { socket.disconnect(true); } catch (_) { /* */ } });
 }
 
-module.exports = { protectSocket };
+// bail is also exported for awaits that run outside socket.on (e.g. a namespace's async
+// 'connection' handler body), which protectSocket's wrapper cannot see.
+module.exports = { protectSocket, bail };

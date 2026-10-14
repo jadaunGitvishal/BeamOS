@@ -3,7 +3,7 @@ const { verifyToken } = require('../middleware/auth');
 const { db } = require('../db/database');
 const { accessContext, accessibleWorkspaceIds } = require('../lib/tenancy');
 const { workspaceRoom } = require('../lib/socket-rooms');
-const { protectSocket } = require('../lib/safe-socket');
+const { protectSocket, bail } = require('../lib/safe-socket');
 const { LOCKDOWN_COMMANDS, SOCKET_COMMANDS } = require('../lib/device-commands');
 
 // Phase 2.3: workspace-scoped socket rooms + per-command permission gates.
@@ -172,9 +172,19 @@ module.exports = function setupDashboardSocket(io) {
     // This is the only part of connection setup that genuinely needs
     // accessibleWorkspaceIds()'s result, so it's the only part still gated on the
     // await - the listener registrations above no longer wait on it.
-    const wsIds = await accessibleWorkspaceIds(socket.userId, socket.userRole);
-    for (const wsId of wsIds) socket.join(workspaceRoom(wsId));
-    console.log(`Dashboard client connected: ${socket.id} (user: ${socket.userId}, rooms: ${wsIds.length})`);
+    //
+    // This await is NOT inside a socket.on handler, so protectSocket can't see it: a
+    // failed lookup (a DB error) used to escape as an unhandledRejection, which
+    // server.js treats as fatal - one dashboard connect could take the whole server
+    // down. Same per-connection fail-fast as every handler above instead: log, tell
+    // the socket (server:error), disconnect just this socket.
+    try {
+      const wsIds = await accessibleWorkspaceIds(socket.userId, socket.userRole);
+      for (const wsId of wsIds) socket.join(workspaceRoom(wsId));
+      console.log(`Dashboard client connected: ${socket.id} (user: ${socket.userId}, rooms: ${wsIds.length})`);
+    } catch (e) {
+      bail(socket, 'connection', e, () => socket.userId);
+    }
   });
 
   return dashboardNs;
