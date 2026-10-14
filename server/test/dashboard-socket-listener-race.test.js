@@ -18,47 +18,52 @@
 // of the handlers use its result (they resolve permissions per-call via
 // canActOnDevice()). Only the room-join genuinely needs it, so only that stays gated on
 // the await.
-
-const os = require('node:os');
-const path = require('node:path');
-const crypto = require('node:crypto');
-process.env.JWT_SECRET = 'test-secret-dashboard-socket-race';
+//
+// The REAL ws/dashboardSocket.js + lib/tenancy against the REAL MySQL test DB
+// (beamos_test via npm test). The only test seam is the delay: the real
+// accessibleWorkspaceIds is wrapped (before dashboardSocket.js loads and destructures
+// it) to wait `accessibleWorkspacesDelayMs` and then run the real query. The user acts
+// on the device as its org's owner (real accessContext -> actingAs). Fixtures are
+// test-owned (dsr- prefix, generated ids) and removed in after().
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const Database = require('better-sqlite3');
 const { Server } = require('socket.io');
 const ioClient = require('socket.io-client');
+const { db } = require('../db/database');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE devices (id TEXT PRIMARY KEY, workspace_id TEXT, status TEXT, user_id TEXT, created_at INTEGER);
-  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT);
-  CREATE TABLE play_logs (id INTEGER PRIMARY KEY, started_at INTEGER);
-  CREATE TABLE device_usage_daily (day TEXT);
-  CREATE TABLE users (id TEXT PRIMARY KEY, deactivated_at INTEGER);
-`);
-// Ref 5/8: the /dashboard handshake now checks users.deactivated_at.
-db.prepare('INSERT INTO users (id) VALUES (?)').run('u-1');
-db.prepare('INSERT INTO devices (id, workspace_id) VALUES (?, ?)').run('dev-1', 'ws-1');
-db.prepare('INSERT INTO workspaces (id, name) VALUES (?, ?)').run('ws-1', 'WS One');
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
+const P = `dsr-${randTag()}`;
+const ID = { user: `${P}-u-1`, org: `${P}-org`, ws: `${P}-ws-1`, dev: `${P}-dev-1` };
+
+test.before(async () => {
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+  await run("INSERT INTO users (id, email, name, password_hash, auth_provider, role) VALUES (?, ?, ?, NULL, 'local', 'user')", ID.user, `${ID.user}@test.local`, ID.user);
+  await run("INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')", ID.org, `${P} Org`, ID.user);
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", ID.org, ID.user);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.ws, ID.org, 'WS One');
+  await run('INSERT INTO devices (id, workspace_id) VALUES (?, ?)', ID.dev, ID.ws);
+});
 
 // Controllable delay standing in for a cold MySQL pool connection's added latency on
 // the first query after inactivity - the real-world condition that widened this race.
+// Each call is tracked until it settles: the server's connection handler is still
+// waiting on a delayed lookup after the client has its ack, and after() must let those
+// real queries finish before it closes the pool.
 let accessibleWorkspacesDelayMs = 0;
-const tenancyModulePath = require.resolve('../lib/tenancy');
-require.cache[tenancyModulePath] = {
-  id: tenancyModulePath, filename: tenancyModulePath, loaded: true,
-  exports: {
-    accessibleWorkspaceIds: async () => {
-      if (accessibleWorkspacesDelayMs > 0) await new Promise((r) => setTimeout(r, accessibleWorkspacesDelayMs));
-      return ['ws-1'];
-    },
-    accessContext: async () => ({ actingAs: true }),
-  },
+const pendingWorkspaceLookups = new Set();
+const tenancy = require('../lib/tenancy');
+const realAccessibleWorkspaceIds = tenancy.accessibleWorkspaceIds;
+tenancy.accessibleWorkspaceIds = (...args) => {
+  const delayMs = accessibleWorkspacesDelayMs;
+  const p = (async () => {
+    if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    return realAccessibleWorkspaceIds(...args);
+  })();
+  pendingWorkspaceLookups.add(p);
+  p.then(() => pendingWorkspaceLookups.delete(p), () => pendingWorkspaceLookups.delete(p));
+  return p;
 };
 
 const { generateToken } = require('../middleware/auth');
@@ -81,7 +86,7 @@ test.before(async () => {
 
   deviceSocket = ioClient(`${base}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
   await new Promise((r) => deviceSocket.on('connect', r));
-  deviceSocket.emit('register', 'dev-1');
+  deviceSocket.emit('register', ID.dev);
   await new Promise((r) => setTimeout(r, 100));
 });
 
@@ -89,10 +94,11 @@ test.after(async () => {
   try { deviceSocket.close(); } catch { /* */ }
   try { await new Promise((r) => io.close(r)); } catch { /* */ }
   try { httpServer.close(); } catch { /* */ }
-  db.close();
+  await Promise.allSettled([...pendingWorkspaceLookups]); // delayed real lookups still in flight
+  try { await cleanupUsers(db, [ID.user]); } finally { await db.close(); }
 });
 
-const token = () => generateToken({ id: 'u-1', email: 'u@test.local', role: 'user' }, 'ws-1');
+const token = () => generateToken({ id: ID.user, email: `${ID.user}@test.local`, role: 'user' }, ID.ws);
 
 // Emits dashboard:device-command SYNCHRONOUSLY inside the 'connect' handler - the exact
 // technique that surfaced the real race (a real dashboard command sent right after the
@@ -112,7 +118,7 @@ function emitImmediatelyOnConnect(deviceId, type) {
 
 test('regression: dashboard:device-command emitted immediately on connect is NOT dropped, even with a slow accessibleWorkspaceIds()', async () => {
   accessibleWorkspacesDelayMs = 300; // stands in for a cold DB connection after inactivity
-  const result = await emitImmediatelyOnConnect('dev-1', 'screen_on');
+  const result = await emitImmediatelyOnConnect(ID.dev, 'screen_on');
   accessibleWorkspacesDelayMs = 0;
   assert.equal(result.timedOut, false, 'the event must not be silently dropped');
   assert.deepEqual(result.ack, { delivered: true }, 'a real device online in its room gets a real delivered ack');
@@ -120,14 +126,14 @@ test('regression: dashboard:device-command emitted immediately on connect is NOT
 
 test('regression: still correct with an even larger delay (registration has NO dependency on it at all)', async () => {
   accessibleWorkspacesDelayMs = 1500;
-  const result = await emitImmediatelyOnConnect('dev-1', 'screen_on');
+  const result = await emitImmediatelyOnConnect(ID.dev, 'screen_on');
   accessibleWorkspacesDelayMs = 0;
   assert.equal(result.timedOut, false);
   assert.deepEqual(result.ack, { delivered: true });
 });
 
 test('sanity: the normal (zero-delay) fast path still works', async () => {
-  const result = await emitImmediatelyOnConnect('dev-1', 'screen_on');
+  const result = await emitImmediatelyOnConnect(ID.dev, 'screen_on');
   assert.equal(result.timedOut, false);
   assert.deepEqual(result.ack, { delivered: true });
 });

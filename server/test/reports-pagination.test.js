@@ -2,9 +2,10 @@
 
 // Ref 73 — pagination on GET /api/reports/plays and GET /api/reports/export.
 //
-// In-memory sqlite + the real middleware chain (bearerAuth/resolveTenancy/
-// tokenScopeGate) + the real routes/reports.js, mounted exactly as server.js
-// mounts PUBLIC_ROUTERS. Covers:
+// The real middleware chain (bearerAuth/resolveTenancy/tokenScopeGate) + the real
+// routes/reports.js, mounted exactly as server.js mounts PUBLIC_ROUTERS
+// (helpers/inprocess-app.js), against the REAL MySQL test DB (beamos_test via npm
+// test). Covers:
 //   - /plays: offset paging returns the correct partial slice, X-Total-Count
 //     reflects the FULL matching count (not the page size), omitting
 //     limit/offset keeps the pre-existing default (up to 500, newest first)
@@ -15,116 +16,63 @@
 //     must not regress it) - the number of rows returned NEVER changes based
 //     on the row count for that call shape
 //   - a requested page size above the cap is silently capped, never unbounded
+//
+// Fixtures are test-owned (rp- prefix, generated ids) and removed afterwards (the
+// device, its play_logs and the token go with the user's org).
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-process.env.JWT_SECRET = 'test-secret-reports-pagination';
-
-const db = new Database(':memory:');
-db.function('UNIX_TIMESTAMP', () => Math.floor(Date.now() / 1000));
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL, max_token_lifetime_days INTEGER);
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL,
-    slug TEXT, region_id TEXT, updated_at INTEGER DEFAULT 0
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE devices (id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT);
-  CREATE TABLE play_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, content_id TEXT, widget_id TEXT, zone_id TEXT,
-    content_name TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL, ended_at INTEGER,
-    duration_sec INTEGER, completed INTEGER NOT NULL DEFAULT 0, trigger_type TEXT DEFAULT 'playlist',
-    created_at INTEGER NOT NULL DEFAULT 0, session_id TEXT
-  );
-  CREATE TABLE api_tokens (
-    id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, name TEXT NOT NULL,
-    user_id TEXT NOT NULL, workspace_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'read',
-    auto_publish INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0,
-    last_used_at INTEGER, revoked_at INTEGER
-  );
-  CREATE TABLE api_token_targets (token_id TEXT NOT NULL, playlist_id TEXT NOT NULL);
-`);
-
-const _rawExec = db.exec.bind(db);
-db.transaction = (fn) => async (...args) => {
-  _rawExec('BEGIN');
-  try {
-    const r = await fn(db, ...args);
-    _rawExec('COMMIT');
-    return r;
-  } catch (e) {
-    try { _rawExec('ROLLBACK'); } catch { /* already rolled back */ }
-    throw e;
-  }
-};
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { bearerAuth, tokenScopeGate } = require('../middleware/apiToken');
-const { resolveTenancy } = require('../lib/tenancy');
-const { activityLogger } = require('../services/activity');
-
-// --- fixtures ------------------------------------------------------------
-db.prepare("INSERT INTO organizations (id,name,owner_user_id) VALUES ('org-a','Org A','u-admin')").run();
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-admin','admin@t.test','user')").run();
-db.prepare("INSERT INTO organization_members (organization_id,user_id,role) VALUES ('org-a','u-admin','org_owner')").run();
-db.prepare("INSERT INTO workspaces (id,organization_id,name) VALUES ('ws-a','org-a','WS A')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-a','u-admin','workspace_admin')").run();
-db.prepare("INSERT INTO devices (id,workspace_id,name) VALUES ('dev1','ws-a','Lobby')").run();
-
-// 23 play_logs rows, started_at spread out so DESC/ASC ordering is unambiguous.
-const NOW = Math.floor(Date.now() / 1000);
+const P = `rp-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const ID = { admin: id('admin'), orgA: id('org-a'), wsA: id('ws-a'), dev1: id('dev1') };
 const TOTAL_ROWS = 23;
-for (let i = 0; i < TOTAL_ROWS; i++) {
-  db.prepare(
-    "INSERT INTO play_logs (device_id, content_name, started_at, duration_sec, completed) VALUES ('dev1', ?, ?, 30, 1)",
-  ).run(`Item ${i}`, NOW - (TOTAL_ROWS - i) * 60); // ascending: Item 0 oldest ... Item 22 newest
-}
-
-const jwtAdmin = generateToken({ id: 'u-admin', email: 'admin@t.test', role: 'user' }, 'ws-a');
-
-const app = express();
-app.use(express.json());
-app.use(activityLogger);
-app.use('/api/tokens', requireAuth, resolveTenancy, require('../routes/tokens'));
-app.use('/api/reports', bearerAuth, resolveTenancy, tokenScopeGate, require('../routes/reports'));
-app.use((err, req, res, _next) => { res.status(500).json({ error: err.message, stack: err.stack }); });
-
-const server = app.listen(0);
-let base;
+let app;
 let readToken;
 
 const call = (method, path, token, body) =>
-  fetch(base + path, {
+  fetch(app.base + path, {
     method,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
 before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/tokens', '/api/reports'] });
+  const run = (sql, ...p) => app.db.prepare(sql).run(...p);
+  await run("INSERT INTO users (id, email, name, password_hash, auth_provider, role) VALUES (?, ?, ?, NULL, 'local', 'user')", ID.admin, `${ID.admin}@t.test`, ID.admin);
+  await run("INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')", ID.orgA, `${P} Org A`, ID.admin);
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", ID.orgA, ID.admin);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'WS A');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsA, ID.admin);
+  await run("INSERT INTO devices (id, workspace_id, name) VALUES (?, ?, 'Lobby')", ID.dev1, ID.wsA);
+
+  // 23 play_logs rows, started_at spread out so DESC/ASC ordering is unambiguous.
+  const NOW = Math.floor(Date.now() / 1000);
+  for (let i = 0; i < TOTAL_ROWS; i++) {
+    await run(
+      'INSERT INTO play_logs (device_id, content_name, started_at, duration_sec, completed) VALUES (?, ?, ?, 30, 1)',
+      ID.dev1, `Item ${i}`, NOW - (TOTAL_ROWS - i) * 60, // ascending: Item 0 oldest ... Item 22 newest
+    );
+  }
+
+  const jwtAdmin = generateToken({ id: ID.admin, email: `${ID.admin}@t.test`, role: 'user' }, ID.wsA);
   const r = await call('POST', '/api/tokens', jwtAdmin, { name: 'bi-read', scope: 'read' });
   assert.equal(r.status, 201);
   readToken = (await r.json()).token;
 });
-after(() => { server.close(); db.close(); });
+
+after(async () => {
+  try {
+    if (app) await cleanupUsers(app.db, [ID.admin]);
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
 
 // -------------------------------------------------------------------
 

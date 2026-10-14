@@ -10,49 +10,45 @@
 // the emit and the queue.
 //
 // Same in-process harness as dashboard-socket-listener-race.test.js: real socket.io
-// server + client, better-sqlite3 in-memory db and a stubbed lib/tenancy via the
-// require cache. accessContext is stubbed per user id to model each role.
-
-process.env.JWT_SECRET = 'test-secret-dashboard-socket-allowlist';
+// server + client and the REAL ws/dashboardSocket.js + lib/tenancy against the REAL
+// MySQL test DB (beamos_test via npm test). Each role is a real seeded user, so the
+// real accessContext resolves it: editor / workspace admin / viewer by their
+// workspace membership, the platform admin by its platform role (act-as, no
+// membership). Fixtures are test-owned (dsa- prefix, generated ids) and removed in
+// after().
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const Database = require('better-sqlite3');
 const { Server } = require('socket.io');
 const ioClient = require('socket.io-client');
+const { db } = require('../db/database');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE devices (id TEXT PRIMARY KEY, workspace_id TEXT, status TEXT, user_id TEXT, created_at INTEGER);
-  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT);
-  CREATE TABLE play_logs (id INTEGER PRIMARY KEY, started_at INTEGER);
-  CREATE TABLE device_usage_daily (day TEXT);
-  CREATE TABLE users (id TEXT PRIMARY KEY, deactivated_at INTEGER);
-`);
+const P = `dsa-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const ID = { org: id('org'), ws: id('ws-1'), devOnline: id('dev-online'), devOffline: id('dev-offline') };
+// Keys are the role names the tests address; U maps them to this run's user ids.
 const USERS = ['u-editor', 'u-wsadmin', 'u-platadmin', 'u-viewer'];
-for (const id of USERS) db.prepare('INSERT INTO users (id) VALUES (?)').run(id);
-db.prepare('INSERT INTO workspaces (id, name) VALUES (?, ?)').run('ws-1', 'WS One');
-db.prepare('INSERT INTO devices (id, workspace_id) VALUES (?, ?)').run('dev-online', 'ws-1');
-db.prepare('INSERT INTO devices (id, workspace_id) VALUES (?, ?)').run('dev-offline', 'ws-1');
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
+const U = Object.fromEntries(USERS.map((k) => [k, id(k)]));
+const OWNER = id('owner'); // owns the org; never connects
+const userIds = [OWNER, ...USERS.map((k) => U[k])];
 
-// Role per user, in accessContext's real return shape (lib/tenancy.js).
-const CTX = {
-  'u-editor': { workspaceRole: 'workspace_editor', actingAs: false },
-  'u-wsadmin': { workspaceRole: 'workspace_admin', actingAs: false },
-  'u-platadmin': { workspaceRole: null, actingAs: true },
-  'u-viewer': { workspaceRole: 'workspace_viewer', actingAs: false },
-};
-const tenancyModulePath = require.resolve('../lib/tenancy');
-require.cache[tenancyModulePath] = {
-  id: tenancyModulePath, filename: tenancyModulePath, loaded: true,
-  exports: {
-    accessibleWorkspaceIds: async () => ['ws-1'],
-    accessContext: async (userId) => CTX[userId] || null,
-  },
-};
+test.before(async () => {
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+  for (const uid of userIds) {
+    const role = uid === U['u-platadmin'] ? 'platform_admin' : 'user';
+    await run("INSERT INTO users (id, email, name, password_hash, auth_provider, role) VALUES (?, ?, ?, NULL, 'local', ?)", uid, `${uid}@test.local`, uid, role);
+  }
+  await run("INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')", ID.org, `${P} Org`, OWNER);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.ws, ID.org, 'WS One');
+  const wm = 'INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)';
+  await run(wm, ID.ws, U['u-editor'], 'workspace_editor');
+  await run(wm, ID.ws, U['u-wsadmin'], 'workspace_admin');
+  await run(wm, ID.ws, U['u-viewer'], 'workspace_viewer');
+  await run('INSERT INTO devices (id, workspace_id) VALUES (?, ?)', ID.devOnline, ID.ws);
+  await run('INSERT INTO devices (id, workspace_id) VALUES (?, ?)', ID.devOffline, ID.ws);
+});
 
 const { generateToken } = require('../middleware/auth');
 const heartbeat = require('../services/heartbeat');
@@ -72,9 +68,9 @@ console.warn = (...args) => { warnings.push(args.join(' ')); };
 
 function connectDashboard(userId) {
   return new Promise((resolve, reject) => {
-    const role = userId === 'u-platadmin' ? 'platform_admin' : 'user';
+    const role = userId === U['u-platadmin'] ? 'platform_admin' : 'user';
     const sock = ioClient(`${base}/dashboard`, {
-      auth: { token: generateToken({ id: userId, email: `${userId}@test.local`, role }, 'ws-1') },
+      auth: { token: generateToken({ id: userId, email: `${userId}@test.local`, role }, ID.ws) },
       transports: ['websocket'], reconnection: false, forceNew: true,
     });
     sock.on('connect', () => resolve(sock));
@@ -98,22 +94,22 @@ test.before(async () => {
   await new Promise((r) => deviceSocket.on('connect', r));
   deviceSocket.on('device:command', (data) => received.push(data));
   deviceSocket.on('device:screenshot-request', () => { screenshotRequests++; });
-  deviceSocket.emit('register', 'dev-online');
-  heartbeat.registerConnection('dev-online', deviceSocket.id); // for request-screenshot
+  deviceSocket.emit('register', ID.devOnline);
+  heartbeat.registerConnection(ID.devOnline, deviceSocket.id); // for request-screenshot
   await new Promise((r) => setTimeout(r, 100));
 
-  for (const u of USERS) dashSockets[u] = await connectDashboard(u);
+  for (const u of USERS) dashSockets[u] = await connectDashboard(U[u]);
 });
 
 test.after(async () => {
   console.warn = realWarn;
   for (const s of Object.values(dashSockets)) { try { s.close(); } catch { /* */ } }
   try { deviceSocket.close(); } catch { /* */ }
-  heartbeat.removeConnection('dev-online');
+  heartbeat.removeConnection(ID.devOnline);
   commandQueue._resetForTests();
   try { await new Promise((r) => io.close(r)); } catch { /* */ }
   try { httpServer.close(); } catch { /* */ }
-  db.close();
+  try { await cleanupUsers(db, [...userIds].reverse()); } finally { await db.close(); }
 });
 
 test.beforeEach(() => {
@@ -137,7 +133,7 @@ test('editor, online device: each of the 10 main-app socket types is delivered t
     'screen_on', 'set_debug', 'settings', 'shutdown', 'update',
   ]);
   for (const type of SOCKET_COMMANDS) {
-    const ack = await send('u-editor', 'dev-online', { type });
+    const ack = await send('u-editor', ID.devOnline, { type });
     assert.deepEqual(ack, { delivered: true }, type);
   }
   await sleep(150);
@@ -148,7 +144,7 @@ test('editor, online device: each of the 10 main-app socket types is delivered t
 test('lockdown types over the socket -> use_rest, nothing delivered (editor, workspace admin, platform_admin)', async () => {
   for (const user of ['u-editor', 'u-wsadmin', 'u-platadmin']) {
     for (const type of LOCKDOWN_COMMANDS) {
-      const ack = await send(user, 'dev-online', { type });
+      const ack = await send(user, ID.devOnline, { type });
       assert.deepEqual(ack, { delivered: false, reason: 'use_rest' }, `${user} ${type}`);
     }
   }
@@ -156,7 +152,7 @@ test('lockdown types over the socket -> use_rest, nothing delivered (editor, wor
   assert.equal(received.length, 0, 'the device received nothing');
   assert.equal(warnings.length, 6, 'one warning per refusal');
   for (const w of warnings) assert.match(w, /lockdown commands are REST-only/);
-  assert.ok(warnings[0].includes('u-editor') && warnings[0].includes('dev-online') && warnings[0].includes('enable_kiosk_lockdown'));
+  assert.ok(warnings[0].includes('u-editor') && warnings[0].includes(ID.devOnline) && warnings[0].includes('enable_kiosk_lockdown'));
 });
 
 test('editor: excluded / made-up / missing / non-string types -> unsupported_command, nothing delivered', async () => {
@@ -165,34 +161,34 @@ test('editor: excluded / made-up / missing / non-string types -> unsupported_com
     {}, { type: 42 }, { type: { evil: true } }, { type: ['screen_on'] },
   ];
   for (const data of cases) {
-    const ack = await send('u-editor', 'dev-online', data);
+    const ack = await send('u-editor', ID.devOnline, data);
     assert.deepEqual(ack, { delivered: false, reason: 'unsupported_command' }, JSON.stringify(data));
   }
   await sleep(150);
   assert.equal(received.length, 0, 'the device received nothing');
   assert.equal(warnings.length, cases.length, 'one warning per refusal');
-  assert.ok(warnings.every((w) => w.includes('u-editor') && w.includes('dev-online')));
+  assert.ok(warnings.every((w) => w.includes('u-editor') && w.includes(ID.devOnline)));
   assert.ok(warnings[0].includes('"refresh"'));
 });
 
 test('offline device: a refused type is NOT queued; an allowed type is queued as before', async () => {
   for (const type of ['enable_kiosk_lockdown', 'refresh', 'format_disk']) {
-    const ack = await send('u-editor', 'dev-offline', { type });
+    const ack = await send('u-editor', ID.devOffline, { type });
     assert.equal(ack.delivered, false);
     assert.ok(['use_rest', 'unsupported_command'].includes(ack.reason), type);
     assert.equal(ack.queued, undefined, 'refusal carries no queued flag');
   }
-  assert.equal(commandQueue.getQueueDepth('dev-offline'), 0, 'nothing queued for refused types');
+  assert.equal(commandQueue.getQueueDepth(ID.devOffline), 0, 'nothing queued for refused types');
   assert.equal(warnings.length, 3);
 
-  const ok = await send('u-editor', 'dev-offline', { type: 'screen_off' });
+  const ok = await send('u-editor', ID.devOffline, { type: 'screen_off' });
   assert.deepEqual(ok, { delivered: false, queued: true, reason: 'offline' });
-  assert.equal(commandQueue.getQueueDepth('dev-offline'), 1);
+  assert.equal(commandQueue.getQueueDepth(ID.devOffline), 1);
 });
 
 test('viewer: the existing write check still runs first -> forbidden, nothing sent, no allowlist warning', async () => {
   for (const type of ['screen_on', 'enable_kiosk_lockdown', 'format_disk']) {
-    const ack = await send('u-viewer', 'dev-online', { type });
+    const ack = await send('u-viewer', ID.devOnline, { type });
     assert.deepEqual(ack, { delivered: false, reason: 'forbidden' }, type);
   }
   await sleep(150);
@@ -202,7 +198,7 @@ test('viewer: the existing write check still runs first -> forbidden, nothing se
 
 test('regression: dashboard:request-screenshot still reaches the device for an editor', async () => {
   const before = screenshotRequests;
-  dashSockets['u-editor'].emit('dashboard:request-screenshot', { device_id: 'dev-online' });
+  dashSockets['u-editor'].emit('dashboard:request-screenshot', { device_id: ID.devOnline });
   await sleep(200);
   assert.equal(screenshotRequests, before + 1);
 });

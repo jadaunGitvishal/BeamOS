@@ -3,108 +3,85 @@
 // Ref 30 Stage 1: advance device registration codes.
 //
 // Drives the REAL router (routes/registration-codes.js) mounted exactly as
-// server.js mounts it - requireAuth + the router, JWT-only, no resolveTenancy -
-// against an in-memory better-sqlite3 DB swapped in for db/database.js (the same
-// pattern as tenancy-cross-tenant.test.js). Covers:
+// server.js mounts it - requireAuth + the router, JWT-only, no resolveTenancy
+// (helpers/inprocess-app.js) - against the REAL MySQL test DB (beamos_test via
+// npm test). Covers:
 //   - a code generates correctly (6 digits, status 'unused', persisted)
 //   - codes are scoped to the workspace they were minted for
 //   - RBAC: only workspace_admin and above can generate / list codes
 //   - the QR endpoint returns a valid PNG that DECODES to the /activate/<code> URL
+//
+// Fixtures are test-owned (rc- prefix, generated ids) and removed afterwards:
+// registration_codes.created_by has no ON DELETE action, so this file's codes are
+// deleted first, then the users (newest first, so each org owner goes last).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
 const sharp = require('sharp');
 const jsQR = require('jsqr');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-process.env.JWT_SECRET = 'test-secret-registration-codes';
+const P = `rc-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const ID = { orgA: id('org-a'), orgB: id('org-b'), wsA: id('ws-a'), wsB: id('ws-b'), devClaimed: id('dev-claimed') };
+const U = {};
+const tok = {};
+const userIds = [];
+let app;
 
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    role TEXT NOT NULL DEFAULT 'user', auth_provider TEXT NOT NULL DEFAULT 'local',
-    avatar_url TEXT, plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE devices (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT DEFAULT '', status TEXT DEFAULT 'offline'
-  );
-  CREATE TABLE registration_codes (
-    id TEXT PRIMARY KEY,
-    code TEXT NOT NULL UNIQUE,
-    workspace_id TEXT NOT NULL,
-    planned_device_name TEXT,
-    status TEXT NOT NULL DEFAULT 'unused',
-    created_by TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER,
-    claimed_by_device_id TEXT,
-    claimed_at INTEGER
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const registrationCodesRouter = require('../routes/registration-codes');
-
-// --- Seed: two orgs / workspaces, and a user at every role tier -------------
-db.prepare("INSERT INTO users (id, email, role) VALUES ('u-admin', 'admin@a.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('u-editor', 'editor@a.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('u-viewer', 'viewer@a.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('u-orgadmin', 'orgadmin@a.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('u-outsider', 'outsider@b.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('u-platform', 'root@platform.test', 'platform_admin')").run();
-
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-a', 'Org A', 'u-admin')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-b', 'Org B', 'u-outsider')").run();
-
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a', 'org-a', 'Workspace A')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-b', 'org-b', 'Workspace B')").run();
-
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'u-admin', 'workspace_admin')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'u-editor', 'workspace_editor')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'u-viewer', 'workspace_viewer')").run();
-db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES ('org-a', 'u-orgadmin', 'org_admin')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-b', 'u-outsider', 'workspace_admin')").run();
-
-const tok = {
-  admin: generateToken({ id: 'u-admin', email: 'admin@a.test', role: 'user' }, 'ws-a'),
-  editor: generateToken({ id: 'u-editor', email: 'editor@a.test', role: 'user' }, 'ws-a'),
-  viewer: generateToken({ id: 'u-viewer', email: 'viewer@a.test', role: 'user' }, 'ws-a'),
-  orgadmin: generateToken({ id: 'u-orgadmin', email: 'orgadmin@a.test', role: 'user' }, 'ws-a'),
-  outsider: generateToken({ id: 'u-outsider', email: 'outsider@b.test', role: 'user' }, 'ws-b'),
-  platform: generateToken({ id: 'u-platform', email: 'root@platform.test', role: 'platform_admin' }, 'ws-a'),
-};
-
-const app = express();
-app.use(express.json());
-app.use('/api/provisioning', requireAuth, registrationCodesRouter);
-app.use((err, req, res, _next) => { res.status(500).json({ error: err.message }); });
-
-const server = app.listen(0);
-let base;
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/provisioning'] });
+  const run = (sql, ...p) => app.db.prepare(sql).run(...p);
+
+  // --- Seed: two orgs / workspaces, and a user at every role tier ---
+  const mk = async (key, role, wsId) => {
+    const uid = id(key);
+    const email = `${uid}@t.test`;
+    await run("INSERT INTO users (id, email, name, password_hash, auth_provider, role) VALUES (?, ?, ?, NULL, 'local', ?)", uid, email, uid, role);
+    userIds.push(uid);
+    U[key] = uid;
+    tok[key] = generateToken({ id: uid, email, role }, wsId);
+  };
+  await mk('admin', 'user', ID.wsA);
+  await mk('editor', 'user', ID.wsA);
+  await mk('viewer', 'user', ID.wsA);
+  await mk('orgadmin', 'user', ID.wsA);
+  await mk('outsider', 'user', ID.wsB);
+  await mk('platform', 'platform_admin', ID.wsA);
+
+  const org = "INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')";
+  await run(org, ID.orgA, `${P} Org A`, U.admin);
+  await run(org, ID.orgB, `${P} Org B`, U.outsider);
+
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'Workspace A');
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsB, ID.orgB, 'Workspace B');
+
+  const wm = 'INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)';
+  await run(wm, ID.wsA, U.admin, 'workspace_admin');
+  await run(wm, ID.wsA, U.editor, 'workspace_editor');
+  await run(wm, ID.wsA, U.viewer, 'workspace_viewer');
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_admin')", ID.orgA, U.orgadmin);
+  await run(wm, ID.wsB, U.outsider, 'workspace_admin');
 });
-test.after(() => { server.close(); db.close(); });
+
+test.after(async () => {
+  try {
+    if (app) {
+      await app.db.prepare('DELETE FROM registration_codes WHERE workspace_id IN (?, ?)').run(ID.wsA, ID.wsB);
+      await cleanupUsers(app.db, [...userIds].reverse());
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
+
+const codeRow = (codeId) => app.db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(codeId);
+const codeCount = async (codeId) => Number((await app.db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(codeId)).n);
+const setExpiry = (codeId, at) => app.db.prepare('UPDATE registration_codes SET expires_at = ? WHERE id = ?').run(at, codeId);
+const setClaimed = (codeId) => app.db.prepare("UPDATE registration_codes SET status = 'claimed' WHERE id = ?").run(codeId);
 
 const authed = (token, extra = {}) => ({ headers: { Authorization: `Bearer ${token}`, ...extra } });
 const postJson = (token, body) => ({
@@ -112,28 +89,27 @@ const postJson = (token, body) => ({
   headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
+const codes = () => `${app.base}/api/provisioning/registration-codes`;
 
 test('generate: workspace_admin mints a 6-digit unused code, persisted + scoped', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`,
-    postJson(tok.admin, { workspace_id: 'ws-a', planned_device_name: '  Lobby screen  ' }));
+  const res = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA, planned_device_name: '  Lobby screen  ' }));
   assert.equal(res.status, 201);
   const body = await res.json();
   assert.match(body.code, /^[0-9]{6}$/, 'code is exactly 6 digits');
   assert.equal(body.status, 'unused');
-  assert.equal(body.workspace_id, 'ws-a');
+  assert.equal(body.workspace_id, ID.wsA);
   assert.equal(body.planned_device_name, 'Lobby screen', 'planned name is trimmed');
   assert.equal(body.claimed_by_device_id, null);
 
-  const row = db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(body.id);
+  const row = await codeRow(body.id);
   assert.ok(row, 'row persisted');
   assert.equal(row.code, body.code);
-  assert.equal(row.workspace_id, 'ws-a');
-  assert.equal(row.created_by, 'u-admin');
+  assert.equal(row.workspace_id, ID.wsA);
+  assert.equal(row.created_by, U.admin);
 });
 
 test('generate: planned_device_name is optional', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`,
-    postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const res = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
   assert.equal(res.status, 201);
   const body = await res.json();
   assert.equal(body.planned_device_name, null);
@@ -141,57 +117,55 @@ test('generate: planned_device_name is optional', async () => {
 
 test('generate: sets expires_at ~30 days out and returns it', async () => {
   const t0 = Math.floor(Date.now() / 1000);
-  const res = await fetch(`${base}/api/provisioning/registration-codes`,
-    postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const res = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
   assert.equal(res.status, 201);
   const body = await res.json();
   const THIRTY_D = 30 * 24 * 60 * 60;
   assert.ok(Math.abs(body.expires_at - (t0 + THIRTY_D)) < 120, `expires_at ≈ created_at + 30d (got ${body.expires_at - t0}s)`);
   assert.equal(body.expired, false);
 
-  const row = db.prepare('SELECT expires_at FROM registration_codes WHERE id = ?').get(body.id);
+  const row = await codeRow(body.id);
   assert.equal(row.expires_at, body.expires_at, 'persisted');
 
   // And it shows up in the admin list.
-  const list = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
+  const list = await fetch(`${codes()}?workspace_id=${ID.wsA}`, authed(tok.admin)).then((r) => r.json());
   const listed = list.find((c) => c.code === body.code);
   assert.equal(listed.expires_at, body.expires_at);
   assert.equal(listed.expired, false);
 });
 
 test('list: an unused code past expires_at is reported expired:true', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
-  const { id, code } = await res.json();
-  db.prepare('UPDATE registration_codes SET expires_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 10, id);
-  const list = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
+  const res = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
+  const { id: codeId, code } = await res.json();
+  await setExpiry(codeId, Math.floor(Date.now() / 1000) - 10);
+  const list = await fetch(`${codes()}?workspace_id=${ID.wsA}`, authed(tok.admin)).then((r) => r.json());
   const row = list.find((c) => c.code === code);
   assert.equal(row.status, 'unused');
   assert.equal(row.expired, true);
 });
 
 test('regenerate: expired unused code -> fresh code + expiry, old row untouched (audit trail)', async () => {
-  const mk = await fetch(`${base}/api/provisioning/registration-codes`,
-    postJson(tok.admin, { workspace_id: 'ws-a', planned_device_name: 'Warehouse gate' }));
+  const mk = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA, planned_device_name: 'Warehouse gate' }));
   const oldRow = await mk.json();
   // Age it out.
   const staleExpiry = Math.floor(Date.now() / 1000) - 3600;
-  db.prepare('UPDATE registration_codes SET expires_at = ? WHERE id = ?').run(staleExpiry, oldRow.id);
+  await setExpiry(oldRow.id, staleExpiry);
 
   const t0 = Math.floor(Date.now() / 1000);
-  const regen = await fetch(`${base}/api/provisioning/registration-codes/${oldRow.id}/regenerate`, postJson(tok.admin, {}));
+  const regen = await fetch(`${codes()}/${oldRow.id}/regenerate`, postJson(tok.admin, {}));
   assert.equal(regen.status, 201);
   const fresh = await regen.json();
 
   assert.notEqual(fresh.id, oldRow.id);
   assert.notEqual(fresh.code, oldRow.code);
-  assert.equal(fresh.workspace_id, 'ws-a', 'reuses workspace');
+  assert.equal(fresh.workspace_id, ID.wsA, 'reuses workspace');
   assert.equal(fresh.planned_device_name, 'Warehouse gate', 'reuses planned name');
   assert.equal(fresh.status, 'unused');
   assert.equal(fresh.expired, false);
   assert.ok(fresh.expires_at > t0 + 29 * 24 * 60 * 60, 'fresh 30-day expiry');
 
   // Old row is NOT deleted and NOT mutated - still unused, still with its stale expiry.
-  const stillThere = db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(oldRow.id);
+  const stillThere = await codeRow(oldRow.id);
   assert.ok(stillThere, 'old row kept for the audit trail');
   assert.equal(stillThere.status, 'unused');
   assert.equal(stillThere.expires_at, staleExpiry, 'old expiry unchanged');
@@ -199,32 +173,32 @@ test('regenerate: expired unused code -> fresh code + expiry, old row untouched 
 });
 
 test('regenerate: works on a still-valid unused code too', async () => {
-  const mk = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const mk = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
   const oldRow = await mk.json();
-  const regen = await fetch(`${base}/api/provisioning/registration-codes/${oldRow.id}/regenerate`, postJson(tok.admin, {}));
+  const regen = await fetch(`${codes()}/${oldRow.id}/regenerate`, postJson(tok.admin, {}));
   assert.equal(regen.status, 201);
   assert.notEqual((await regen.json()).code, oldRow.code);
 });
 
 test('regenerate: a claimed code cannot be regenerated (409)', async () => {
-  const mk = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+  const mk = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
   const row = await mk.json();
-  db.prepare("UPDATE registration_codes SET status = 'claimed' WHERE id = ?").run(row.id);
-  const regen = await fetch(`${base}/api/provisioning/registration-codes/${row.id}/regenerate`, postJson(tok.admin, {}));
+  await setClaimed(row.id);
+  const regen = await fetch(`${codes()}/${row.id}/regenerate`, postJson(tok.admin, {}));
   assert.equal(regen.status, 409);
 });
 
 test('regenerate: unknown id -> 404; non-admin -> 403', async () => {
-  assert.equal((await fetch(`${base}/api/provisioning/registration-codes/nope/regenerate`, postJson(tok.admin, {}))).status, 404);
-  const mk = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+  assert.equal((await fetch(`${codes()}/nope/regenerate`, postJson(tok.admin, {}))).status, 404);
+  const mk = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
   const row = await mk.json();
-  assert.equal((await fetch(`${base}/api/provisioning/registration-codes/${row.id}/regenerate`, postJson(tok.viewer, {}))).status, 403);
+  assert.equal((await fetch(`${codes()}/${row.id}/regenerate`, postJson(tok.viewer, {}))).status, 403);
 });
 
 test('generate: codes are unique across repeated calls', async () => {
   const seen = new Set();
   for (let i = 0; i < 15; i++) {
-    const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
+    const res = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
     assert.equal(res.status, 201);
     const { code } = await res.json();
     assert.equal(seen.has(code), false, `code ${code} was issued twice`);
@@ -234,68 +208,66 @@ test('generate: codes are unique across repeated calls', async () => {
 
 test('scoping: list returns only the target workspace\'s codes', async () => {
   // Mint one code in ws-b (as its own admin).
-  const bRes = await fetch(`${base}/api/provisioning/registration-codes`,
-    postJson(tok.outsider, { workspace_id: 'ws-b', planned_device_name: 'B screen' }));
+  const bRes = await fetch(codes(), postJson(tok.outsider, { workspace_id: ID.wsB, planned_device_name: 'B screen' }));
   assert.equal(bRes.status, 201);
   const bCode = (await bRes.json()).code;
 
-  const listA = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
-  const listB = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-b`, authed(tok.outsider)).then((r) => r.json());
+  const listA = await fetch(`${codes()}?workspace_id=${ID.wsA}`, authed(tok.admin)).then((r) => r.json());
+  const listB = await fetch(`${codes()}?workspace_id=${ID.wsB}`, authed(tok.outsider)).then((r) => r.json());
 
   assert.ok(listA.length >= 3, 'ws-a has the codes minted above');
-  assert.ok(listA.every((c) => c.workspace_id === 'ws-a'), 'every ws-a row is ws-a');
+  assert.ok(listA.every((c) => c.workspace_id === ID.wsA), 'every ws-a row is ws-a');
   assert.ok(!listA.some((c) => c.code === bCode), 'ws-b code does not leak into ws-a list');
   assert.ok(listB.some((c) => c.code === bCode), 'ws-b list has its own code');
-  assert.ok(listB.every((c) => c.workspace_id === 'ws-b'));
+  assert.ok(listB.every((c) => c.workspace_id === ID.wsB));
 });
 
 test('scoping: an admin of another workspace cannot mint into ws-a', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`,
-    postJson(tok.outsider, { workspace_id: 'ws-a' }));
+  const res = await fetch(codes(), postJson(tok.outsider, { workspace_id: ID.wsA }));
   assert.equal(res.status, 403);
-  const row = db.prepare("SELECT COUNT(*) AS n FROM registration_codes WHERE created_by = 'u-outsider' AND workspace_id = 'ws-a'").get();
-  assert.equal(row.n, 0, 'nothing was written');
+  const row = await app.db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE created_by = ? AND workspace_id = ?').get(U.outsider, ID.wsA);
+  assert.equal(Number(row.n), 0, 'nothing was written');
 });
 
 test('scoping: an admin of another workspace cannot list ws-a codes', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.outsider));
+  const res = await fetch(`${codes()}?workspace_id=${ID.wsA}`, authed(tok.outsider));
   assert.equal(res.status, 403);
 });
 
 test('RBAC: workspace_editor is denied (403)', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.editor, { workspace_id: 'ws-a' }));
+  const res = await fetch(codes(), postJson(tok.editor, { workspace_id: ID.wsA }));
   assert.equal(res.status, 403);
 });
 
 test('RBAC: workspace_viewer is denied (403)', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.viewer, { workspace_id: 'ws-a' }));
+  const res = await fetch(codes(), postJson(tok.viewer, { workspace_id: ID.wsA }));
   assert.equal(res.status, 403);
 });
 
 test('RBAC: org_admin of the parent org is allowed (201)', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.orgadmin, { workspace_id: 'ws-a' }));
+  const res = await fetch(codes(), postJson(tok.orgadmin, { workspace_id: ID.wsA }));
   assert.equal(res.status, 201);
 });
 
 test('RBAC: platform_admin is allowed (201)', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.platform, { workspace_id: 'ws-a' }));
+  const res = await fetch(codes(), postJson(tok.platform, { workspace_id: ID.wsA }));
   assert.equal(res.status, 201);
 });
 
 test('RBAC: no token -> 401', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace_id: 'ws-a' }),
+  const res = await fetch(codes(), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace_id: ID.wsA }),
   });
   assert.equal(res.status, 401);
 });
 
 test('validation: missing workspace_id -> 400', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, {}));
+  const res = await fetch(codes(), postJson(tok.admin, {}));
   assert.equal(res.status, 400);
 });
 
 test('validation: unknown workspace_id -> 404', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-nope' }));
+  const res = await fetch(codes(), postJson(tok.admin, { workspace_id: id('ws-nope') }));
   assert.equal(res.status, 404);
 });
 
@@ -308,10 +280,10 @@ async function decodeQr(pngBuffer) {
 }
 
 test('QR: endpoint returns a valid PNG that DECODES to the /activate/<code> URL', async () => {
-  const mkRes = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
-  const { id, code } = await mkRes.json();
+  const mkRes = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
+  const { id: codeId, code } = await mkRes.json();
 
-  const qrRes = await fetch(`${base}/api/provisioning/registration-codes/${id}/qr`, authed(tok.admin));
+  const qrRes = await fetch(`${codes()}/${codeId}/qr`, authed(tok.admin));
   assert.equal(qrRes.status, 200);
   assert.equal(qrRes.headers.get('content-type'), 'image/png');
   const buf = Buffer.from(await qrRes.arrayBuffer());
@@ -326,77 +298,77 @@ test('QR: endpoint returns a valid PNG that DECODES to the /activate/<code> URL'
   // ACTUALLY decode the QR (rasterize + read the modules) and check its payload.
   const decoded = await decodeQr(buf);
   assert.ok(decoded, 'the QR image decodes to a payload');
-  // `base` here is http://127.0.0.1:<port>; the endpoint builds the URL from
+  // `app.base` here is http://127.0.0.1:<port>; the endpoint builds the URL from
   // req.protocol + req.get('host'), which is exactly that for this request.
-  assert.equal(decoded, `${base}/activate/${code}`, 'QR payload is the full activation URL');
+  assert.equal(decoded, `${app.base}/activate/${code}`, 'QR payload is the full activation URL');
   assert.match(decoded, /^https?:\/\/[^/]+\/activate\/[0-9]{6}$/);
   assert.notEqual(decoded, code, 'it is NOT the bare 6-digit code any more');
 });
 
 test('QR: unknown code id -> 404', async () => {
-  const res = await fetch(`${base}/api/provisioning/registration-codes/does-not-exist/qr`, authed(tok.admin));
+  const res = await fetch(`${codes()}/does-not-exist/qr`, authed(tok.admin));
   assert.equal(res.status, 404);
 });
 
 test('QR: a non-admin of the code\'s workspace is denied (403)', async () => {
-  const mkRes = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
-  const { id } = await mkRes.json();
-  const res = await fetch(`${base}/api/provisioning/registration-codes/${id}/qr`, authed(tok.viewer));
+  const mkRes = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
+  const { id: codeId } = await mkRes.json();
+  const res = await fetch(`${codes()}/${codeId}/qr`, authed(tok.viewer));
   assert.equal(res.status, 403);
 });
 
 test('list: claimed code surfaces the claiming device name', async () => {
-  const mkRes = await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }));
-  const { id, code } = await mkRes.json();
-  db.prepare("INSERT INTO devices (id, workspace_id, name, status) VALUES ('dev-claimed', 'ws-a', 'Front Desk TV', 'online')").run();
-  db.prepare("UPDATE registration_codes SET status = 'claimed', claimed_by_device_id = 'dev-claimed', claimed_at = ? WHERE id = ?")
-    .run(Math.floor(Date.now() / 1000), id);
+  const mkRes = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
+  const { id: codeId, code } = await mkRes.json();
+  await app.db.prepare("INSERT INTO devices (id, workspace_id, name, status) VALUES (?, ?, 'Front Desk TV', 'online')").run(ID.devClaimed, ID.wsA);
+  await app.db.prepare("UPDATE registration_codes SET status = 'claimed', claimed_by_device_id = ?, claimed_at = ? WHERE id = ?")
+    .run(ID.devClaimed, Math.floor(Date.now() / 1000), codeId);
 
-  const list = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
+  const list = await fetch(`${codes()}?workspace_id=${ID.wsA}`, authed(tok.admin)).then((r) => r.json());
   const row = list.find((c) => c.code === code);
   assert.equal(row.status, 'claimed');
-  assert.equal(row.claimed_by_device_id, 'dev-claimed');
+  assert.equal(row.claimed_by_device_id, ID.devClaimed);
   assert.equal(row.claimed_by_device_name, 'Front Desk TV');
 });
 
-const del = (id, token, opts = '') => fetch(`${base}/api/provisioning/registration-codes/${id}${opts}`, {
+const del = (codeId, token, opts = '') => fetch(`${codes()}/${codeId}${opts}`, {
   method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
 });
 
 test('delete: an unused code is removed from the list', async () => {
-  const { id, code } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
-  const res = await del(id, tok.admin);
+  const { id: codeId, code } = await (await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }))).json();
+  const res = await del(codeId, tok.admin);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { success: true });
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 0, 'row gone');
-  const list = await fetch(`${base}/api/provisioning/registration-codes?workspace_id=ws-a`, authed(tok.admin)).then((r) => r.json());
+  assert.equal(await codeCount(codeId), 0, 'row gone');
+  const list = await fetch(`${codes()}?workspace_id=${ID.wsA}`, authed(tok.admin)).then((r) => r.json());
   assert.ok(!list.some((c) => c.code === code));
 });
 
 test('delete: an expired unused code is freely deletable', async () => {
-  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
-  db.prepare('UPDATE registration_codes SET expires_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 100, id);
-  assert.equal((await del(id, tok.admin)).status, 200);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 0);
+  const { id: codeId } = await (await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }))).json();
+  await setExpiry(codeId, Math.floor(Date.now() / 1000) - 100);
+  assert.equal((await del(codeId, tok.admin)).status, 200);
+  assert.equal(await codeCount(codeId), 0);
 });
 
 test('delete: a claimed code is refused without force (409, row kept)', async () => {
-  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
-  db.prepare("UPDATE registration_codes SET status = 'claimed' WHERE id = ?").run(id);
+  const { id: codeId } = await (await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }))).json();
+  await setClaimed(codeId);
 
-  const res = await del(id, tok.admin);
+  const res = await del(codeId, tok.admin);
   assert.equal(res.status, 409);
   const body = await res.json();
   assert.equal(body.requires_confirmation, true);
   assert.match(body.error, /claimed by a device/i);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 1, 'row kept');
+  assert.equal(await codeCount(codeId), 1, 'row kept');
 });
 
 test('delete: a claimed code IS deletable with ?force=true', async () => {
-  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
-  db.prepare("UPDATE registration_codes SET status = 'claimed' WHERE id = ?").run(id);
-  assert.equal((await del(id, tok.admin, '?force=true')).status, 200);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 0);
+  const { id: codeId } = await (await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }))).json();
+  await setClaimed(codeId);
+  assert.equal((await del(codeId, tok.admin, '?force=true')).status, 200);
+  assert.equal(await codeCount(codeId), 0);
 });
 
 test('delete: unknown id -> 404', async () => {
@@ -404,13 +376,13 @@ test('delete: unknown id -> 404', async () => {
 });
 
 test('delete: RBAC - workspace_viewer denied (403), row kept', async () => {
-  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
-  assert.equal((await del(id, tok.viewer)).status, 403);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 1);
+  const { id: codeId } = await (await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }))).json();
+  assert.equal((await del(codeId, tok.viewer)).status, 403);
+  assert.equal(await codeCount(codeId), 1);
 });
 
 test('delete: RBAC - an admin of another workspace cannot delete a ws-a code (403)', async () => {
-  const { id } = await (await fetch(`${base}/api/provisioning/registration-codes`, postJson(tok.admin, { workspace_id: 'ws-a' }))).json();
-  assert.equal((await del(id, tok.outsider)).status, 403);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM registration_codes WHERE id = ?').get(id).n, 1);
+  const { id: codeId } = await (await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }))).json();
+  assert.equal((await del(codeId, tok.outsider)).status, 403);
+  assert.equal(await codeCount(codeId), 1);
 });
