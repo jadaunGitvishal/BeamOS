@@ -3,10 +3,11 @@
 // Ref 21: verification for the `format=json` branch added to the 13 export
 // endpoints that already emit CSV/XLSX/PDF.
 //
-// Same harness shape as tenancy-cross-tenant.test.js and
-// dashboard-content-export.test.js: an in-memory sqlite swapped in for
-// ../db/database, the REAL Express app with the real requireAuth +
-// resolveTenancy chain, routers mounted exactly as server.js mounts them.
+// The REAL routers in-process (helpers/inprocess-app.js), mounted exactly as
+// server.js mounts them - /api/content, /api/widgets, /api/playlists and /api/walls
+// through the public front door (bearerAuth + resolveTenancy + tokenScopeGate; a JWT
+// session passes it like a dashboard does), /api/workspaces behind requireAuth -
+// against the REAL MySQL test DB (beamos_test via npm test).
 //
 // This exercises a representative 5 of the 13 endpoints (not all 13 - the
 // branch is the identical three lines in every file, inserted ahead of the
@@ -25,136 +26,83 @@
 // separate scoping); (3) the SAME workspace-scoping / RBAC that gates the
 // other three formats gates JSON too (tenant B never sees tenant A's canary
 // rows; a non-member gets 403 on the members export).
+//
+// Fixtures are test-owned (dj- prefix, generated ids) and removed afterwards; the
+// one workspace-less row (the shared template content) is deleted by id.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers, cleanupRows } = require('./helpers/disposable');
 
-process.env.JWT_SECRET = 'test-secret-data-export-json';
+const P = `dj-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const ID = {
+  userA: id('user-a'), userB: id('user-b'), orgA: id('org-a'), orgB: id('org-b'), wsA: id('ws-a'), wsB: id('ws-b'),
+  cA1: id('c-a1'), cA2: id('c-a2'), cB1: id('c-b1'), cTmpl: id('c-tmpl'), wA1: id('w-a1'), wB1: id('w-b1'),
+  pA1: id('p-a1'), pB1: id('p-b1'), dA1: id('d-a1'), vwA1: id('vw-a1'), vwB1: id('vw-b1'),
+};
+const EMAIL_A = `${P}-a@tenant-a.test`;
+const EMAIL_B = `${P}-b@tenant-b.test`;
+let app;
+let tokA;
+let tokB;
 
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, invited_by TEXT, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE devices (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT DEFAULT '', playlist_id TEXT,
-    status TEXT DEFAULT 'offline'
-  );
-  CREATE TABLE content (
-    id TEXT PRIMARY KEY, user_id TEXT, workspace_id TEXT, filename TEXT, filepath TEXT DEFAULT '',
-    mime_type TEXT, file_size INTEGER DEFAULT 0, duration_sec REAL, thumbnail_path TEXT,
-    width INTEGER, height INTEGER, remote_url TEXT, folder TEXT, folder_id TEXT,
-    created_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE widgets (
-    id TEXT PRIMARY KEY, user_id TEXT, workspace_id TEXT, widget_type TEXT NOT NULL,
-    name TEXT NOT NULL, config TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL DEFAULT 0,
-    updated_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE playlists (
-    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, workspace_id TEXT, name TEXT NOT NULL,
-    description TEXT, is_auto_generated INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft',
-    published_snapshot TEXT, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE playlist_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id TEXT NOT NULL, content_id TEXT, widget_id TEXT,
-    zone_id TEXT, sort_order INTEGER NOT NULL DEFAULT 0, duration_sec INTEGER NOT NULL DEFAULT 10,
-    muted INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE video_walls (
-    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, workspace_id TEXT, name TEXT NOT NULL,
-    grid_cols INTEGER NOT NULL DEFAULT 2, grid_rows INTEGER NOT NULL DEFAULT 2,
-    created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE video_wall_devices (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, wall_id TEXT NOT NULL, device_id TEXT NOT NULL,
-    grid_col INTEGER NOT NULL DEFAULT 0, grid_row INTEGER NOT NULL DEFAULT 0
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveTenancy } = require('../lib/tenancy');
-
-// --- Seed two tenants -----------------------------------------------------
-db.prepare("INSERT INTO users (id, email, role, name) VALUES ('user-a', 'a@tenant-a.test', 'user', 'Alice A')").run();
-db.prepare("INSERT INTO users (id, email, role, name) VALUES ('user-b', 'b@tenant-b.test', 'user', 'Bob B')").run();
-
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-a', 'Org A', 'user-a')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-b', 'Org B', 'user-b')").run();
-
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a', 'org-a', 'Workspace A')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-b', 'org-b', 'Workspace B')").run();
-
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role, joined_at) VALUES ('ws-a', 'user-a', 'workspace_admin', 1700000000)").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role, joined_at) VALUES ('ws-b', 'user-b', 'workspace_admin', 1700000001)").run();
-// user-b has NO path into ws-a - the cross-tenant case.
-
-// Canary rows: every TENANT-A-ONLY-* string must be absent from tenant B's exports.
-db.prepare("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, folder, created_at) VALUES ('c-a1', 'ws-a', 'TENANT-A-ONLY promo.mp4', 'video/mp4', 1024, 'Ads', 1700001000)").run();
-db.prepare("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, created_at) VALUES ('c-a2', 'ws-a', 'TENANT-A-ONLY safety.png', 'image/png', 512, 1700002000)").run();
-db.prepare("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, created_at) VALUES ('c-b1', 'ws-b', 'TENANT-B-ONLY menu.png', 'image/png', 256, 1700003000)").run();
-// A platform-template row (workspace_id IS NULL) - both tenants' content/widget exports include it.
-db.prepare("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, created_at) VALUES ('c-tmpl', NULL, 'SHARED-TEMPLATE banner.jpg', 'image/jpeg', 128, 1700000500)").run();
-
-db.prepare("INSERT INTO widgets (id, workspace_id, widget_type, name, config, created_at) VALUES ('w-a1', 'ws-a', 'clock', 'TENANT-A-ONLY Lobby Clock', '{}', 1700004000)").run();
-db.prepare("INSERT INTO widgets (id, workspace_id, widget_type, name, config, created_at) VALUES ('w-b1', 'ws-b', 'weather', 'TENANT-B-ONLY Weather', '{}', 1700005000)").run();
-
-db.prepare("INSERT INTO playlists (id, user_id, workspace_id, name, description, created_at) VALUES ('p-a1', 'user-a', 'ws-a', 'TENANT-A-ONLY Morning Loop', 'lobby', 1700006000)").run();
-db.prepare("INSERT INTO playlists (id, user_id, workspace_id, name, description, created_at) VALUES ('p-b1', 'user-b', 'ws-b', 'TENANT-B-ONLY Evening Loop', NULL, 1700007000)").run();
-db.prepare("INSERT INTO playlist_items (playlist_id, content_id) VALUES ('p-a1', 'c-a1')").run();
-db.prepare("INSERT INTO playlist_items (playlist_id, content_id) VALUES ('p-a1', 'c-a2')").run();
-db.prepare("INSERT INTO devices (id, workspace_id, name, playlist_id) VALUES ('d-a1', 'ws-a', 'Lobby A', 'p-a1')").run();
-
-db.prepare("INSERT INTO video_walls (id, user_id, workspace_id, name, grid_cols, grid_rows, created_at) VALUES ('vw-a1', 'user-a', 'ws-a', 'TENANT-A-ONLY Atrium Wall', 3, 2, 1700008000)").run();
-db.prepare("INSERT INTO video_walls (id, user_id, workspace_id, name, grid_cols, grid_rows, created_at) VALUES ('vw-b1', 'user-b', 'ws-b', 'TENANT-B-ONLY Foyer Wall', 2, 2, 1700009000)").run();
-db.prepare("INSERT INTO video_wall_devices (wall_id, device_id, grid_col, grid_row) VALUES ('vw-a1', 'd-a1', 0, 0)").run();
-
-const tokA = generateToken({ id: 'user-a', email: 'a@tenant-a.test', role: 'user' }, 'ws-a');
-const tokB = generateToken({ id: 'user-b', email: 'b@tenant-b.test', role: 'user' }, 'ws-b');
-
-// --- Real app, mounted exactly as server.js mounts these routers ----------
-const app = express();
-app.use(express.json());
-app.use('/api/content', requireAuth, resolveTenancy, require('../routes/content'));
-app.use('/api/widgets', requireAuth, resolveTenancy, require('../routes/widgets'));
-app.use('/api/playlists', requireAuth, resolveTenancy, require('../routes/playlists'));
-app.use('/api/walls', requireAuth, resolveTenancy, require('../routes/video-walls'));
-app.use('/api/workspaces', requireAuth, require('../routes/workspaces'));
-app.use((err, req, res, _next) => {
-  res.status(500).json({ error: err.message, stack: err.stack });
-});
-
-const server = app.listen(0);
-let base;
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/content', '/api/widgets', '/api/playlists', '/api/walls', '/api/workspaces'] });
+  const run = (sql, ...p) => app.db.prepare(sql).run(...p);
+
+  // --- Seed two tenants ---
+  const user = "INSERT INTO users (id, email, role, name, password_hash, auth_provider) VALUES (?, ?, 'user', ?, NULL, 'local')";
+  await run(user, ID.userA, EMAIL_A, 'Alice A');
+  await run(user, ID.userB, EMAIL_B, 'Bob B');
+
+  const org = "INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')";
+  await run(org, ID.orgA, `${P} Org A`, ID.userA);
+  await run(org, ID.orgB, `${P} Org B`, ID.userB);
+
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'Workspace A');
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsB, ID.orgB, 'Workspace B');
+
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role, joined_at) VALUES (?, ?, 'workspace_admin', 1700000000)", ID.wsA, ID.userA);
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role, joined_at) VALUES (?, ?, 'workspace_admin', 1700000001)", ID.wsB, ID.userB);
+  // user-b has NO path into ws-a - the cross-tenant case.
+
+  // Canary rows: every TENANT-A-ONLY-* string must be absent from tenant B's exports.
+  await run("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, folder, created_at) VALUES (?, ?, 'TENANT-A-ONLY promo.mp4', 'video/mp4', 1024, 'Ads', 1700001000)", ID.cA1, ID.wsA);
+  await run("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, created_at) VALUES (?, ?, 'TENANT-A-ONLY safety.png', 'image/png', 512, 1700002000)", ID.cA2, ID.wsA);
+  await run("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, created_at) VALUES (?, ?, 'TENANT-B-ONLY menu.png', 'image/png', 256, 1700003000)", ID.cB1, ID.wsB);
+  // A platform-template row (workspace_id IS NULL) - both tenants' content/widget exports include it.
+  await run("INSERT INTO content (id, workspace_id, filename, mime_type, file_size, created_at) VALUES (?, NULL, 'SHARED-TEMPLATE banner.jpg', 'image/jpeg', 128, 1700000500)", ID.cTmpl);
+
+  await run("INSERT INTO widgets (id, workspace_id, widget_type, name, config, created_at) VALUES (?, ?, 'clock', 'TENANT-A-ONLY Lobby Clock', '{}', 1700004000)", ID.wA1, ID.wsA);
+  await run("INSERT INTO widgets (id, workspace_id, widget_type, name, config, created_at) VALUES (?, ?, 'weather', 'TENANT-B-ONLY Weather', '{}', 1700005000)", ID.wB1, ID.wsB);
+
+  await run("INSERT INTO playlists (id, user_id, workspace_id, name, description, created_at) VALUES (?, ?, ?, 'TENANT-A-ONLY Morning Loop', 'lobby', 1700006000)", ID.pA1, ID.userA, ID.wsA);
+  await run("INSERT INTO playlists (id, user_id, workspace_id, name, description, created_at) VALUES (?, ?, ?, 'TENANT-B-ONLY Evening Loop', NULL, 1700007000)", ID.pB1, ID.userB, ID.wsB);
+  await run('INSERT INTO playlist_items (playlist_id, content_id) VALUES (?, ?)', ID.pA1, ID.cA1);
+  await run('INSERT INTO playlist_items (playlist_id, content_id) VALUES (?, ?)', ID.pA1, ID.cA2);
+  await run("INSERT INTO devices (id, workspace_id, name, playlist_id) VALUES (?, ?, 'Lobby A', ?)", ID.dA1, ID.wsA, ID.pA1);
+
+  await run("INSERT INTO video_walls (id, user_id, workspace_id, name, grid_cols, grid_rows, created_at) VALUES (?, ?, ?, 'TENANT-A-ONLY Atrium Wall', 3, 2, 1700008000)", ID.vwA1, ID.userA, ID.wsA);
+  await run("INSERT INTO video_walls (id, user_id, workspace_id, name, grid_cols, grid_rows, created_at) VALUES (?, ?, ?, 'TENANT-B-ONLY Foyer Wall', 2, 2, 1700009000)", ID.vwB1, ID.userB, ID.wsB);
+  await run('INSERT INTO video_wall_devices (wall_id, device_id, grid_col, grid_row) VALUES (?, ?, 0, 0)', ID.vwA1, ID.dA1);
+
+  tokA = generateToken({ id: ID.userA, email: EMAIL_A, role: 'user' }, ID.wsA);
+  tokB = generateToken({ id: ID.userB, email: EMAIL_B, role: 'user' }, ID.wsB);
 });
-test.after(() => {
-  server.close();
-  db.close();
+
+test.after(async () => {
+  try {
+    if (app) {
+      await cleanupRows(app.db, 'content', [ID.cTmpl]);
+      await cleanupUsers(app.db, [ID.userB, ID.userA]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 function authed(token) {
@@ -196,12 +144,12 @@ function asText(v) {
 }
 
 async function fetchJson(path, token) {
-  const res = await fetch(`${base}${path}${path.includes('?') ? '&' : '?'}format=json`, authed(token));
+  const res = await fetch(`${app.base}${path}${path.includes('?') ? '&' : '?'}format=json`, authed(token));
   const body = await res.json();
   return { res, body };
 }
 async function fetchCsv(path, token) {
-  const res = await fetch(`${base}${path}${path.includes('?') ? '&' : '?'}format=csv`, authed(token));
+  const res = await fetch(`${app.base}${path}${path.includes('?') ? '&' : '?'}format=csv`, authed(token));
   return { res, text: await res.text() };
 }
 
@@ -288,19 +236,19 @@ test('walls/export: tenant B json is workspace-scoped', async () => {
 });
 
 test('workspaces/:id/members/export: json shape + matches csv for a member', async () => {
-  const body = await assertJsonMatchesCsv('/api/workspaces/ws-a/members/export', tokA);
+  const body = await assertJsonMatchesCsv(`/api/workspaces/${ID.wsA}/members/export`, tokA);
   assert.match(JSON.stringify(body.rows), /a@tenant-a\.test/);
 });
 
 test('workspaces/:id/members/export: RBAC - non-member gets 403 on json, same as csv', async () => {
-  const jr = await fetch(`${base}/api/workspaces/ws-a/members/export?format=json`, authed(tokB));
+  const jr = await fetch(`${app.base}/api/workspaces/${ID.wsA}/members/export?format=json`, authed(tokB));
   assert.equal(jr.status, 403, 'json export denied cross-tenant');
-  const cr = await fetch(`${base}/api/workspaces/ws-a/members/export?format=csv`, authed(tokB));
+  const cr = await fetch(`${app.base}/api/workspaces/${ID.wsA}/members/export?format=csv`, authed(tokB));
   assert.equal(cr.status, 403, 'csv export denied cross-tenant (same gate)');
 });
 
 test('unknown format still falls back to csv (json branch did not change the default)', async () => {
-  const res = await fetch(`${base}/api/content/export?format=exe`, authed(tokA));
+  const res = await fetch(`${app.base}/api/content/export?format=exe`, authed(tokA));
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /text\/csv/);
 });
