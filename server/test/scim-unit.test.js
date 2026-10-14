@@ -2,38 +2,65 @@
 
 // Ref 8: unit tests for routes/scim.js internals that can't be driven safely over
 // HTTP against the shared real database - chiefly the "last active platform admin"
-// lockout guard (the real DB always has other active platform admins, so the
-// refusing branch is unreachable there). Uses the in-memory SQLite db mock via
-// require.cache, same technique as test/entra-token-integration.test.js.
+// lockout guard (the shared test DB can always hold other active platform admins, so
+// the refusing branch is unreachable there).
+//
+// Isolation: the whole process runs against a SCRATCH MySQL database (real schema,
+// real routes/scim.js + db/database.js) created here and dropped in after().
+// MYSQL_DATABASE is pointed at it before config / the db module load, so the guard's
+// whole-table "other active platform admins" count sees exactly the users this file
+// seeds - nothing else. Same technique as audit-prune.test.js.
+
+const crypto = require('node:crypto');
+const DB_NAME = `beamos_test_scim_unit_${crypto.randomBytes(4).toString('hex')}`;
+process.env.MYSQL_DATABASE = DB_NAME;
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
-
-const sqlite = new Database(':memory:');
-sqlite.exec(`
-  CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT, role TEXT, deactivated_at INTEGER);
-  CREATE TABLE activity_log (id INTEGER PRIMARY KEY);
-`);
-// Thin async shim matching db/database.js's .prepare().get/.all/.run shape.
-const db = {
-  prepare(sql) {
-    const st = sqlite.prepare(sql);
-    return { get: async (...p) => st.get(...p), all: async (...p) => st.all(...p), run: async (...p) => st.run(...p) };
-  },
-};
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
+const mysql = require('mysql2/promise');
+const config = require('../config');
+const mysqlTls = require('../lib/mysql-tls');
+const { assertSafeTestDb, isAllowedTestDbName } = require('../lib/test-db-guard');
+const { initDb, db } = require('../db/database');
 
 const { _internal } = require('../routes/scim');
 const { compileFilter, readPatchBody, parseActive, splitAnd, assertNotLastPlatformAdmin } = _internal;
 
+function baseOptions() {
+  const o = { host: config.mysqlHost, port: config.mysqlPort, user: config.mysqlUser, password: config.mysqlPassword };
+  if (config.mysqlSocketPath) o.socketPath = config.mysqlSocketPath;
+  const ssl = mysqlTls.mysqlSslOptions(config);
+  if (ssl) o.ssl = ssl;
+  return o;
+}
+
+test.before(async () => {
+  assertSafeTestDb({ database: DB_NAME, user: config.mysqlUser });
+  const conn = await mysql.createConnection(baseOptions());
+  await conn.query(`CREATE DATABASE \`${DB_NAME}\``);
+  await conn.end();
+  await initDb(); // the real schema in the empty scratch database
+});
+
+test.after(async () => {
+  try {
+    if (!(isAllowedTestDbName(DB_NAME) && DB_NAME.startsWith('beamos_test_'))) throw new Error(`refusing to drop non-scratch database ${DB_NAME}`);
+    await db.exec(`DROP DATABASE \`${DB_NAME}\``);
+  } finally {
+    await db.close();
+  }
+});
+
 test('assertNotLastPlatformAdmin: refuses to deactivate the only active platform admin; allows it once another exists', async () => {
-  sqlite.exec("DELETE FROM users; INSERT INTO users VALUES ('a1','a1@x','platform_admin',NULL), ('u1','u1@x','user',NULL), ('a2','a2@x','platform_admin',123)");
+  await db.exec('DELETE FROM users');
+  const user = "INSERT INTO users (id, email, name, role, deactivated_at) VALUES (?, ?, ?, ?, ?)";
+  await db.prepare(user).run('a1', 'a1@x', 'a1', 'platform_admin', null);
+  await db.prepare(user).run('u1', 'u1@x', 'u1', 'user', null);
+  await db.prepare(user).run('a2', 'a2@x', 'a2', 'platform_admin', 123);
   const a1 = { id: 'a1', role: 'platform_admin', deactivated_at: null };
   await assert.rejects(() => assertNotLastPlatformAdmin(a1), (e) => e.status === 403 && /last active platform admin/.test(e.message));
   // a deactivated admin (a2) doesn't count as "another"
-  sqlite.exec("UPDATE users SET deactivated_at = NULL WHERE id = 'a2'");
+  await db.prepare("UPDATE users SET deactivated_at = NULL WHERE id = 'a2'").run();
   await assertNotLastPlatformAdmin(a1);
   // ordinary users and already-deactivated admins are never blocked
   await assertNotLastPlatformAdmin({ id: 'u1', role: 'user', deactivated_at: null });
