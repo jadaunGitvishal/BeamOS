@@ -1198,9 +1198,10 @@ async function boot() {
   app.use((err, req, res, next) => {
     console.error(`[error] ${req.method} ${req.originalUrl}:`, err);
     if (res.headersSent) return next(err);
-    res
-      .status(err.status || 500)
-      .json({ error: err.expose ? err.message : "Internal server error" });
+    // An exposed error may carry a machine-readable code (e.g. AUDIT_UNAVAILABLE).
+    const body = { error: err.expose ? err.message : "Internal server error" };
+    if (err.expose && typeof err.code === "string") body.code = err.code;
+    res.status(err.status || 500).json(body);
   });
 
   const listenPort = hasSsl ? config.httpsPort : config.port;

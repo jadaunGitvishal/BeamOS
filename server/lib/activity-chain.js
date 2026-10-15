@@ -48,9 +48,12 @@
 //  blocks on that lock until the first commits, and only then reads last_hash -
 //  by which point it is the first append's freshly-written hash. Two entries
 //  therefore can NEVER chain from the same predecessor, so the chain cannot fork
-//  under concurrent logActivity(). (An explicit `SELECT ... FOR UPDATE` would do
-//  the same on MySQL, but the lock-via-UPDATE form is also valid SQLite, which
-//  the unit tests run on.)
+//  under concurrent logActivity().
+//
+//  The head is read with SELECT ... FOR UPDATE (a locking read: always the latest
+//  committed row, never the transaction's REPEATABLE READ snapshot). That matters
+//  for appendInTx on a CALLER's transaction (services/activity.js auditInTx,
+//  pruneChain), where earlier statements may already have fixed an older snapshot.
 //
 //  ---- Known limitation --------------------------------------------------
 //  Deleting the CURRENT newest row(s) (tail truncation) leaves no successor to
@@ -119,7 +122,7 @@ async function appendInTx(tx, fields = {}) {
   // (2) Read the head. We hold the row lock, so this is the true current head
   // even if another append was racing us a moment ago.
   const head = await tx
-    .prepare('SELECT last_hash, entry_count FROM activity_log_chain WHERE id = 1')
+    .prepare('SELECT last_hash, entry_count FROM activity_log_chain WHERE id = 1 FOR UPDATE')
     .get();
   const prev_hash = head.last_hash;
   const entry_hash = computeEntryHash({ prev_hash, user_id, action, details, ip_address, created_at });
@@ -500,4 +503,4 @@ function short(h) {
   return typeof h === 'string' ? h.slice(0, 12) + '…' : String(h);
 }
 
-module.exports = { GENESIS_PREV_HASH, PRUNED_ACTION, computeEntryHash, appendEntry, pruneChain, backfillChain, verifyChain };
+module.exports = { GENESIS_PREV_HASH, PRUNED_ACTION, computeEntryHash, appendEntry, appendInTx, pruneChain, backfillChain, verifyChain };

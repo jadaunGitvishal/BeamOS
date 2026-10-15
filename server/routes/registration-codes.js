@@ -25,7 +25,7 @@ const QRCode = require('qrcode');
 const { db } = require('../db/database');
 const { canAdminWorkspace } = require('../lib/permissions');
 const { asyncHandler } = require('../lib/async-handler');
-const { getClientIp, auditOrWarn } = require('../services/activity');
+const { getClientIp, auditOrWarn, auditInTx } = require('../services/activity');
 const { stripDeviceSecrets } = require('../lib/device-sanitize');
 const { hardwareInsertParts } = require('../lib/device-hardware');
 const { workspaceRoom, emitToWorkspace } = require('../lib/socket-rooms');
@@ -68,19 +68,22 @@ async function loadAdminWorkspace(req, res, workspaceId) {
   return ws;
 }
 
-// Phase 1B: awaited audit row for a code's creation / regeneration / revocation (an
-// enrolment credential). Never the code value itself.
+// The audit row for a code (an enrolment credential): created / regenerated are written
+// in the code's own INSERT transaction (Phase 1C, see mintCode), revoked is the awaited
+// post-change row (auditCode). Never the code value itself.
 // `fromId` (regeneration only) is the replaced code's id.
-function auditCode(req, action, row, ws, fromId = null) {
-  return auditOrWarn({
+function codeAuditFields(req, action, row, ws, fromId = null) {
+  return {
     userId: req.user.id,
     action,
     details: `code_id: ${row.id}, workspace: ${row.workspace_id}, planned_device_name: ${row.planned_device_name || 'none'}, expires_at: ${row.expires_at ?? 'none'}${fromId ? `, from: ${fromId}` : ''}`,
-    target: row.id,
     ipAddress: getClientIp(req),
     workspaceId: row.workspace_id,
     organizationId: ws.organization_id,
-  });
+  };
+}
+function auditCode(req, action, row, ws) {
+  return auditOrWarn({ ...codeAuditFields(req, action, row, ws), target: row.id });
 }
 
 function serializeCode(row) {
@@ -104,7 +107,11 @@ function serializeCode(row) {
 // LIVE ('unused') row holds; the UNIQUE(code) constraint is the backstop against
 // the check-then-insert race. Returns the stored row, or null if every attempt
 // collided (astronomically unlikely at any realistic code count).
-async function mintCode({ workspaceId, plannedName, createdBy }) {
+// Phase 1C: each attempt is ONE transaction - the INSERT and its audit row
+// (`auditFields(row)` -> auditInTx) commit together, so no code exists without its row
+// (an audit failure throws AuditUnavailableError: 503, no code). A duplicate code rolls
+// back only that attempt.
+async function mintCode({ workspaceId, plannedName, createdBy, auditFields }) {
   const now = Math.floor(Date.now() / 1000);
   for (let attempt = 0; attempt < GEN_MAX_ATTEMPTS; attempt++) {
     const code = String(CODE_MIN + crypto.randomInt(CODE_SPAN));
@@ -113,11 +120,15 @@ async function mintCode({ workspaceId, plannedName, createdBy }) {
       .get(code);
     if (clash) continue;
     const id = crypto.randomUUID();
+    const expiresAt = now + CODE_TTL_SECONDS;
     try {
-      await db.prepare(`
-        INSERT INTO registration_codes (id, code, workspace_id, planned_device_name, status, created_by, created_at, expires_at)
-        VALUES (?, ?, ?, ?, 'unused', ?, ?, ?)
-      `).run(id, code, workspaceId, plannedName, createdBy, now, now + CODE_TTL_SECONDS);
+      await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        await tx.prepare(`
+          INSERT INTO registration_codes (id, code, workspace_id, planned_device_name, status, created_by, created_at, expires_at)
+          VALUES (?, ?, ?, ?, 'unused', ?, ?, ?)
+        `).run(id, code, workspaceId, plannedName, createdBy, now, expiresAt);
+        await auditInTx(tx, auditFields({ id, workspace_id: workspaceId, planned_device_name: plannedName, expires_at: expiresAt }));
+      })());
     } catch (e) {
       // MySQL: ER_DUP_ENTRY. better-sqlite3 (tests): SQLITE_CONSTRAINT_UNIQUE.
       if (e.code === 'ER_DUP_ENTRY' || /duplicate entry|unique/i.test(e.message || '')) continue;
@@ -142,11 +153,13 @@ router.post('/registration-codes', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: `planned_device_name must be ${NAME_MAX} characters or fewer` });
   }
 
-  const row = await mintCode({ workspaceId: ws.id, plannedName, createdBy: req.user.id });
+  const row = await mintCode({
+    workspaceId: ws.id, plannedName, createdBy: req.user.id,
+    auditFields: (r) => codeAuditFields(req, 'registration_code_created', r, ws),
+  });
   if (!row) {
     return res.status(503).json({ error: 'Could not allocate a unique code, please retry' });
   }
-  await auditCode(req, 'registration_code_created', row, ws);
   res.status(201).json(serializeCode(row));
 }));
 
@@ -167,11 +180,11 @@ router.post('/registration-codes/:id/regenerate', asyncHandler(async (req, res) 
     workspaceId: old.workspace_id,
     plannedName: old.planned_device_name || null,
     createdBy: req.user.id,
+    auditFields: (r) => codeAuditFields(req, 'registration_code_regenerated', r, ws, old.id),
   });
   if (!row) {
     return res.status(503).json({ error: 'Could not allocate a unique code, please retry' });
   }
-  await auditCode(req, 'registration_code_regenerated', row, ws, old.id);
   res.status(201).json(serializeCode(row));
 }));
 

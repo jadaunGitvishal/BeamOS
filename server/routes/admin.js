@@ -5,7 +5,7 @@ const { v4: uuidv4 } = require("uuid");
 const { db } = require("../db/database");
 const { canAdminWorkspace } = require("../lib/permissions");
 const { requirePlatformAdmin } = require("../middleware/auth");
-const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, auditInTx, getClientIp, auditRead } = require("../services/activity");
 const {
   deleteWorkspaceCascade,
   deleteOrgCascade,
@@ -805,34 +805,44 @@ router.post("/entra-service-principals", requirePlatformAdmin, asyncHandler(asyn
     return res.status(400).json({ error: `scope must be one of: ${ENTRA_SP_SCOPES.join(", ")}` });
   }
 
-  const existing = await db.prepare("SELECT id, revoked_at FROM entra_service_principals WHERE client_id = ?").get(clientId);
-  if (existing && !existing.revoked_at) {
-    return res.status(409).json({ error: "This client_id is already registered. Revoke the existing registration first if you want to re-register it." });
-  }
-
+  const ALREADY_REGISTERED = { error: "This client_id is already registered. Revoke the existing registration first if you want to re-register it." };
   const id = uuidv4();
-  if (existing) {
-    // A previously-revoked registration for the same client_id - replace it in
-    // place rather than leaving two rows (client_id is UNIQUE) so re-registering
-    // a rotated/reused Service Principal doesn't require a manual cleanup step.
-    await db.prepare(
-      `UPDATE entra_service_principals SET id = ?, name = ?, workspace_id = ?, scope = ?, created_by = ?, created_at = UNIX_TIMESTAMP(), last_used_at = NULL, revoked_at = NULL WHERE client_id = ?`,
-    ).run(id, name, workspaceId, scope, req.user.id, clientId);
-  } else {
-    await db.prepare(
-      `INSERT INTO entra_service_principals (id, client_id, name, workspace_id, scope, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
-    ).run(id, clientId, name, workspaceId, scope, req.user.id);
+  // Credential issuance (Phase 1C): one transaction - the client_id's row is read FOR
+  // UPDATE (so two concurrent registrations of the same client_id serialize: one 201, one
+  // 409, instead of both re-activating a revoked row or a duplicate-key 500), written,
+  // then audited. No audit row, no registration (503 AUDIT_UNAVAILABLE). client_id is
+  // the app's public identifier - no secret exists here.
+  let conflict;
+  try {
+    conflict = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+      const existing = await tx.prepare("SELECT id, revoked_at FROM entra_service_principals WHERE client_id = ? FOR UPDATE").get(clientId);
+      if (existing && !existing.revoked_at) return true;
+      if (existing) {
+        // A previously-revoked registration for the same client_id - replace it in
+        // place rather than leaving two rows (client_id is UNIQUE) so re-registering
+        // a rotated/reused Service Principal doesn't require a manual cleanup step.
+        await tx.prepare(
+          `UPDATE entra_service_principals SET id = ?, name = ?, workspace_id = ?, scope = ?, created_by = ?, created_at = UNIX_TIMESTAMP(), last_used_at = NULL, revoked_at = NULL WHERE client_id = ?`,
+        ).run(id, name, workspaceId, scope, req.user.id, clientId);
+      } else {
+        await tx.prepare(
+          `INSERT INTO entra_service_principals (id, client_id, name, workspace_id, scope, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
+        ).run(id, clientId, name, workspaceId, scope, req.user.id);
+      }
+      await auditInTx(tx, {
+        userId: req.user.id,
+        action: "admin_register_entra_sp",
+        details: `client_id: ${clientId}, workspace: ${ws.id}, scope: ${scope}`,
+        ipAddress: getClientIp(req),
+        workspaceId: ws.id,
+      });
+      return false;
+    })());
+  } catch (e) {
+    if (e && e.code === "ER_DUP_ENTRY") conflict = true; // lost an INSERT race on client_id
+    else throw e;
   }
-
-  // Awaited (Phase 1B). client_id is the app's public identifier - no secret exists here.
-  await auditOrWarn({
-    userId: req.user.id,
-    action: "admin_register_entra_sp",
-    details: `client_id: ${clientId}, workspace: ${ws.id}, scope: ${scope}`,
-    target: id,
-    ipAddress: getClientIp(req),
-    workspaceId: ws.id,
-  });
+  if (conflict) return res.status(409).json(ALREADY_REGISTERED);
   const row = await db.prepare(`${ENTRA_SP_SELECT} WHERE sp.id = ?`).get(id);
   res.status(201).json(row);
 }));
@@ -901,19 +911,22 @@ router.post("/scim-tokens", requirePlatformAdmin, asyncHandler(async (req, res) 
 
   const secret = generateScimToken();
   const id = uuidv4();
-  await db.prepare(
-    `INSERT INTO scim_tokens (id, token_hash, prefix, name, organization_id, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
-  ).run(id, hashSecret(secret), scimDisplayPrefix(secret), name, org.id, req.user.id);
-  // Awaited (Phase 1B). Never the secret, its hash or its prefix.
-  await auditOrWarn({
-    userId: req.user.id,
-    action: "admin_create_scim_token",
-    details: `name: ${name}, organization: ${org.id}`,
-    target: id,
-    ipAddress: getClientIp(req),
-    organizationId: org.id,
-  });
+  // Credential issuance (Phase 1C): the token and its audit row commit together. No audit
+  // row, no token - and the secret is never returned (503 AUDIT_UNAVAILABLE). The row
+  // never holds the secret, its hash or its prefix.
+  await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+    await tx.prepare(
+      `INSERT INTO scim_tokens (id, token_hash, prefix, name, organization_id, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
+    ).run(id, hashSecret(secret), scimDisplayPrefix(secret), name, org.id, req.user.id);
+    await auditInTx(tx, {
+      userId: req.user.id,
+      action: "admin_create_scim_token",
+      details: `name: ${name}, organization: ${org.id}`,
+      ipAddress: getClientIp(req),
+      organizationId: org.id,
+    });
+  })());
 
   const row = await db.prepare(`${SCIM_TOKEN_SELECT} WHERE t.id = ?`).get(id);
   const origin = config.publicBaseUrl || `${req.protocol}://${req.get("host")}`;

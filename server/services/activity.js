@@ -2,7 +2,7 @@ const { db } = require('../db/database');
 const config = require('../config');
 const proxyaddr = require('proxy-addr');
 const { trustedProxies } = require('../config/cloudflareIps');
-const { appendEntry, pruneChain } = require('../lib/activity-chain');
+const { appendEntry, appendInTx, pruneChain } = require('../lib/activity-chain');
 
 // Gate function: returns true when an immediate TCP peer is one we trust
 // to populate forwarding headers (Cloudflare edges, loopback, link-local,
@@ -78,6 +78,65 @@ async function auditOrWarn({ userId = null, action, details = null, target = nul
   const ok = await logActivity(userId, action, details, deviceId, ipAddress, workspaceId, organizationId);
   if (!ok) console.error(`[audit] NOT AUDITED: action=${action} actor=${userId ?? 'none'} target=${target ?? 'none'}`);
   return ok;
+}
+
+// Thrown by auditInTx when the audit row can't be written. It propagates out of the
+// caller's transaction (rolling the change back) to the error handler, which answers with
+// its status and message (server.js: err.status / err.expose).
+class AuditUnavailableError extends Error {
+  constructor(cause) {
+    super('Change not applied: audit unavailable');
+    this.name = 'AuditUnavailableError';
+    this.status = 503;
+    this.expose = true;
+    this.code = 'AUDIT_UNAVAILABLE';
+    if (cause) this.cause = cause;
+  }
+}
+
+// ============================================================================
+//  auditInTx - the audit row for an access grant or a credential issuance, written
+//  in the SAME transaction as the change: they commit together or roll back together.
+//  On any failure it throws AuditUnavailableError, so the change is not applied and
+//  the request fails with 503 AUDIT_UNAVAILABLE.
+//
+//  RULES for every caller:
+//   1. Call it as the transaction's LAST statement before COMMIT. It locks the single
+//      activity_log_chain row, which every audit write in the process waits on, so it
+//      must be taken last and held only for the commit. Lock order everywhere:
+//        app_locks -> target users rows -> member / target rows -> chain row.
+//   2. NEVER await logActivity / auditOrWarn inside a transaction after auditInTx.
+//      They write on another connection, which would wait on THIS transaction's chain
+//      lock - for up to innodb_lock_wait_timeout (50s) - while holding a pool slot.
+//   3. Wrap the audited transaction in db.retryOnDeadlock. Retrying is safe: the
+//      audit row rolls back with the change.
+//
+//  Not tracked by pendingWrites / drainActivity: the write finishes with the
+//  transaction (if the pool closes mid-transaction, both are rolled back).
+// ============================================================================
+async function auditInTx(tx, { userId = null, action, details = null, deviceId = null, ipAddress = null, workspaceId = null, organizationId = null } = {}) {
+  try {
+    let ws = workspaceId || null;
+    if (!ws && deviceId) {
+      const d = await tx.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
+      ws = d?.workspace_id || null;
+    }
+    return await appendInTx(tx, {
+      user_id: userId || null,
+      device_id: deviceId || null,
+      action,
+      details: details || null,
+      ip_address: ipAddress || null,
+      workspace_id: ws,
+      organization_id: organizationId || null,
+    });
+  } catch (e) {
+    // A deadlock victim is rethrown as-is so the caller's db.retryOnDeadlock retries the
+    // whole transaction (change + audit); everything else means the audit is unavailable.
+    if (e && e.code === 'ER_LOCK_DEADLOCK') throw e;
+    console.error(`[audit] in-transaction write failed: action=${action} actor=${userId ?? 'none'}: ${e.message}`);
+    throw new AuditUnavailableError(e);
+  }
 }
 
 // Waits until no audit write is pending, or timeoutMs has passed. Writes started while
@@ -278,4 +337,4 @@ function summarizeAction(req) {
   return parts.join(', ') || null;
 }
 
-module.exports = { logActivity, auditOrWarn, drainActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp, getSocketClientIp };
+module.exports = { logActivity, auditOrWarn, auditInTx, AuditUnavailableError, drainActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp, getSocketClientIp };

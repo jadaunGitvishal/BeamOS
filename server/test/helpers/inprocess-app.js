@@ -110,11 +110,17 @@ async function startInProcessApp({ only } = {}) {
     app.use(r.path, bearerAuth, resolveTenancy, agencyGate, requireServerMod(r.mod));
   }
 
-  // Surface handler errors as JSON (same pattern as tenancy-cross-tenant.test.js)
-  // instead of Express's default HTML page, so a thrown error fails assertions
-  // legibly rather than as an opaque non-JSON body.
-  app.use((err, req, res, _next) => {
-    res.status(500).json({ error: err.message });
+  // Handler errors as JSON - the same final error handler as server.js (err.status /
+  // err.expose), so an error a route forwards (e.g. a 503 AUDIT_UNAVAILABLE) reaches the
+  // client exactly as in production, not as Express's default HTML page. The full error
+  // is logged ([error] line), as server.js does. Routes a caller adds after this returns
+  // are not covered.
+  app.use((err, req, res, next) => {
+    console.error(`[error] ${req.method} ${req.originalUrl}:`, err);
+    if (res.headersSent) return next(err);
+    const body = { error: err.expose ? err.message : 'Internal server error' };
+    if (err.expose && typeof err.code === 'string') body.code = err.code;
+    res.status(err.status || 500).json(body);
   });
 
   const server = app.listen(0);

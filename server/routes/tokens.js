@@ -11,7 +11,7 @@ const { isZonedPlaylist } = require('../lib/agency-targets'); // #73: full-scree
 const { isPlatformRole } = require('../middleware/auth');       // #146: billing:read mint gate
 const { asyncHandler } = require('../lib/async-handler');
 const { withLifetime, lifetimeExpiresAt } = require('../lib/token-lifetime'); // Ref 34
-const { auditOrWarn, getClientIp } = require('../services/activity');
+const { auditOrWarn, auditInTx, getClientIp } = require('../services/activity');
 
 // Audit form of a playlist allowlist: sorted, without duplicates, so equal sets print
 // the same and one change's "after" is exactly the next change's "before".
@@ -94,9 +94,15 @@ router.post('/', asyncHandler(async (req, res) => {
   }
   const secret = generateToken();
   const id = crypto.randomUUID();
+  // Credential issuance (Phase 1C): the token, its targets and its audit row commit
+  // together. If the audit write fails the token is never created and the secret never
+  // leaves the server (503 AUDIT_UNAVAILABLE). The row never holds the secret, its hash
+  // or its display prefix.
+  let details = `token: ${id}, name: ${name}, scope: ${scope}, workspace: ${req.workspaceId}`;
+  if (scope === 'agency') details += `, targets: ${targetList(targetIds)}, auto_publish: ${!!autoPublish}`;
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements must be
   // prepared from it, not the outer db, to actually participate in the transaction.
-  await db.transaction(async (tx) => {
+  await db.retryOnDeadlock(() => db.transaction(async (tx) => {
     await tx.prepare(`
       INSERT INTO api_tokens (id, token_hash, prefix, name, user_id, workspace_id, scope, auto_publish, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())
@@ -105,14 +111,11 @@ router.post('/', asyncHandler(async (req, res) => {
       const ins = tx.prepare('INSERT INTO api_token_targets (token_id, playlist_id) VALUES (?, ?)');
       for (const pid of targetIds) await ins.run(id, pid);
     }
-  })();
-  // Phase 1B: awaited. Never the secret, its hash or its display prefix.
-  let details = `token: ${id}, name: ${name}, scope: ${scope}, workspace: ${req.workspaceId}`;
-  if (scope === 'agency') details += `, targets: ${targetList(targetIds)}, auto_publish: ${!!autoPublish}`;
-  await auditOrWarn({
-    userId: req.user.id, action: 'api_token_created', details, target: id,
-    ipAddress: getClientIp(req), workspaceId: req.workspaceId, organizationId: req.workspace.organization_id,
-  });
+    await auditInTx(tx, {
+      userId: req.user.id, action: 'api_token_created', details,
+      ipAddress: getClientIp(req), workspaceId: req.workspaceId, organizationId: req.workspace.organization_id,
+    });
+  })());
   // `token` is returned only here, never again. Ref 34: expires_at is informational -
   // it's recomputed from the CURRENT org cap on every request, so it moves if the cap does.
   const createdAt = (await db.prepare('SELECT created_at FROM api_tokens WHERE id = ?').get(id)).created_at;
@@ -154,24 +157,33 @@ router.put('/:id/targets', asyncHandler(async (req, res) => {
     // #73: full-screen-only - a zoned playlist can't be (re-)designated to an agency.
     if (await isZonedPlaylist(db, pid)) return res.status(400).json({ error: 'A selected playlist is assigned to a zone on a screen — agency uploads play full-screen, so it can\'t be shared with an agency. Use a full-screen playlist.' });
   }
+  const ws = await db.prepare('SELECT organization_id FROM workspaces WHERE id = ?').get(tok.workspace_id);
+  const audit = (before, after) => ({
+    userId: req.user.id, action: 'api_token_targets_changed', details: `token: ${tok.id}, targets: ${before} -> ${after}`,
+    ipAddress: getClientIp(req), workspaceId: tok.workspace_id, organizationId: ws?.organization_id || null,
+  });
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements must be
   // prepared from it, not the outer db, to actually participate in the transaction.
   // "before" is read with the token row locked, so concurrent re-designations queue here
   // and each one's audited "before" is the previous one's "after".
-  const { before, after } = await db.transaction(async (tx) => {
+  // Phase 1C: a change that adds any playlist is a grant - its audit row is written in
+  // this transaction (no row, no change: 503 AUDIT_UNAVAILABLE). A pure narrowing keeps
+  // the awaited post-commit row (the change always applies).
+  const { before, after, granted } = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
     await tx.prepare('SELECT id FROM api_tokens WHERE id = ? FOR UPDATE').get(tok.id);
-    const prev = await tx.prepare('SELECT playlist_id FROM api_token_targets WHERE token_id = ? FOR UPDATE').all(tok.id);
+    const prev = (await tx.prepare('SELECT playlist_id FROM api_token_targets WHERE token_id = ? FOR UPDATE').all(tok.id))
+      .map((r) => String(r.playlist_id));
     const ins = tx.prepare('INSERT IGNORE INTO api_token_targets (token_id, playlist_id) VALUES (?, ?)');
     await tx.prepare('DELETE FROM api_token_targets WHERE token_id = ?').run(tok.id);
     for (const pid of ids) await ins.run(tok.id, pid);
-    return { before: targetList(prev.map((r) => r.playlist_id)), after: targetList(ids) };
-  })();
-  if (before !== after) {
-    const ws = await db.prepare('SELECT organization_id FROM workspaces WHERE id = ?').get(tok.workspace_id);
-    await auditOrWarn({
-      userId: req.user.id, action: 'api_token_targets_changed', details: `token: ${tok.id}, targets: ${before} -> ${after}`,
-      target: tok.id, ipAddress: getClientIp(req), workspaceId: tok.workspace_id, organizationId: ws?.organization_id || null,
-    });
+    const b = targetList(prev);
+    const a = targetList(ids);
+    const added = ids.some((pid) => !prev.includes(String(pid)));
+    if (added) await auditInTx(tx, audit(b, a));
+    return { before: b, after: a, granted: added };
+  })());
+  if (!granted && before !== after) {
+    await auditOrWarn({ ...audit(before, after), target: tok.id });
   }
   res.json({ id: tok.id, target_playlist_ids: ids });
 }));
