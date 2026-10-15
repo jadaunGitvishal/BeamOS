@@ -13,6 +13,7 @@ const { canAdminWorkspace } = require('../lib/permissions'); // Ref 47
 const { requireScope } = require('../middleware/apiToken');
 const commandQueue = require('../lib/command-queue');
 const config = require('../config');
+const { auditOrWarn, getClientIp } = require('../services/activity');
 
 // List devices in the caller's current workspace.
 // Phase 2.2a: filter by workspace_id instead of user_id. The caller's current
@@ -284,15 +285,27 @@ router.post('/:id/command', requireScope('full'), asyncHandler(async (req, res) 
     }
   }
 
+  // Phase 1B: the type and outcome only, never the payload. Awaited for kiosk lockdown,
+  // fire-and-forget otherwise (auditOrWarn never rejects).
+  const audit = async (delivered, queued) => {
+    const audited = auditOrWarn({
+      userId: req.user.id, action: 'device_command_sent', details: `type: ${type}, delivered: ${delivered}, queued: ${queued}`,
+      target: device.id, deviceId: device.id, ipAddress: getClientIp(req), workspaceId: device.workspace_id,
+    });
+    if (LOCKDOWN_COMMANDS.includes(type)) await audited;
+  };
+
   const deviceNs = req.app.get('io').of('/device');
   const room = deviceNs.adapter.rooms.get(device.id);
   if (room && room.size > 0) {
     deviceNs.to(device.id).emit('device:command', { type, payload: payload || {} });
     console.log(`Command '${type}' delivered to device ${device.id} (user ${req.user.id})`);
+    await audit(true, false);
     return res.json({ success: true, id: device.id, type, delivered: true, queued: false });
   }
   const queued = commandQueue.queueCommand(device.id, type, payload || {});
   console.log(`Command '${type}' for offline device ${device.id} (queued=${queued}, user ${req.user.id})`);
+  await audit(false, queued);
   res.json({ success: true, id: device.id, type, delivered: false, queued, queue_ttl_seconds: Math.round(config.commandQueueTtlMs / 1000) });
 }));
 

@@ -5,6 +5,7 @@ const { accessContext, accessibleWorkspaceIds } = require('../lib/tenancy');
 const { workspaceRoom } = require('../lib/socket-rooms');
 const { protectSocket, bail } = require('../lib/safe-socket');
 const { LOCKDOWN_COMMANDS, SOCKET_COMMANDS } = require('../lib/device-commands');
+const { auditOrWarn, getSocketClientIp } = require('../services/activity');
 
 // Phase 2.3: workspace-scoped socket rooms + per-command permission gates.
 // Replaces the previous flat dashboardNs.emit broadcast (which leaked every
@@ -140,11 +141,20 @@ module.exports = function setupDashboardSocket(io) {
         if (typeof ack === 'function') ack({ delivered: false, reason: 'unsupported_command' });
         return;
       }
+      // Phase 1B: the type and outcome only, never the payload. Fire-and-forget:
+      // auditOrWarn never rejects, so a failed write can't escape this handler. The
+      // device's workspace is filled in from device_id by logActivity.
+      const audit = (delivered, queued) => auditOrWarn({
+        userId: socket.userId, action: 'device_command_sent',
+        details: `type: ${type}, via: socket, delivered: ${delivered}, queued: ${queued}`,
+        target: device_id, deviceId: device_id, ipAddress: getSocketClientIp(socket),
+      });
       const room = deviceNs.adapter.rooms.get(device_id);
       if (room && room.size > 0) {
         deviceNs.to(device_id).emit('device:command', { type, payload });
         console.log(`Command delivered to device ${device_id}: ${type}`);
         if (typeof ack === 'function') ack({ delivered: true });
+        audit(true, false);
         return;
       }
       // Device offline at emit time. Try to queue (lazy require so reverting
@@ -158,6 +168,7 @@ module.exports = function setupDashboardSocket(io) {
       } catch (e) { /* command-queue module absent; fall through to lost */ }
       console.log(`Command for offline device ${device_id}: ${type} (queued=${queued})`);
       if (typeof ack === 'function') ack({ delivered: false, queued, reason: 'offline' });
+      audit(false, queued);
     });
 
     socket.on('disconnect', () => {

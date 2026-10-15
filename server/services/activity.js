@@ -29,6 +29,17 @@ function getClientIp(req) {
   return req.ip || null;
 }
 
+// The same resolution for a Socket.IO connection: its handshake request stands in for
+// req, with req.ip worked out the way Express's 'trust proxy' setting (server.js) does.
+function getSocketClientIp(socket) {
+  const req = socket?.request;
+  const fallback = socket?.handshake?.address || null;
+  if (!req || !req.socket) return fallback;
+  let ip = fallback;
+  try { ip = proxyaddr(req, isTrustedPeer); } catch { /* keep the handshake address */ }
+  return getClientIp({ headers: req.headers, socket: req.socket, ip });
+}
+
 // Phase 2.2 writer-leak fix: activity_log rows now stamp workspace_id so
 // tenant-scoped queries don't miss new events. Callers pass the workspace
 // when known; the middleware below sources it from resolveTenancy. When
@@ -267,4 +278,4 @@ function summarizeAction(req) {
   return parts.join(', ') || null;
 }
 
-module.exports = { logActivity, auditOrWarn, drainActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp };
+module.exports = { logActivity, auditOrWarn, drainActivity, getActivity, pruneActivityLog, activityLogger, auditRead, getClientIp, getSocketClientIp };

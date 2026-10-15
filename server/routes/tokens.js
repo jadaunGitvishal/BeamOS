@@ -11,6 +11,11 @@ const { isZonedPlaylist } = require('../lib/agency-targets'); // #73: full-scree
 const { isPlatformRole } = require('../middleware/auth');       // #146: billing:read mint gate
 const { asyncHandler } = require('../lib/async-handler');
 const { withLifetime, lifetimeExpiresAt } = require('../lib/token-lifetime'); // Ref 34
+const { auditOrWarn, getClientIp } = require('../services/activity');
+
+// Audit form of a playlist allowlist: sorted, without duplicates, so equal sets print
+// the same and one change's "after" is exactly the next change's "before".
+const targetList = (ids) => `[${[...new Set(ids.map(String))].sort().join(', ')}]`;
 
 // Ref 34: the active workspace's org cap (NULL = uncapped). apiTokenAuth reads the
 // same column at auth time, so the expires_at shown here is exactly what it enforces.
@@ -101,6 +106,13 @@ router.post('/', asyncHandler(async (req, res) => {
       for (const pid of targetIds) await ins.run(id, pid);
     }
   })();
+  // Phase 1B: awaited. Never the secret, its hash or its display prefix.
+  let details = `token: ${id}, name: ${name}, scope: ${scope}, workspace: ${req.workspaceId}`;
+  if (scope === 'agency') details += `, targets: ${targetList(targetIds)}, auto_publish: ${!!autoPublish}`;
+  await auditOrWarn({
+    userId: req.user.id, action: 'api_token_created', details, target: id,
+    ipAddress: getClientIp(req), workspaceId: req.workspaceId, organizationId: req.workspace.organization_id,
+  });
   // `token` is returned only here, never again. Ref 34: expires_at is informational -
   // it's recomputed from the CURRENT org cap on every request, so it moves if the cap does.
   const createdAt = (await db.prepare('SELECT created_at FROM api_tokens WHERE id = ?').get(id)).created_at;
@@ -109,11 +121,21 @@ router.post('/', asyncHandler(async (req, res) => {
 }));
 
 // Revoke one of the caller's own tokens (soft delete - takes effect on the next request).
+// The audit row is written only by the request whose UPDATE actually revoked it (affected
+// rows, not the earlier read), so concurrent or repeated revokes record it exactly once.
 router.delete('/:id', asyncHandler(async (req, res) => {
-  const row = await db.prepare('SELECT id, revoked_at FROM api_tokens WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  const row = await db.prepare(`
+    SELECT t.id, t.name, t.scope, t.workspace_id, w.organization_id
+    FROM api_tokens t LEFT JOIN workspaces w ON w.id = t.workspace_id
+    WHERE t.id = ? AND t.user_id = ?
+  `).get(req.params.id, req.user.id);
   if (!row) return res.status(404).json({ error: 'Token not found' });
-  if (!row.revoked_at) {
-    await db.prepare("UPDATE api_tokens SET revoked_at = UNIX_TIMESTAMP() WHERE id = ?").run(req.params.id);
+  const { changes } = await db.prepare('UPDATE api_tokens SET revoked_at = UNIX_TIMESTAMP() WHERE id = ? AND revoked_at IS NULL').run(row.id);
+  if (changes > 0) {
+    await auditOrWarn({
+      userId: req.user.id, action: 'api_token_revoked', details: `token: ${row.id}, name: ${row.name}, scope: ${row.scope}`,
+      target: row.id, ipAddress: getClientIp(req), workspaceId: row.workspace_id, organizationId: row.organization_id,
+    });
   }
   res.json({ success: true });
 }));
@@ -134,11 +156,23 @@ router.put('/:id/targets', asyncHandler(async (req, res) => {
   }
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements must be
   // prepared from it, not the outer db, to actually participate in the transaction.
-  await db.transaction(async (tx) => {
+  // "before" is read with the token row locked, so concurrent re-designations queue here
+  // and each one's audited "before" is the previous one's "after".
+  const { before, after } = await db.transaction(async (tx) => {
+    await tx.prepare('SELECT id FROM api_tokens WHERE id = ? FOR UPDATE').get(tok.id);
+    const prev = await tx.prepare('SELECT playlist_id FROM api_token_targets WHERE token_id = ? FOR UPDATE').all(tok.id);
     const ins = tx.prepare('INSERT IGNORE INTO api_token_targets (token_id, playlist_id) VALUES (?, ?)');
     await tx.prepare('DELETE FROM api_token_targets WHERE token_id = ?').run(tok.id);
     for (const pid of ids) await ins.run(tok.id, pid);
+    return { before: targetList(prev.map((r) => r.playlist_id)), after: targetList(ids) };
   })();
+  if (before !== after) {
+    const ws = await db.prepare('SELECT organization_id FROM workspaces WHERE id = ?').get(tok.workspace_id);
+    await auditOrWarn({
+      userId: req.user.id, action: 'api_token_targets_changed', details: `token: ${tok.id}, targets: ${before} -> ${after}`,
+      target: tok.id, ipAddress: getClientIp(req), workspaceId: tok.workspace_id, organizationId: ws?.organization_id || null,
+    });
+  }
   res.json({ id: tok.id, target_playlist_ids: ids });
 }));
 

@@ -11,6 +11,7 @@ const { requireScope } = require('../middleware/apiToken');
 const { asyncHandler } = require('../lib/async-handler');
 const { ALLOWED_COMMANDS, LOCKDOWN_COMMANDS } = require('../lib/device-commands');
 const { canAdminWorkspace } = require('../lib/permissions'); // Ref 47
+const { auditOrWarn, getClientIp } = require('../services/activity');
 
 const VALID_COLOR = /^#[0-9A-Fa-f]{6}$/;
 
@@ -345,6 +346,13 @@ router.post('/:id/command', requireScope('full'), requireGroupWrite, asyncHandle
   const sent = results.filter(r => r.status === 'sent').length;
   const offline = results.filter(r => r.status === 'offline').length;
   console.log(`Group command '${type}' sent to group '${req.group.name}': ${sent} sent, ${offline} offline`);
+  // Phase 1B: the type and counts only, never the payload. Awaited for kiosk lockdown,
+  // fire-and-forget otherwise (auditOrWarn never rejects).
+  const audited = auditOrWarn({
+    userId: req.user.id, action: 'device_group_command_sent', details: `group: ${req.group.id}, type: ${type}, sent: ${sent}/${devices.length}`,
+    target: req.group.id, ipAddress: getClientIp(req), workspaceId: req.group.workspace_id,
+  });
+  if (LOCKDOWN_COMMANDS.includes(type)) await audited;
   res.json({ success: true, sent, offline, total: devices.length, results });
 }));
 

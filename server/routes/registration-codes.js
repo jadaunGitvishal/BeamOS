@@ -25,7 +25,7 @@ const QRCode = require('qrcode');
 const { db } = require('../db/database');
 const { canAdminWorkspace } = require('../lib/permissions');
 const { asyncHandler } = require('../lib/async-handler');
-const { getClientIp } = require('../services/activity');
+const { getClientIp, auditOrWarn } = require('../services/activity');
 const { stripDeviceSecrets } = require('../lib/device-sanitize');
 const { hardwareInsertParts } = require('../lib/device-hardware');
 const { workspaceRoom, emitToWorkspace } = require('../lib/socket-rooms');
@@ -66,6 +66,21 @@ async function loadAdminWorkspace(req, res, workspaceId) {
   }
   req.workspaceId = ws.id;
   return ws;
+}
+
+// Phase 1B: awaited audit row for a code's creation / regeneration / revocation (an
+// enrolment credential). Never the code value itself.
+// `fromId` (regeneration only) is the replaced code's id.
+function auditCode(req, action, row, ws, fromId = null) {
+  return auditOrWarn({
+    userId: req.user.id,
+    action,
+    details: `code_id: ${row.id}, workspace: ${row.workspace_id}, planned_device_name: ${row.planned_device_name || 'none'}, expires_at: ${row.expires_at ?? 'none'}${fromId ? `, from: ${fromId}` : ''}`,
+    target: row.id,
+    ipAddress: getClientIp(req),
+    workspaceId: row.workspace_id,
+    organizationId: ws.organization_id,
+  });
 }
 
 function serializeCode(row) {
@@ -131,6 +146,7 @@ router.post('/registration-codes', asyncHandler(async (req, res) => {
   if (!row) {
     return res.status(503).json({ error: 'Could not allocate a unique code, please retry' });
   }
+  await auditCode(req, 'registration_code_created', row, ws);
   res.status(201).json(serializeCode(row));
 }));
 
@@ -155,6 +171,7 @@ router.post('/registration-codes/:id/regenerate', asyncHandler(async (req, res) 
   if (!row) {
     return res.status(503).json({ error: 'Could not allocate a unique code, please retry' });
   }
+  await auditCode(req, 'registration_code_regenerated', row, ws, old.id);
   res.status(201).json(serializeCode(row));
 }));
 
@@ -179,7 +196,9 @@ router.delete('/registration-codes/:id', asyncHandler(async (req, res) => {
     });
   }
 
-  await db.prepare('DELETE FROM registration_codes WHERE id = ?').run(row.id);
+  // Audited only by the request whose DELETE removed the row (concurrent deletes: once).
+  const { changes } = await db.prepare('DELETE FROM registration_codes WHERE id = ?').run(row.id);
+  if (changes > 0) await auditCode(req, 'registration_code_revoked', row, ws);
   res.json({ success: true });
 }));
 

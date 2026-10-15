@@ -5,7 +5,7 @@ const { v4: uuidv4 } = require("uuid");
 const { db } = require("../db/database");
 const { canAdminWorkspace } = require("../lib/permissions");
 const { requirePlatformAdmin } = require("../middleware/auth");
-const { logActivity, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
 const {
   deleteWorkspaceCascade,
   deleteOrgCascade,
@@ -824,14 +824,15 @@ router.post("/entra-service-principals", requirePlatformAdmin, asyncHandler(asyn
     ).run(id, clientId, name, workspaceId, scope, req.user.id);
   }
 
-  logActivity(
-    req.user.id,
-    "admin_register_entra_sp",
-    `client_id: ${clientId}, workspace: ${ws.id}, scope: ${scope}`,
-    null,
-    getClientIp(req),
-    ws.id,
-  );
+  // Awaited (Phase 1B). client_id is the app's public identifier - no secret exists here.
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "admin_register_entra_sp",
+    details: `client_id: ${clientId}, workspace: ${ws.id}, scope: ${scope}`,
+    target: id,
+    ipAddress: getClientIp(req),
+    workspaceId: ws.id,
+  });
   const row = await db.prepare(`${ENTRA_SP_SELECT} WHERE sp.id = ?`).get(id);
   res.status(201).json(row);
 }));
@@ -840,18 +841,20 @@ router.post("/entra-service-principals", requirePlatformAdmin, asyncHandler(asyn
 // pattern as DELETE /api/tokens/:id) so the registration stays as an audit record;
 // entraTokenAuth checks revoked_at on every lookup, so this takes effect immediately.
 router.delete("/entra-service-principals/:id", requirePlatformAdmin, asyncHandler(async (req, res) => {
-  const row = await db.prepare("SELECT id, client_id, workspace_id, revoked_at FROM entra_service_principals WHERE id = ?").get(req.params.id);
+  const row = await db.prepare("SELECT id, client_id, workspace_id FROM entra_service_principals WHERE id = ?").get(req.params.id);
   if (!row) return res.status(404).json({ error: "Service Principal registration not found" });
-  if (!row.revoked_at) {
-    await db.prepare("UPDATE entra_service_principals SET revoked_at = UNIX_TIMESTAMP() WHERE id = ?").run(row.id);
-    logActivity(
-      req.user.id,
-      "admin_revoke_entra_sp",
-      `client_id: ${row.client_id}`,
-      null,
-      getClientIp(req),
-      row.workspace_id,
-    );
+  // Audited only by the request whose UPDATE actually revoked it (affected rows, not the
+  // read above), so concurrent or repeated revokes record it exactly once.
+  const { changes } = await db.prepare("UPDATE entra_service_principals SET revoked_at = UNIX_TIMESTAMP() WHERE id = ? AND revoked_at IS NULL").run(row.id);
+  if (changes > 0) {
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "admin_revoke_entra_sp",
+      details: `client_id: ${row.client_id}`,
+      target: row.id,
+      ipAddress: getClientIp(req),
+      workspaceId: row.workspace_id,
+    });
   }
   res.json({ success: true });
 }));
@@ -902,7 +905,15 @@ router.post("/scim-tokens", requirePlatformAdmin, asyncHandler(async (req, res) 
     `INSERT INTO scim_tokens (id, token_hash, prefix, name, organization_id, created_by, created_at)
      VALUES (?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
   ).run(id, hashSecret(secret), scimDisplayPrefix(secret), name, org.id, req.user.id);
-  logActivity(req.user.id, "admin_create_scim_token", `name: ${name}, organization: ${org.id}`, null, getClientIp(req), null);
+  // Awaited (Phase 1B). Never the secret, its hash or its prefix.
+  await auditOrWarn({
+    userId: req.user.id,
+    action: "admin_create_scim_token",
+    details: `name: ${name}, organization: ${org.id}`,
+    target: id,
+    ipAddress: getClientIp(req),
+    organizationId: org.id,
+  });
 
   const row = await db.prepare(`${SCIM_TOKEN_SELECT} WHERE t.id = ?`).get(id);
   const origin = config.publicBaseUrl || `${req.protocol}://${req.get("host")}`;
@@ -912,11 +923,19 @@ router.post("/scim-tokens", requirePlatformAdmin, asyncHandler(async (req, res) 
 // DELETE /api/admin/scim-tokens/:id - soft revoke (audit record kept); scimAuth
 // checks revoked_at on every request, so it takes effect immediately.
 router.delete("/scim-tokens/:id", requirePlatformAdmin, asyncHandler(async (req, res) => {
-  const row = await db.prepare("SELECT id, name, revoked_at FROM scim_tokens WHERE id = ?").get(req.params.id);
+  const row = await db.prepare("SELECT id, name, organization_id FROM scim_tokens WHERE id = ?").get(req.params.id);
   if (!row) return res.status(404).json({ error: "SCIM token not found" });
-  if (!row.revoked_at) {
-    await db.prepare("UPDATE scim_tokens SET revoked_at = UNIX_TIMESTAMP() WHERE id = ?").run(row.id);
-    logActivity(req.user.id, "admin_revoke_scim_token", `name: ${row.name}`, null, getClientIp(req), null);
+  // Audited only by the request whose UPDATE actually revoked it (see the SP revoke above).
+  const { changes } = await db.prepare("UPDATE scim_tokens SET revoked_at = UNIX_TIMESTAMP() WHERE id = ? AND revoked_at IS NULL").run(row.id);
+  if (changes > 0) {
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "admin_revoke_scim_token",
+      details: `name: ${row.name}`,
+      target: row.id,
+      ipAddress: getClientIp(req),
+      organizationId: row.organization_id,
+    });
   }
   res.json({ success: true });
 }));
