@@ -6,7 +6,8 @@ const { canAdminOrg, canAccessOrg, canManageOrgRegions } = require("../lib/permi
 const { accessibleWorkspaceIds } = require("../lib/tenancy");
 const { isoDate, slaUptimeTarget, deviceAvailabilityRows, meanAvailability, slaStatus } = require("../lib/sla");
 const { isPlatformRole } = require("../middleware/auth");
-const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, auditInTx, getClientIp, auditRead } = require("../services/activity");
+const { isOrgDemotion } = require("../lib/grant-direction"); // Phase 1C
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
 const { renderXlsx, renderPdf } = require("../lib/report-export");
@@ -198,29 +199,34 @@ router.post(
       return res.status(404).json({ error: "User not found" });
     }
 
-    const existing = await db
-      .prepare(
-        "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ?",
-      )
-      .get(org.id, target.id);
-    if (existing) {
-      return res.status(409).json({ error: "User is already a member of this organization" });
+    // A grant (Phase 1C): one transaction - this org's member rows locked (so a concurrent
+    // add of the same user waits and then sees it: 409, not a duplicate-key 500), the
+    // INSERT, and the audit row last. No audit row, no membership (503 AUDIT_UNAVAILABLE).
+    const ALREADY_MEMBER = { error: "User is already a member of this organization" };
+    let exists;
+    try {
+      exists = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        const rows = await tx
+          .prepare("SELECT user_id FROM organization_members WHERE organization_id = ? FOR UPDATE")
+          .all(org.id);
+        if (rows.some((r) => r.user_id === target.id)) return true;
+        await tx
+          .prepare("INSERT INTO organization_members (organization_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)")
+          .run(org.id, target.id, role, req.user.id);
+        await auditInTx(tx, {
+          userId: req.user.id,
+          action: "org_member_added",
+          details: `org: ${org.name} (${org.id}), target: ${target.email}, role: ${role}`,
+          ipAddress: getClientIp(req),
+          organizationId: org.id,
+        });
+        return false;
+      })());
+    } catch (e) {
+      if (!isDuplicateKeyError(e)) throw e;
+      exists = true;
     }
-
-    await db
-      .prepare(
-        "INSERT INTO organization_members (organization_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
-      )
-      .run(org.id, target.id, role, req.user.id);
-
-    logActivity(
-      req.user.id,
-      "org_member_added",
-      `org: ${org.name} (${org.id}), target: ${target.email}, role: ${role}`,
-      null,
-      getClientIp(req),
-      null,
-    );
+    if (exists) return res.status(409).json(ALREADY_MEMBER);
 
     res.status(201).json({ user_id: target.id, email: target.email, role });
   }),
@@ -242,7 +248,12 @@ router.put(
     // org's member rows (FOR UPDATE): the last-owner count is then exact, so two
     // concurrent demotions can't both see "2 owners" and leave none. Refusals return
     // { status, body } and commit nothing.
-    const outcome = await db.transaction(async (tx) => {
+    // Phase 1C: the direction is decided here, from the locked "before" role. A change that
+    // is not strictly lower is a grant - its audit row is this transaction's last statement
+    // (no row, no change: 503). A demotion keeps the awaited row after commit.
+    const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
+    const details = (before) => `org: ${org.name} (${org.id}), target: ${target?.email}, role: ${before} -> ${newRole}`;
+    const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       const rows = await tx
         .prepare("SELECT user_id, role FROM organization_members WHERE organization_id = ? FOR UPDATE")
         .all(org.id);
@@ -283,19 +294,22 @@ router.put(
           .prepare("DELETE FROM region_viewer_scopes WHERE organization_id = ? AND user_id = ?")
           .run(org.id, req.params.userId);
       }
-      return null;
-    })();
-    if (outcome) return res.status(outcome.status).json(outcome.body);
-
-    const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
-    logActivity(
-      req.user.id,
-      "org_member_role_changed",
-      `org: ${org.name} (${org.id}), target: ${target?.email}, role: ${newRole}`,
-      null,
-      getClientIp(req),
-      null,
-    );
+      const grant = member.role !== newRole && !isOrgDemotion(member.role, newRole);
+      if (grant) {
+        await auditInTx(tx, {
+          userId: req.user.id, action: "org_member_role_changed", details: details(member.role),
+          ipAddress: getClientIp(req), organizationId: org.id,
+        });
+      }
+      return { before: member.role, grant };
+    })());
+    if (outcome.status) return res.status(outcome.status).json(outcome.body);
+    if (outcome.before !== newRole && !outcome.grant) {
+      await auditOrWarn({
+        userId: req.user.id, action: "org_member_role_changed", details: details(outcome.before),
+        target: req.params.userId, ipAddress: getClientIp(req), organizationId: org.id,
+      });
+    }
 
     res.json({ user_id: req.params.userId, role: newRole });
   }),
@@ -522,16 +536,22 @@ function validRegionLevel(res, raw) {
   return level;
 }
 
+// The refusal message when `parent` can't hold a region of `level`, else null.
+function parentLevelError(parent, level) {
+  if (levelRank(parent.level || "region") < levelRank(level)) return null;
+  return `A ${level} cannot sit under a ${parent.level || "region"}: the parent must be a higher level (${REGION_LEVELS.join(" > ")})`;
+}
+
 function parentMustBeHigher(res, parent, level) {
-  if (levelRank(parent.level || "region") < levelRank(level)) return true;
-  res.status(400).json({
-    error: `A ${level} cannot sit under a ${parent.level || "region"}: the parent must be a higher level (${REGION_LEVELS.join(" > ")})`,
-  });
+  const error = parentLevelError(parent, level);
+  if (!error) return true;
+  res.status(400).json({ error });
   return false;
 }
 
-async function siblingNameTaken(orgId, parentId, name, exceptId = null) {
-  const row = await db
+// `handle`: db, or a transaction's tx (the region PATCH reads it inside its transaction).
+async function siblingNameTaken(orgId, parentId, name, exceptId = null, handle = db) {
+  const row = await handle
     .prepare(
       "SELECT 1 AS hit FROM regions WHERE organization_id = ? AND COALESCE(parent_id, '') = ? AND name = ? AND id <> ?",
     )
@@ -575,14 +595,15 @@ router.post(
       if (isDuplicateKeyError(e)) return res.status(409).json({ error: DUP_REGION_NAME });
       throw e;
     }
-    logActivity(
-      req.user.id,
-      "region_created",
-      `org: ${org.name} (${org.id}), region: ${name}, level: ${level}${parentId ? `, parent: ${parentId}` : ""}`,
-      null,
-      getClientIp(req),
-      null,
-    );
+    // Not a grant (an empty region exposes nothing): awaited row after the change.
+    await auditOrWarn({
+      userId: req.user.id,
+      action: "region_created",
+      details: `org: ${org.name} (${org.id}), region: ${name}, level: ${level}${parentId ? `, parent: ${parentId}` : ""}`,
+      target: id,
+      ipAddress: getClientIp(req),
+      organizationId: org.id,
+    });
     res.status(201).json({ id, organization_id: org.id, name, level, parent_id: parentId, workspace_count: 0 });
   }),
 );
@@ -595,98 +616,121 @@ router.patch(
   asyncHandler(async (req, res) => {
     const org = await loadOrgForRegions(req, res);
     if (!org) return;
-    const region = await db
-      .prepare("SELECT * FROM regions WHERE id = ? AND organization_id = ?")
+    const found = await db
+      .prepare("SELECT id FROM regions WHERE id = ? AND organization_id = ?")
       .get(req.params.id, org.id);
-    if (!region) return res.status(404).json({ error: "Region not found" });
+    if (!found) return res.status(404).json({ error: "Region not found" });
 
     const body = req.body || {};
     const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
     if (!has("name") && !has("level") && !has("parent_id")) {
       return res.status(400).json({ error: "Nothing to update: send name, level and/or parent_id" });
     }
-    let name = region.name;
+    let newName;
     if (has("name")) {
-      name = validRegionName(res, body.name);
-      if (!name) return;
+      newName = validRegionName(res, body.name);
+      if (!newName) return;
     }
-    let level = region.level || "region";
+    let newLevel;
     if (has("level")) {
-      level = validRegionLevel(res, body.level);
-      if (!level) return;
+      newLevel = validRegionLevel(res, body.level);
+      if (!newLevel) return;
     }
-    let parentId = region.parent_id || null;
+    let newParentId;
     if (has("parent_id")) {
-      parentId = isBlank(body.parent_id) ? null : body.parent_id;
-      if (parentId !== null && typeof parentId !== "string") {
+      newParentId = isBlank(body.parent_id) ? null : body.parent_id;
+      if (newParentId !== null && typeof newParentId !== "string") {
         return res.status(400).json({ error: "parent_id must be a region id or null" });
       }
     }
 
-    if (parentId) {
-      if (parentId === region.id) return res.status(400).json({ error: "A region cannot be its own parent" });
-      const parent = await db
-        .prepare("SELECT id, level FROM regions WHERE id = ? AND organization_id = ?")
-        .get(parentId, org.id);
-      if (!parent) return res.status(400).json({ error: "parent_id is not a region of this organization" });
-      const descendant = await db
-        .prepare(
-          `WITH RECURSIVE sub (id, depth) AS (
-             SELECT id, 1 FROM regions WHERE parent_id = ? AND organization_id = ?
-             UNION ALL
-             SELECT c.id, sub.depth + 1 FROM regions c JOIN sub ON c.parent_id = sub.id
-              WHERE c.organization_id = ? AND sub.depth < ${MAX_REGION_DEPTH}
-           )
-           SELECT 1 AS hit FROM sub WHERE id = ? LIMIT 1`,
-        )
-        .get(region.id, org.id, org.id, parentId);
-      if (descendant) return res.status(400).json({ error: "A region cannot move under one of its own descendants" });
-      if (!parentMustBeHigher(res, parent, level)) return;
-    }
-
-    const children = await db
-      .prepare("SELECT name, level FROM regions WHERE parent_id = ? AND organization_id = ?")
-      .all(region.id, org.id);
-    const blocking = children.find((c) => levelRank(c.level || "region") <= levelRank(level));
-    if (blocking) {
-      return res.status(400).json({
-        error: `A ${level} would not be above its child "${blocking.name}" (${blocking.level || "region"}): every child must stay a lower level`,
-      });
-    }
-
-    if ((name !== region.name || parentId !== (region.parent_id || null)) && (await siblingNameTaken(org.id, parentId, name, region.id))) {
-      return res.status(409).json({ error: DUP_REGION_NAME });
-    }
-
+    // One transaction: the region, its (new) parent and its children are read locked, so
+    // the parent-higher / child-lower / no-cycle checks can't be undone by a concurrent
+    // move or level change of a neighbour before this one commits (two such changes are
+    // serialized; a deadlock between them is retried and the loser re-checks).
+    // Phase 1C: a move (parent or level change) is a grant - regional viewers scoped to an
+    // ancestor can see different workspaces - so its audit row is this transaction's last
+    // statement (no row, no change: 503). A rename is not: awaited row after commit.
+    let outcome;
     try {
-      await db
-        .prepare("UPDATE regions SET name = ?, level = ?, parent_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
-        .run(name, level, parentId, region.id);
+      outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        const region = await tx
+          .prepare("SELECT * FROM regions WHERE id = ? AND organization_id = ? FOR UPDATE")
+          .get(req.params.id, org.id);
+        if (!region) return { status: 404, body: { error: "Region not found" } };
+        const name = newName !== undefined ? newName : region.name;
+        const level = newLevel !== undefined ? newLevel : region.level || "region";
+        const parentId = newParentId !== undefined ? newParentId : region.parent_id || null;
+
+        if (parentId) {
+          if (parentId === region.id) return { status: 400, body: { error: "A region cannot be its own parent" } };
+          const parent = await tx
+            .prepare("SELECT id, level FROM regions WHERE id = ? AND organization_id = ? FOR UPDATE")
+            .get(parentId, org.id);
+          if (!parent) return { status: 400, body: { error: "parent_id is not a region of this organization" } };
+          const descendant = await tx
+            .prepare(
+              `WITH RECURSIVE sub (id, depth) AS (
+                 SELECT id, 1 FROM regions WHERE parent_id = ? AND organization_id = ?
+                 UNION ALL
+                 SELECT c.id, sub.depth + 1 FROM regions c JOIN sub ON c.parent_id = sub.id
+                  WHERE c.organization_id = ? AND sub.depth < ${MAX_REGION_DEPTH}
+               )
+               SELECT 1 AS hit FROM sub WHERE id = ? LIMIT 1`,
+            )
+            .get(region.id, org.id, org.id, parentId);
+          if (descendant) return { status: 400, body: { error: "A region cannot move under one of its own descendants" } };
+          const levelError = parentLevelError(parent, level);
+          if (levelError) return { status: 400, body: { error: levelError } };
+        }
+
+        const children = await tx
+          .prepare("SELECT name, level FROM regions WHERE parent_id = ? AND organization_id = ? FOR UPDATE")
+          .all(region.id, org.id);
+        const blocking = children.find((c) => levelRank(c.level || "region") <= levelRank(level));
+        if (blocking) {
+          return {
+            status: 400,
+            body: { error: `A ${level} would not be above its child "${blocking.name}" (${blocking.level || "region"}): every child must stay a lower level` },
+          };
+        }
+
+        if ((name !== region.name || parentId !== (region.parent_id || null)) && (await siblingNameTaken(org.id, parentId, name, region.id, tx))) {
+          return { status: 409, body: { error: DUP_REGION_NAME } };
+        }
+
+        await tx
+          .prepare("UPDATE regions SET name = ?, level = ?, parent_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
+          .run(name, level, parentId, region.id);
+        const moved = level !== (region.level || "region") || parentId !== (region.parent_id || null);
+        if (moved) {
+          await auditInTx(tx, {
+            userId: req.user.id,
+            action: "region_moved",
+            details: `org: ${org.name} (${org.id}), region: ${name} (${region.id}), level: ${region.level || "region"} -> ${level}, parent: ${region.parent_id || "none"} -> ${parentId || "none"}`,
+            ipAddress: getClientIp(req),
+            organizationId: org.id,
+          });
+        }
+        return { oldName: region.name, name, level, parentId };
+      })());
     } catch (e) {
       if (isDuplicateKeyError(e)) return res.status(409).json({ error: DUP_REGION_NAME });
       throw e;
     }
-    if (name !== region.name) {
-      logActivity(
-        req.user.id,
-        "region_renamed",
-        `org: ${org.name} (${org.id}), region: ${region.name} -> ${name}`,
-        null,
-        getClientIp(req),
-        null,
-      );
+    if (outcome.status) return res.status(outcome.status).json(outcome.body);
+    const { oldName, name, level, parentId } = outcome;
+    if (name !== oldName) {
+      await auditOrWarn({
+        userId: req.user.id,
+        action: "region_renamed",
+        details: `org: ${org.name} (${org.id}), region: ${oldName} -> ${name}`,
+        target: req.params.id,
+        ipAddress: getClientIp(req),
+        organizationId: org.id,
+      });
     }
-    if (level !== (region.level || "region") || parentId !== (region.parent_id || null)) {
-      logActivity(
-        req.user.id,
-        "region_moved",
-        `org: ${org.name} (${org.id}), region: ${name} (${region.id}), level: ${region.level || "region"} -> ${level}, parent: ${region.parent_id || "none"} -> ${parentId || "none"}`,
-        null,
-        getClientIp(req),
-        null,
-      );
-    }
-    res.json({ id: region.id, organization_id: org.id, name, level, parent_id: parentId });
+    res.json({ id: req.params.id, organization_id: org.id, name, level, parent_id: parentId });
   }),
 );
 
@@ -803,23 +847,48 @@ router.put(
       }
     }
 
-    await db.transaction(async (tx) => {
+    // One transaction: the member's row is locked and the role re-checked HERE (a role
+    // change away from regional_viewer deletes the scopes in its own transaction, so a
+    // check made before this transaction could let old-role scopes come back), then the
+    // current scopes are read locked ("before") and replaced.
+    // Phase 1C: adding any region is a grant - its audit row is this transaction's last
+    // statement (no row, no change: 503). Pure narrowing (or no change) keeps the awaited
+    // row after commit.
+    const list = (ids) => `[${[...ids].sort().join(", ")}]`;
+    const details = (before) => `org: ${org.name} (${org.id}), target: ${member.email}, regions: ${before} -> ${list(regionIds)}`;
+    const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+      const cur = await tx
+        .prepare("SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ? FOR UPDATE")
+        .get(org.id, req.params.userId);
+      if (!cur) return { status: 404, body: { error: "Member not found" } };
+      if (cur.role !== REGIONAL_VIEWER) {
+        return { status: 400, body: { error: "Region scopes apply only to members with the regional_viewer role" } };
+      }
+      const prev = (await tx
+        .prepare("SELECT region_id FROM region_viewer_scopes WHERE organization_id = ? AND user_id = ? FOR UPDATE")
+        .all(org.id, req.params.userId)).map((r) => r.region_id);
       await tx.prepare("DELETE FROM region_viewer_scopes WHERE organization_id = ? AND user_id = ?").run(org.id, req.params.userId);
       const ins = tx.prepare(
         "INSERT INTO region_viewer_scopes (organization_id, user_id, region_id, created_by) VALUES (?, ?, ?, ?)",
       );
       for (const id of regionIds) await ins.run(org.id, req.params.userId, id, req.user.id);
-    })();
-
-    logActivity(
-      req.user.id,
-      "region_scopes_set",
-      `org: ${org.name} (${org.id}), target: ${member.email}, regions: [${regionIds.join(", ")}]`,
-      null,
-      getClientIp(req),
-      null,
-    );
-    res.json(await scopeView(org.id, req.params.userId, member.role));
+      const grant = regionIds.some((id) => !prev.includes(id));
+      if (grant) {
+        await auditInTx(tx, {
+          userId: req.user.id, action: "region_scopes_set", details: details(list(prev)),
+          ipAddress: getClientIp(req), organizationId: org.id,
+        });
+      }
+      return { before: list(prev), grant };
+    })());
+    if (outcome.status) return res.status(outcome.status).json(outcome.body);
+    if (!outcome.grant) {
+      await auditOrWarn({
+        userId: req.user.id, action: "region_scopes_set", details: details(outcome.before),
+        target: req.params.userId, ipAddress: getClientIp(req), organizationId: org.id,
+      });
+    }
+    res.json(await scopeView(org.id, req.params.userId, REGIONAL_VIEWER));
   }),
 );
 
@@ -868,24 +937,30 @@ router.patch(
     // "before" is read under a row lock in the same transaction as the UPDATE (not from
     // the org row loaded above, which a concurrent change can make stale - that let a
     // real change go unlogged), so changes are recorded in the order they applied.
-    const before = await db.transaction(async (tx) => {
+    // Phase 1C: raising or removing the cap retroactively revives tokens it had expired -
+    // a grant, audited in this transaction (no row, no change: 503). Setting or lowering it
+    // only restricts - the awaited row after commit.
+    const audit = (before) => ({
+      userId: req.user.id,
+      action: "org_token_lifetime_changed",
+      details: `org: ${org.name} (${org.id}), max_token_lifetime_days: ${before ?? "none"} -> ${parsed.value ?? "none"}`,
+      ipAddress: getClientIp(req),
+      organizationId: org.id,
+    });
+    const loosens = (before) => before != null && (parsed.value == null || parsed.value > before);
+    const before = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       const cur = await tx
         .prepare("SELECT max_token_lifetime_days FROM organizations WHERE id = ? FOR UPDATE")
         .get(org.id);
+      const prev = cur ? cur.max_token_lifetime_days ?? null : null;
       await tx
         .prepare("UPDATE organizations SET max_token_lifetime_days = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
         .run(parsed.value, org.id);
-      return cur ? cur.max_token_lifetime_days ?? null : null;
-    })();
-    if (before !== parsed.value) {
-      await auditOrWarn({
-        userId: req.user.id,
-        action: "org_token_lifetime_changed",
-        details: `org: ${org.name} (${org.id}), max_token_lifetime_days: ${before ?? "none"} -> ${parsed.value ?? "none"}`,
-        target: org.id,
-        ipAddress: getClientIp(req),
-        organizationId: org.id,
-      });
+      if (loosens(prev)) await auditInTx(tx, audit(prev));
+      return prev;
+    })());
+    if (before !== parsed.value && !loosens(before)) {
+      await auditOrWarn({ ...audit(before), target: org.id });
     }
     res.json(tokenPolicyView({ ...org, max_token_lifetime_days: parsed.value }));
   }),
@@ -943,22 +1018,27 @@ router.patch(
     }
 
     // "before" from a locked read in the UPDATE's transaction (see token-policy above).
-    const before = await db.transaction(async (tx) => {
+    // Phase 1C: disabling SSO-only re-opens password / Google sign-in - a grant, audited
+    // in this transaction (no row, no change: 503). Enabling only restricts - the awaited
+    // row after commit.
+    const audit = (before) => ({
+      userId: req.user.id,
+      action: "org_sso_only_changed",
+      details: `org: ${org.name} (${org.id}), sso_only: ${before} -> ${next}`,
+      ipAddress: getClientIp(req),
+      organizationId: org.id,
+    });
+    const before = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       const cur = await tx.prepare("SELECT sso_only FROM organizations WHERE id = ? FOR UPDATE").get(org.id);
+      const prev = !!(cur && cur.sso_only);
       await tx
         .prepare("UPDATE organizations SET sso_only = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
         .run(next ? 1 : 0, org.id);
-      return !!(cur && cur.sso_only);
-    })();
-    if (before !== next) {
-      await auditOrWarn({
-        userId: req.user.id,
-        action: "org_sso_only_changed",
-        details: `org: ${org.name} (${org.id}), sso_only: ${before} -> ${next}`,
-        target: org.id,
-        ipAddress: getClientIp(req),
-        organizationId: org.id,
-      });
+      if (prev && !next) await auditInTx(tx, audit(prev));
+      return prev;
+    })());
+    if (!before && next) {
+      await auditOrWarn({ ...audit(before), target: org.id });
     }
     res.json(authPolicyView({ ...org, sso_only: next ? 1 : 0 }, req.user));
   }),
@@ -1038,29 +1118,32 @@ router.post(
       .get(org.id, claimValue, ws ? ws.id : "");
     if (dup) return res.status(409).json({ error: "A mapping for this app role and target already exists" });
 
+    // A grant (Phase 1C): the mapping and its audit row commit together (no row, no
+    // mapping: 503). The generic activityLogger row carries no claim/role.
     let result;
     try {
-      result = await db
-        .prepare(
-          "INSERT INTO entra_role_mappings (organization_id, claim_value, workspace_id, role, created_by) VALUES (?, ?, ?, ?, ?)",
-        )
-        .run(org.id, claimValue, ws ? ws.id : null, role, req.user.id);
+      result = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        const r = await tx
+          .prepare(
+            "INSERT INTO entra_role_mappings (organization_id, claim_value, workspace_id, role, created_by) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(org.id, claimValue, ws ? ws.id : null, role, req.user.id);
+        await auditInTx(tx, {
+          userId: req.user.id,
+          action: "entra_role_mapping_created",
+          details: `org: ${org.name} (${org.id}), claim: ${claimValue}, role: ${role}, workspace: ${ws ? ws.id : "org-level"}`,
+          ipAddress: getClientIp(req),
+          workspaceId: ws ? ws.id : null,
+          organizationId: org.id,
+        });
+        return r;
+      })());
     } catch (e) {
       if (isDuplicateKeyError(e)) {
         return res.status(409).json({ error: "A mapping for this app role and target already exists" });
       }
       throw e;
     }
-    // Explicit audit row (awaited) - the generic activityLogger row carries no claim/role.
-    await auditOrWarn({
-      userId: req.user.id,
-      action: "entra_role_mapping_created",
-      details: `org: ${org.name} (${org.id}), claim: ${claimValue}, role: ${role}, workspace: ${ws ? ws.id : "org-level"}`,
-      target: String(result.lastInsertRowid),
-      ipAddress: getClientIp(req),
-      workspaceId: ws ? ws.id : null,
-      organizationId: org.id,
-    });
     res.status(201).json({
       id: result.lastInsertRowid,
       claim_value: claimValue,

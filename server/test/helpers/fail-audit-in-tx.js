@@ -15,6 +15,12 @@
 // through the export, so they are never affected. Prints one "[fail-audit-in-tx] failing
 // <action>" line when it fires. Never run as a test itself: the runner's explicit file list
 // excludes test/helpers/.
+//
+// Separately, failNextPostCommitAudit('action') arms one failure of the exported
+// appendEntry - the post-commit write behind logActivity / auditOrWarn (also destructured
+// by services/activity at load) - so a test can show that a demotion / narrowing still
+// applies when its awaited audit write fails (auditOrWarn prints "[audit] NOT AUDITED").
+// Its counter is firedPostCommit(); disarm() clears both.
 
 const path = require('path');
 
@@ -39,16 +45,42 @@ chain.appendInTx = async function appendInTx(tx, fields = {}) {
   return origAppendInTx(tx, fields);
 };
 
+const origAppendEntry = chain.appendEntry;
+let armedPost = null;
+let firedPostCount = 0;
+
+chain.appendEntry = async function appendEntry(db, fields = {}) {
+  if (armedPost && (!armedPost.action || armedPost.action === fields.action)) {
+    armedPost = null;
+    firedPostCount++;
+    console.log(`[fail-audit-in-tx] failing post-commit ${fields.action}`);
+    throw new Error(`fail-audit-in-tx: injected post-commit failure for ${fields.action}`);
+  }
+  return origAppendEntry(db, fields);
+};
+
 // Arms one failure for the next auditInTx call with `action` (any action when omitted).
 function failNextAuditInTx(action = null) {
   armed = { action };
 }
-// Disarms a failure that never fired; returns true if one was still armed.
+// Arms one failure for the next post-commit audit write (appendEntry) with `action`.
+function failNextPostCommitAudit(action = null) {
+  armedPost = { action };
+}
+// Disarms failures that never fired; returns true if the in-transaction one was still armed.
 function disarm() {
   const was = !!armed;
   armed = null;
+  armedPost = null;
+  return was;
+}
+// Disarms the post-commit failure; returns true if it was still armed.
+function disarmPostCommit() {
+  const was = !!armedPost;
+  armedPost = null;
   return was;
 }
 const fired = () => firedCount;
+const firedPostCommit = () => firedPostCount;
 
-module.exports = { failNextAuditInTx, disarm, fired };
+module.exports = { failNextAuditInTx, failNextPostCommitAudit, disarm, disarmPostCommit, fired, firedPostCommit };

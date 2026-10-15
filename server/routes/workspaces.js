@@ -25,7 +25,8 @@ const {
 } = require("../lib/ticket-query");
 const { campaignStatus, todayStr } = require("../lib/campaign-status");
 const { computeCampaignDelivery } = require("../lib/campaign-delivery");
-const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, auditInTx, getClientIp, auditRead } = require("../services/activity");
+const { isWorkspaceDemotion } = require("../lib/grant-direction"); // Phase 1C
 const { sendEmail } = require("../services/email");
 const { asyncHandler } = require("../lib/async-handler");
 const { toCsvRow } = require("../lib/csv");
@@ -413,6 +414,16 @@ router.post(
     const inviteId = crypto.randomUUID();
     const expiresAt =
       Math.floor(Date.now() / 1000) + INVITE_EXPIRY_DAYS * 86400;
+    // Phase 1C: an invite is a grant - its audit row is written in this transaction, last
+    // (no row, no invite: 503, and no email is sent). Never the invite id: it is the
+    // accept link. The email goes out only after the commit, never inside it.
+    const inviteAudit = {
+      userId: req.user.id,
+      details: `workspace: ${ws.name} (${ws.id}), email: ${email}, role: ${role}, expires_at: ${expiresAt}`,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    };
     const txn = db.transaction(async (tx) => {
       const dupe = await tx
         .prepare(
@@ -431,9 +442,10 @@ router.post(
     `,
         )
         .run(inviteId, ws.id, email, role, req.user.id, expiresAt);
+      await auditInTx(tx, { ...inviteAudit, action: "workspace_invite_created" });
       return { collision: false };
     });
-    const txnResult = await txn();
+    const txnResult = await db.retryOnDeadlock(() => txn());
     if (txnResult.collision) {
       return res
         .status(409)
@@ -475,22 +487,13 @@ router.post(
       await db
         .prepare("DELETE FROM workspace_invites WHERE id = ?")
         .run(inviteId);
+      // The invite was created (and audited) above; record that it was withdrawn.
+      await auditOrWarn({ ...inviteAudit, action: "workspace_invite_send_failed", target: email });
       return res
         .status(502)
         .json({ error: "Email send failed - invite not created" });
     }
 
-    // Explicit audit row (awaited), only for an invite that exists. Never the invite
-    // id: it is the accept link.
-    await auditOrWarn({
-      userId: req.user.id,
-      action: "workspace_invite_created",
-      details: `workspace: ${ws.name} (${ws.id}), email: ${email}, role: ${role}, expires_at: ${expiresAt}`,
-      target: email,
-      ipAddress: getClientIp(req),
-      workspaceId: ws.id,
-      organizationId: ws.organization_id,
-    });
     res.status(201).json({ id: inviteId, email, role, expires_at: expiresAt });
   }),
 );
@@ -541,7 +544,19 @@ router.put(
     // Checks + change in ONE transaction that first locks all of this workspace's
     // member rows (FOR UPDATE): the last-admin count and the audited "before" role are
     // then exact, so two concurrent demotions can't both see "2 admins".
-    const outcome = await db.transaction(async (tx) => {
+    // Phase 1C: the direction is decided here, from the locked "before" role. A change
+    // that is not strictly lower is a grant - its audit row is this transaction's last
+    // statement (no row, no change: 503). A demotion keeps the awaited row after commit.
+    const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
+    const memberAudit = (before) => ({
+      userId: req.user.id,
+      action: "workspace_member_role_changed",
+      details: `workspace: ${ws.name} (${ws.id}), target: ${target?.email}, role: ${before} -> ${newRole}`,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
+    const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       const rows = await tx
         .prepare("SELECT user_id, role FROM workspace_members WHERE workspace_id = ? FOR UPDATE")
         .all(ws.id);
@@ -556,20 +571,13 @@ router.put(
       await tx
         .prepare("UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?")
         .run(newRole, ws.id, req.params.userId);
-      return { before: member.role };
-    })();
+      const grant = member.role !== newRole && !isWorkspaceDemotion(member.role, newRole);
+      if (grant) await auditInTx(tx, memberAudit(member.role));
+      return { before: member.role, grant };
+    })());
     if (outcome.status) return res.status(outcome.status).json(outcome.body);
-    if (outcome.before !== newRole) {
-      const target = await db.prepare("SELECT email FROM users WHERE id = ?").get(req.params.userId);
-      await auditOrWarn({
-        userId: req.user.id,
-        action: "workspace_member_role_changed",
-        details: `workspace: ${ws.name} (${ws.id}), target: ${target?.email}, role: ${outcome.before} -> ${newRole}`,
-        target: req.params.userId,
-        ipAddress: getClientIp(req),
-        workspaceId: ws.id,
-        organizationId: ws.organization_id,
-      });
+    if (outcome.before !== newRole && !outcome.grant) {
+      await auditOrWarn({ ...memberAudit(outcome.before), target: req.params.userId });
     }
     res.json({ user_id: req.params.userId, role: newRole });
   }),
@@ -654,24 +662,28 @@ router.patch(
 
     // "before" from a locked read in the UPDATE's transaction, so concurrent changes
     // are recorded in the order they applied.
-    const before = await db.transaction(async (tx) => {
+    // The audit row says which regional viewers can see this workspace. Phase 1C: assigning
+    // or changing the region exposes it to new viewers - a grant, audited in this
+    // transaction (no row, no change: 503). Unassigning only hides it: awaited row after.
+    const regionAudit = (before) => ({
+      userId: req.user.id,
+      action: "workspace_region_changed",
+      details: `workspace: ${ws.name} (${ws.id}), region: ${before || "none"} -> ${regionId || "none"}`,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
+    const before = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       const cur = await tx.prepare("SELECT region_id FROM workspaces WHERE id = ? FOR UPDATE").get(ws.id);
+      const prev = cur ? cur.region_id || null : null;
       await tx
         .prepare("UPDATE workspaces SET region_id = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?")
         .run(regionId, ws.id);
-      return cur ? cur.region_id || null : null;
-    })();
-    if (before !== regionId) {
-      // Explicit audit row (awaited): which regional viewers can see this workspace.
-      await auditOrWarn({
-        userId: req.user.id,
-        action: "workspace_region_changed",
-        details: `workspace: ${ws.name} (${ws.id}), region: ${before || "none"} -> ${regionId || "none"}`,
-        target: ws.id,
-        ipAddress: getClientIp(req),
-        workspaceId: ws.id,
-        organizationId: ws.organization_id,
-      });
+      if (regionId && prev !== regionId) await auditInTx(tx, regionAudit(prev));
+      return prev;
+    })());
+    if (!regionId && before !== regionId) {
+      await auditOrWarn({ ...regionAudit(before), target: ws.id });
     }
     res.json({ id: ws.id, region_id: regionId });
   }),

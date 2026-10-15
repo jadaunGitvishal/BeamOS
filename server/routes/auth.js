@@ -18,7 +18,7 @@ const {
   ACCOUNT_DEACTIVATED_MESSAGE,
 } = require("../middleware/auth");
 const { resolveTenancy, accessContext, accessibleWorkspaceIds } = require("../lib/tenancy");
-const { logActivity, auditOrWarn, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, auditInTx, getClientIp, auditRead } = require("../services/activity");
 const { maskPhone } = require("../lib/mask");
 const totp = require("../lib/totp");
 const totpLockout = require("../lib/totp-lockout");
@@ -1404,19 +1404,26 @@ router.post("/accept-invite/:inviteId", requireAuth, asyncHandler(async (req, re
     .prepare("SELECT name FROM organizations WHERE id = ?")
     .get(ws.organization_id);
 
+  // One transaction: the invite is re-read under a row lock, so two concurrent accepts
+  // of the same invite serialize - the second finds it consumed (404) instead of both
+  // passing and the loser failing on the membership's unique key. Then the membership
+  // (read locked too) is added unless it exists, and the invite is consumed.
   // Idempotent: if the user already has a workspace_members row, return
   // success without changing the role (don't silently demote/upgrade), and
   // still consume the invite. The invitee's intent ("I want access") is
   // already satisfied either way.
-  const existing = await db
-    .prepare(
-      "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-    )
-    .get(ws.id, req.user.id);
-
+  // Phase 1C: a grant - its audit row is this transaction's last statement (no row: 503,
+  // nothing changed, the invite is kept). The auth router is mounted BEFORE the generic
+  // activityLogger (server.js), so nothing else records it. Never the invite id: it is
+  // the accept link.
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
   // must be prepared from it, not the outer db, to actually participate in the transaction.
-  const txn = db.transaction(async (tx) => {
+  const accepted = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+    const live = await tx.prepare("SELECT id FROM workspace_invites WHERE id = ? FOR UPDATE").get(invite.id);
+    if (!live) return null;
+    const existing = await tx
+      .prepare("SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ? FOR UPDATE")
+      .get(ws.id, req.user.id);
     if (!existing) {
       await tx.prepare(
         `
@@ -1426,23 +1433,20 @@ router.post("/accept-invite/:inviteId", requireAuth, asyncHandler(async (req, re
       ).run(ws.id, req.user.id, invite.role, invite.invited_by);
     }
     await tx.prepare("DELETE FROM workspace_invites WHERE id = ?").run(invite.id);
-  });
-  await txn();
-
-  // Explicit audit row (awaited). The auth router is mounted BEFORE the generic
-  // activityLogger (server.js), so nothing else records this grant. Never the
-  // invite id: it is the accept link.
-  await auditOrWarn({
-    userId: req.user.id,
-    action: "workspace_invite_accepted",
-    details: existing
-      ? `workspace: ${ws.name} (${ws.id}), already_member, role kept: ${existing.role}`
-      : `workspace: ${ws.name} (${ws.id}), role: ${invite.role}`,
-    target: req.user.id,
-    ipAddress: getClientIp(req),
-    workspaceId: ws.id,
-    organizationId: ws.organization_id,
-  });
+    await auditInTx(tx, {
+      userId: req.user.id,
+      action: "workspace_invite_accepted",
+      details: existing
+        ? `workspace: ${ws.name} (${ws.id}), already_member, role kept: ${existing.role}`
+        : `workspace: ${ws.name} (${ws.id}), role: ${invite.role}`,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
+    return { existing };
+  })());
+  if (!accepted) return res.status(404).json({ error: "Invite not found" });
+  const { existing } = accepted;
 
   res.json({
     workspace_id: ws.id,

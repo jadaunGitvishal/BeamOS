@@ -6,6 +6,7 @@ const { db } = require("../db/database");
 const { canAdminWorkspace } = require("../lib/permissions");
 const { requirePlatformAdmin } = require("../middleware/auth");
 const { logActivity, auditOrWarn, auditInTx, getClientIp, auditRead } = require("../services/activity");
+const { isWorkspaceDemotion } = require("../lib/grant-direction"); // Phase 1C
 const {
   deleteWorkspaceCascade,
   deleteOrgCascade,
@@ -175,6 +176,8 @@ router.post("/orgs", requirePlatformAdmin, asyncHandler(async (req, res) => {
   const ownerId = req.user.id;
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
   // must be prepared from it, not the outer db, to actually participate in the transaction.
+  // Phase 1C: the creator becomes the org's owner - a grant, so its audit row is this
+  // transaction's last statement (no row, no org: 503).
   const txn = db.transaction(async (tx) => {
     await tx.prepare(
       `INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')`,
@@ -188,18 +191,18 @@ router.post("/orgs", requirePlatformAdmin, asyncHandler(async (req, res) => {
     await tx.prepare(
       `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')`,
     ).run(wsId, ownerId);
+    await auditInTx(tx, {
+      userId: req.user.id,
+      action: "admin_create_org",
+      details: `org: ${name}`,
+      ipAddress: getClientIp(req),
+      workspaceId: wsId,
+      organizationId: orgId,
+    });
   });
-  await txn();
+  await db.retryOnDeadlock(() => txn());
 
-  req.workspaceId = wsId; // attribute the audit row to the new tenant
-  logActivity(
-    req.user.id,
-    "admin_create_org",
-    `org: ${name}`,
-    null,
-    getClientIp(req),
-    wsId,
-  );
+  req.workspaceId = wsId; // attribute the generic request row to the new tenant
   res.status(201).json({
     id: orgId,
     name,
@@ -366,21 +369,22 @@ router.put("/users/:id/workspace", requirePlatformAdmin, asyncHandler(async (req
     await tx.prepare(
       "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
     ).run(ws.id, target.id, "workspace_viewer", req.user.id);
+    // Phase 1C: a membership in the chosen workspace is a grant - audited here, last
+    // (no row, no move: 503).
+    await auditInTx(tx, {
+      userId: req.user.id,
+      action: "admin_set_user_workspace",
+      details: `target: ${target.email}, workspace: ${ws.id}`,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
     return null;
   });
   // A deadlock is possible here (gap locks + the INSERT into the new workspace - see
   // lockWorkspaceMembers); InnoDB rolls the victim back and the retry re-decides.
   const refused = await db.retryOnDeadlock(() => txn());
   if (refused) return res.status(refused.status).json(refused.body);
-
-  logActivity(
-    req.user.id,
-    "admin_set_user_workspace",
-    `target: ${target.email}, workspace: ${ws.id}`,
-    null,
-    getClientIp(req),
-    ws.id,
-  );
 
   res.json({
     user_id: target.id,
@@ -461,6 +465,17 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, asyncHandler(async (r
 
   // Locked check-then-act: re-adding the workspace's LAST admin with a lower role
   // would demote them - refused (409).
+  // Phase 1C: a new membership, or a role that is not strictly lower than the current one,
+  // is a grant - audited in this transaction, last (no row, no change: 503). A demotion
+  // keeps the awaited row after commit.
+  const addAudit = {
+    userId: req.user.id,
+    action: "admin_add_user_workspace",
+    details: `target: ${target.email}, workspace: ${ws.id}, role: ${role}`,
+    ipAddress: getClientIp(req),
+    workspaceId: ws.id,
+    organizationId: ws.organization_id,
+  };
   const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
     const rows = await lockWorkspaceMembers(tx, ws.id);
     const existing = rows.find((r) => r.user_id === target.id);
@@ -477,18 +492,13 @@ router.post("/users/:id/workspaces", requirePlatformAdmin, asyncHandler(async (r
         "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)",
       ).run(ws.id, target.id, role, req.user.id);
     }
-    return { existing: !!existing };
+    const grant = !existing || !isWorkspaceDemotion(existing.role, role);
+    if (grant) await auditInTx(tx, addAudit);
+    return { existing: !!existing, grant };
   })());
   if (outcome.status) return res.status(outcome.status).json(outcome.body);
   const existing = outcome.existing;
-  logActivity(
-    req.user.id,
-    "admin_add_user_workspace",
-    `target: ${target.email}, workspace: ${ws.id}, role: ${role}`,
-    null,
-    getClientIp(req),
-    ws.id,
-  );
+  if (!outcome.grant) await auditOrWarn({ ...addAudit, target: target.id });
   const org = await db
     .prepare("SELECT name FROM organizations WHERE id = ?")
     .get(ws.organization_id);
@@ -513,6 +523,21 @@ router.put(
       });
     }
     // Locked check-then-act: demoting the workspace's LAST admin is refused (409).
+    // Phase 1C: a role that is not strictly lower than the current one is a grant -
+    // audited in this transaction, last (no row, no change: 503). A demotion keeps the
+    // awaited row after commit.
+    const target = await db
+      .prepare("SELECT email FROM users WHERE id = ?")
+      .get(req.params.id);
+    const ws = await db.prepare("SELECT organization_id FROM workspaces WHERE id = ?").get(req.params.workspaceId);
+    const roleAudit = {
+      userId: req.user.id,
+      action: "admin_set_user_workspace_role",
+      details: `target: ${target?.email}, workspace: ${req.params.workspaceId}, role: ${role}`,
+      ipAddress: getClientIp(req),
+      workspaceId: req.params.workspaceId,
+      organizationId: ws?.organization_id || null,
+    };
     const outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       const rows = await lockWorkspaceMembers(tx, req.params.workspaceId);
       const member = rows.find((r) => r.user_id === req.params.id);
@@ -524,21 +549,13 @@ router.put(
       await tx.prepare(
         "UPDATE workspace_members SET role = ?, source = NULL WHERE workspace_id = ? AND user_id = ?",
       ).run(role, req.params.workspaceId, req.params.id);
-      return null;
+      const grant = !isWorkspaceDemotion(member.role, role);
+      if (grant) await auditInTx(tx, roleAudit);
+      return { grant };
     })());
-    if (outcome) return res.status(outcome.status).json(outcome.body);
+    if (outcome.status) return res.status(outcome.status).json(outcome.body);
     req.workspaceId = req.params.workspaceId;
-    const target = await db
-      .prepare("SELECT email FROM users WHERE id = ?")
-      .get(req.params.id);
-    logActivity(
-      req.user.id,
-      "admin_set_user_workspace_role",
-      `target: ${target?.email}, workspace: ${req.params.workspaceId}, role: ${role}`,
-      null,
-      getClientIp(req),
-      req.params.workspaceId,
-    );
+    if (!outcome.grant) await auditOrWarn({ ...roleAudit, target: req.params.id });
     res.json({ workspace_id: req.params.workspaceId, role });
   }),
 );

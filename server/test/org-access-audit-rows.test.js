@@ -197,7 +197,7 @@ test('workspace_member_role_changed (before -> after, none when unchanged) and w
 });
 
 // ---- 16 + 17. invites ----
-test('workspace_invite_created / _cancelled: email, role, expiry - never the invite id; no row when the send fails', async () => {
+test('workspace_invite_created / _cancelled: email, role, expiry - never the invite id; a failed send is recorded as withdrawn', async () => {
   const owner = await mkUser();
   const o = await mkOrg(owner);
   const invitee = `${P}-inv-${randTag()}@x.local`;
@@ -222,12 +222,20 @@ test('workspace_invite_created / _cancelled: email, role, expiry - never the inv
   await genericRow(since, owner.id, 'DELETE /api/workspaces/:id/invites/:inviteId');
   await assertNoSecrets(start, [c.json.id]);
 
-  // Graph rejected the send: the invite is rolled back (502) and no created row is written.
+  // Graph rejected the send: the invite is deleted again (502). Phase 1C writes the created
+  // row in the invite's own transaction, before the send, so the withdrawal is recorded
+  // too (workspace_invite_send_failed, same details) and no invite row is left.
   since = await maxAuditId(app.db);
   emailResult = { sent: false, reason: 'graph_error' };
-  const f = await call('POST', `/api/workspaces/${o.wsId}/invites`, owner.token, { email: `${P}-fail-${randTag()}@x.local`, role: 'workspace_viewer' });
+  const failEmail = `${P}-fail-${randTag()}@x.local`;
+  const f = await call('POST', `/api/workspaces/${o.wsId}/invites`, owner.token, { email: failEmail, role: 'workspace_viewer' });
   assert.equal(f.status, 502, f.text);
-  await noRow(since, 'workspace_invite_created');
+  const created = await oneRow(since, 'workspace_invite_created');
+  const failed = await oneRow(since, 'workspace_invite_send_failed');
+  assert.equal(failed.details, created.details);
+  assert.match(failed.details, new RegExp(`email: ${failEmail.replace(/[.]/g, '[.]')}, role: workspace_viewer`));
+  assert.ok(failed.id > created.id);
+  assert.equal((await app.db.prepare('SELECT COUNT(*) AS n FROM workspace_invites WHERE email = ?').get(failEmail)).n, 0);
   emailResult = { sent: false, reason: 'not_configured' };
 });
 

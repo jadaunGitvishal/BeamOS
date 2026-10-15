@@ -178,7 +178,11 @@ async function writeActivity(userId, action, details = null, deviceId = null, ip
       ws = d?.workspace_id || null;
     }
     // Ref 17: every audit row goes through the chained, concurrency-safe writer.
-    await appendEntry(db, {
+    // Phase 1C: a deadlock victim is retried (the write is its own transaction, so a retry
+    // can't double it). Without this, a row lost to a deadlock - e.g. with an org /
+    // workspace cascade delete, which locks activity_log while it clears the ids - was
+    // only logged; for a demotion's awaited row that meant "[audit] NOT AUDITED".
+    const append = () => appendEntry(db, {
       user_id: userId || null,
       device_id: deviceId || null,
       action,
@@ -187,6 +191,7 @@ async function writeActivity(userId, action, details = null, deviceId = null, ip
       workspace_id: ws,
       organization_id: organizationId || null,
     });
+    await (db.retryOnDeadlock ? db.retryOnDeadlock(append) : append());
     return true;
   } catch (e) {
     console.error('Activity log error:', e.message);
