@@ -19,7 +19,7 @@
 // Deactivation is reversible and non-destructive: memberships, content, tokens and
 // audit history are untouched, so reactivation restores exactly the prior access.
 
-const { logActivity } = require('../services/activity');
+const { logActivity, auditInTx } = require('../services/activity');
 const { lockPlatformAdmins, assertNotLastActivePlatformAdmin } = require('./platform-admin-guard');
 
 // Close every live /dashboard socket authenticated as this user. `io` is the
@@ -68,14 +68,25 @@ async function setUserDeactivated(db, userId, deactivated, { io = null, via = 'a
     // somehow survived an earlier call (e.g. a different process handled it).
     disconnectUserSockets(io, userId);
   } else if (before.deactivated_at) {
-    await db.prepare(
-      'UPDATE users SET deactivated_at = NULL, updated_at = UNIX_TIMESTAMP() WHERE id = ?',
-    ).run(userId);
+    // Phase 1C: reactivation restores access - a grant - so the change and its audit row
+    // are one transaction (no row, no reactivation: AuditUnavailableError, which SCIM
+    // answers with its 503 error). Only the request whose UPDATE cleared the timestamp
+    // writes the row.
+    const run = () => db.transaction(async (tx) => {
+      const r = await tx.prepare(
+        'UPDATE users SET deactivated_at = NULL, updated_at = UNIX_TIMESTAMP() WHERE id = ? AND deactivated_at IS NOT NULL',
+      ).run(userId);
+      if (!r.changes) return;
+      await auditInTx(tx, { userId: actorId, action: 'user:reactivated', details: `${before.email} (via ${via})`, ipAddress: ip });
+    })();
+    await (db.retryOnDeadlock ? db.retryOnDeadlock(run) : run());
   }
 
   const after = await db.prepare('SELECT deactivated_at FROM users WHERE id = ?').get(userId);
   const changed = !!before.deactivated_at !== !!after.deactivated_at;
-  if (changed) {
+  // Reactivation was audited in its transaction above; deactivation (a removal) keeps the
+  // awaited row after the change.
+  if (changed && deactivated) {
     // Ref 17: lands in the tamper-evident audit chain like every other auth event.
     await logActivity(
       actorId,

@@ -542,13 +542,6 @@ function parentLevelError(parent, level) {
   return `A ${level} cannot sit under a ${parent.level || "region"}: the parent must be a higher level (${REGION_LEVELS.join(" > ")})`;
 }
 
-function parentMustBeHigher(res, parent, level) {
-  const error = parentLevelError(parent, level);
-  if (!error) return true;
-  res.status(400).json({ error });
-  return false;
-}
-
 // `handle`: db, or a transaction's tx (the region PATCH reads it inside its transaction).
 async function siblingNameTaken(orgId, parentId, name, exceptId = null, handle = db) {
   const row = await handle
@@ -577,24 +570,32 @@ router.post(
     if (parentId !== null && typeof parentId !== "string") {
       return res.status(400).json({ error: "parent_id must be a region id or null" });
     }
-    if (parentId) {
-      const parent = await db
-        .prepare("SELECT id, level FROM regions WHERE id = ? AND organization_id = ?")
-        .get(parentId, org.id);
-      if (!parent) return res.status(400).json({ error: "parent_id is not a region of this organization" });
-      if (!parentMustBeHigher(res, parent, level)) return;
-    }
-    if (await siblingNameTaken(org.id, parentId, name)) return res.status(409).json({ error: DUP_REGION_NAME });
-
+    // One transaction: the parent is read locked before its level is checked, so a
+    // concurrent level change of the parent (PATCH, which locks the same row) can't slip in
+    // between the check and the insert and leave a child at or above its parent's level.
     const id = crypto.randomUUID();
+    let refused;
     try {
-      await db
-        .prepare("INSERT INTO regions (id, organization_id, name, level, parent_id) VALUES (?, ?, ?, ?, ?)")
-        .run(id, org.id, name, level, parentId);
+      refused = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        if (parentId) {
+          const parent = await tx
+            .prepare("SELECT id, level FROM regions WHERE id = ? AND organization_id = ? FOR UPDATE")
+            .get(parentId, org.id);
+          if (!parent) return { status: 400, body: { error: "parent_id is not a region of this organization" } };
+          const levelError = parentLevelError(parent, level);
+          if (levelError) return { status: 400, body: { error: levelError } };
+        }
+        if (await siblingNameTaken(org.id, parentId, name, null, tx)) return { status: 409, body: { error: DUP_REGION_NAME } };
+        await tx
+          .prepare("INSERT INTO regions (id, organization_id, name, level, parent_id) VALUES (?, ?, ?, ?, ?)")
+          .run(id, org.id, name, level, parentId);
+        return null;
+      })());
     } catch (e) {
       if (isDuplicateKeyError(e)) return res.status(409).json({ error: DUP_REGION_NAME });
       throw e;
     }
+    if (refused) return res.status(refused.status).json(refused.body);
     // Not a grant (an empty region exposes nothing): awaited row after the change.
     await auditOrWarn({
       userId: req.user.id,

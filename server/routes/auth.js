@@ -65,8 +65,11 @@ const ROLE_SYNC_FAILED = {
 // membership, returns null - the caller is created org-less and an admin /
 // operator assigns them to a workspace afterward.
 // Phase 1C: `tx` - run on the caller's transaction (account creation: the user, their org
-// and the audit row commit together) instead of a transaction of its own.
-async function ensureDefaultOrgForUser(user, { allowCreate = true, tx = null } = {}) {
+// and the audit row commit together) instead of a transaction of its own. Without `tx`
+// (a sign-in of an existing account that has no workspace yet), minting the org makes the
+// user its owner - a grant - so the org and its personal_org_created audit row are one
+// transaction (no row, no org: AuditUnavailableError, 503). `ip`: for that row.
+async function ensureDefaultOrgForUser(user, { allowCreate = true, tx = null, ip = null } = {}) {
   const h = tx || db;
   const existing = await h
     .prepare(
@@ -133,7 +136,19 @@ async function ensureDefaultOrgForUser(user, { allowCreate = true, tx = null } =
     ).run(wsId, user.id);
   };
   if (tx) await mint(tx);
-  else await db.transaction(mint)();
+  else {
+    await db.retryOnDeadlock(() => db.transaction(async (t) => {
+      await mint(t);
+      await auditInTx(t, {
+        userId: user.id,
+        action: "personal_org_created",
+        details: `org: ${orgName} (${orgId}), workspace: ${wsId}`,
+        ipAddress: ip,
+        workspaceId: wsId,
+        organizationId: orgId,
+      });
+    })());
+  }
   return wsId;
 }
 
@@ -342,6 +357,7 @@ async function issueSession(req, res, user, extra = {}) {
   logSuccessfulLogin(user.id, user.email, getClientIp(req));
   const workspaceId = await ensureDefaultOrgForUser(user, {
     allowCreate: config.autoCreateOrgOnSignup,
+    ip: getClientIp(req),
   });
   const token = generateToken(user, workspaceId);
   // #100: callers pass a SELECT * row. Strip password_hash AND the TOTP internals
@@ -706,6 +722,7 @@ router.post("/google", async (req, res) => {
 
     const workspaceId = await ensureDefaultOrgForUser(user, {
       allowCreate: config.autoCreateOrgOnSignup,
+      ip: getClientIp(req),
     });
     const token = generateToken(user, workspaceId);
     const { password_hash, ...safeUser } = user;
@@ -921,6 +938,7 @@ router.post("/microsoft", async (req, res) => {
 
     const workspaceId = await ensureDefaultOrgForUser(user, {
       allowCreate: config.autoCreateOrgOnSignup,
+      ip: getClientIp(req),
     });
     const token = generateToken(user, workspaceId);
     const { password_hash, ...safeUser } = user;

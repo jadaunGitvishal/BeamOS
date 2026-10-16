@@ -6,7 +6,8 @@
 // Routes: registration, Google / Microsoft account creation (user + personal org + row in
 // one transaction), Google / Microsoft provider linking (credential issuance), platform
 // role (grant in-transaction, demotion post-commit), admin user create, SCIM user create /
-// adopt (503 in the SCIM error shape) and the Entra role sync at a verified Microsoft
+// adopt (503 in the SCIM error shape), SCIM reactivation, the personal org minted when an
+// existing account without a workspace signs in, and the Entra role sync at a verified Microsoft
 // sign-in (an audit failure fails the sign-in closed: 503 ROLE_SYNC_FAILED, nothing synced).
 //
 // Failure injection: helpers/fail-audit-in-tx.js (loaded first). Identity providers are the
@@ -376,6 +377,44 @@ test('SCIM user create / adopt: audit failure -> 503 (SCIM error shape), nothing
   const a = await scim('POST', '/Users', { schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'], userName: existing.email, active: true });
   assert.equal(a.status, 201, a.text);
   assert.equal((await oneRow(since, 'scim:user_linked')).details, `${existing.email} (SCIM token "${P} scim")`);
+});
+
+// ---- Phase 1C wrap-up: SCIM reactivation and the personal org minted at sign-in ----
+test('SCIM reactivation (PATCH active: true): audit failure -> 503 (SCIM shape), still deactivated; next attempt -> one user:reactivated row', async () => {
+  const email = newEmail('react');
+  const c = await scim('POST', '/Users', { schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'], userName: email, active: false });
+  assert.equal(c.status, 201, c.text);
+  const patch = () => scim('PATCH', `/Users/${c.json.id}`, {
+    schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+    Operations: [{ op: 'replace', path: 'active', value: true }],
+  });
+  await assertFailureNotApplied([email], 'user:reactivated', patch, {
+    status: 503,
+    body: (b) => { assert.equal(String(b.status), '503'); assert.equal(b.detail, 'Change not applied: audit unavailable'); },
+  });
+  const since = await maxAuditId(app.db);
+  const ok = await patch();
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.json.active, true);
+  const row = await oneRow(since, 'user:reactivated');
+  assert.equal(row.details, `${email} (via scim)`);
+  assert.equal((await app.db.prepare('SELECT deactivated_at FROM users WHERE email = ?').get(email)).deactivated_at, null);
+});
+
+test('personal org minted at sign-in (existing account, no workspace): audit failure -> 503, no org; next sign-in -> org + one personal_org_created row', async () => {
+  const u = await mkUser(); // a password account with no membership anywhere
+  const login = () => call('POST', '/api/auth/login', null, { email: u.email, password: PW });
+  await assertFailureNotApplied([u.email], 'personal_org_created', login);
+  const since = await maxAuditId(app.db);
+  const ok = await login();
+  assert.equal(ok.status, 200, ok.text);
+  const org = await app.db.prepare('SELECT id, name FROM organizations WHERE owner_user_id = ?').get(u.id);
+  assert.ok(org, 'the org was created');
+  const row = await oneRow(since, 'personal_org_created');
+  assert.equal(row.user_id, u.id);
+  assert.equal(row.details, `org: ${org.name} (${org.id}), workspace: ${ok.json.current_workspace_id}`);
+  assert.equal(row.organization_id, org.id);
+  assert.equal(row.workspace_id, ok.json.current_workspace_id);
 });
 
 // ---- mixed load ----
