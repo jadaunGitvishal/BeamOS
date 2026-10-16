@@ -4,136 +4,91 @@
 // query builder (lib/report-query-builder.js) via the real POST
 // /api/reports/custom/preview endpoint.
 //
-// Same shape as test/dashboard-content-export.test.js: in-memory sqlite
-// swapped in for ../db/database, the REAL Express app with the real
-// requireAuth + resolveTenancy chain, mounted exactly as server.js mounts
-// routes/reports.js. Two tenants, two workspaces, canary rows seeded in
-// EVERY one of the 4 v1 domains (device / uptime / sla / proof_of_play) so a
+// Same shape as test/dashboard-content-export.test.js: the REAL reports router with
+// the real requireAuth + resolveTenancy chain (helpers/inprocess-app.js) against the REAL
+// MySQL test DB (beamos_test via npm test). Two tenants, two workspaces, canary rows
+// seeded in EVERY one of the 4 v1 domains (device / uptime / sla / proof_of_play) so a
 // leak in any one of them would be caught, not just proof-of-play.
+//
+// Fixtures are test-owned (rcq- prefix, generated ids, fixed dates). device_usage_daily
+// and outage_history have no FK to devices: this file deletes its own rows by device id;
+// the rest goes with the users (orgs, workspaces, devices, content, play_logs).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-process.env.JWT_SECRET = 'test-secret-report-custom-query';
+const P = `rcq-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const ID = {
+  userA: id('user-a'), userB: id('user-b'), userOrphan: id('user-orphan'), orgA: id('org-a'), orgB: id('org-b'),
+  wsA: id('ws-a'), wsB: id('ws-b'), devA: id('device-a'), devB: id('device-b'), cA1: id('cid-a1'), cB1: id('cid-b1'),
+};
 
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE devices (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT DEFAULT '', status TEXT DEFAULT 'offline',
-    blocked INTEGER NOT NULL DEFAULT 0, manufacturer TEXT, model TEXT, android_version TEXT,
-    app_version TEXT, installed_at TEXT, warranty_expiry_date TEXT,
-    created_at INTEGER NOT NULL DEFAULT 0, last_heartbeat INTEGER
-  );
-  CREATE TABLE device_usage_daily (
-    device_id TEXT NOT NULL, day TEXT NOT NULL, online_seconds INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (device_id, day)
-  );
-  CREATE TABLE outage_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
-    started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, duration_seconds INTEGER NOT NULL,
-    likely_cause TEXT
-  );
-  CREATE TABLE play_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, content_id TEXT, widget_id TEXT,
-    zone_id TEXT, content_name TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL, ended_at INTEGER,
-    duration_sec INTEGER, completed INTEGER NOT NULL DEFAULT 0, trigger_type TEXT DEFAULT 'playlist',
-    created_at INTEGER NOT NULL DEFAULT 0, session_id TEXT
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveTenancy } = require('../lib/tenancy');
-
-// --- Seed two tenants -------------------------------------------------------
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-a', 'a@tenant-a.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-b', 'b@tenant-b.test', 'user')").run();
-
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-a', 'Org A', 'user-a')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-b', 'Org B', 'user-b')").run();
-
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a', 'org-a', 'Workspace A')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-b', 'org-b', 'Workspace B')").run();
-
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'user-a', 'workspace_admin')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-b', 'user-b', 'workspace_admin')").run();
-// user-b has NO path into ws-a - the cross-tenant case.
-
-db.prepare(`
-  INSERT INTO devices (id, workspace_id, name, status, manufacturer, model, android_version, app_version, created_at)
-  VALUES ('device-a', 'ws-a', 'TENANT-A-ONLY Lobby', 'online', 'Acme', 'X1', '11', '1.0', 1700000000)
-`).run();
-db.prepare(`
-  INSERT INTO devices (id, workspace_id, name, status, manufacturer, model, android_version, app_version, created_at)
-  VALUES ('device-b', 'ws-b', 'TENANT-B-ONLY Lobby', 'online', 'Acme', 'X1', '11', '1.0', 1700000000)
-`).run();
-
-const now = 1700100000;
-// uptime canaries
-db.prepare("INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES ('device-a', '2026-09-01', 43200)").run();
-db.prepare("INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES ('device-b', '2026-09-01', 21600)").run();
-// sla canaries
-db.prepare(`
-  INSERT INTO outage_history (device_id, workspace_id, started_at, ended_at, duration_seconds, likely_cause)
-  VALUES ('device-a', 'ws-a', ${now}, ${now + 600}, 600, 'TENANT-A-ONLY-CAUSE')
-`).run();
-db.prepare(`
-  INSERT INTO outage_history (device_id, workspace_id, started_at, ended_at, duration_seconds, likely_cause)
-  VALUES ('device-b', 'ws-b', ${now}, ${now + 900}, 900, 'TENANT-B-ONLY-CAUSE')
-`).run();
-// proof-of-play canaries
-db.prepare(`
-  INSERT INTO play_logs (device_id, content_id, content_name, started_at, ended_at, duration_sec, completed)
-  VALUES ('device-a', 'cid-a1', 'TENANT-A-ONLY Promo', ${now}, ${now + 1800}, 1800, 1)
-`).run();
-db.prepare(`
-  INSERT INTO play_logs (device_id, content_id, content_name, started_at, ended_at, duration_sec, completed)
-  VALUES ('device-b', 'cid-b1', 'TENANT-B-ONLY Promo', ${now}, ${now + 3600}, 3600, 1)
-`).run();
-
-const tokA = generateToken({ id: 'user-a', email: 'a@tenant-a.test', role: 'user' }, 'ws-a');
-const tokB = generateToken({ id: 'user-b', email: 'b@tenant-b.test', role: 'user' }, 'ws-b');
-
-// --- Real app, mounted exactly as server.js mounts routes/reports --------
-const app = express();
-app.use(express.json());
-app.use('/api/reports', requireAuth, resolveTenancy, require('../routes/reports'));
-app.use((err, req, res, _next) => {
-  res.status(err.statusCode || 500).json({ error: err.message });
-});
-
-const server = app.listen(0);
+let app;
 let base;
+let tokA;
+let tokB;
+
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/reports'] });
+  base = app.base;
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+
+  // --- Seed two tenants ---
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.userA, `${P}-a@tenant-a.test`);
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.userB, `${P}-b@tenant-b.test`);
+  const org = "INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')";
+  await run(org, ID.orgA, `${P} Org A`, ID.userA);
+  await run(org, ID.orgB, `${P} Org B`, ID.userB);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'Workspace A');
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsB, ID.orgB, 'Workspace B');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsA, ID.userA);
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsB, ID.userB);
+  // user-b has NO path into ws-a - the cross-tenant case.
+
+  const device = `
+    INSERT INTO devices (id, workspace_id, name, status, manufacturer, model, android_version, app_version, created_at)
+    VALUES (?, ?, ?, 'online', 'Acme', 'X1', '11', '1.0', 1700000000)`;
+  await run(device, ID.devA, ID.wsA, 'TENANT-A-ONLY Lobby');
+  await run(device, ID.devB, ID.wsB, 'TENANT-B-ONLY Lobby');
+
+  const now = 1700100000;
+  // uptime canaries
+  await run("INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, '2026-09-01', 43200)", ID.devA);
+  await run("INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, '2026-09-01', 21600)", ID.devB);
+  // sla canaries
+  const outage = 'INSERT INTO outage_history (device_id, workspace_id, started_at, ended_at, duration_seconds, likely_cause) VALUES (?, ?, ?, ?, ?, ?)';
+  await run(outage, ID.devA, ID.wsA, now, now + 600, 600, 'TENANT-A-ONLY-CAUSE');
+  await run(outage, ID.devB, ID.wsB, now, now + 900, 900, 'TENANT-B-ONLY-CAUSE');
+  // proof-of-play canaries (play_logs.content_id references content(id))
+  const content = 'INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type) VALUES (?, ?, ?, ?, ?, ?)';
+  await run(content, ID.cA1, ID.userA, ID.wsA, 'a1.png', 'a1.png', 'image/png');
+  await run(content, ID.cB1, ID.userB, ID.wsB, 'b1.png', 'b1.png', 'image/png');
+  const play = 'INSERT INTO play_logs (device_id, content_id, content_name, started_at, ended_at, duration_sec, completed) VALUES (?, ?, ?, ?, ?, ?, 1)';
+  await run(play, ID.devA, ID.cA1, 'TENANT-A-ONLY Promo', now, now + 1800, 1800);
+  await run(play, ID.devB, ID.cB1, 'TENANT-B-ONLY Promo', now, now + 3600, 3600);
+
+  tokA = generateToken({ id: ID.userA, email: `${P}-a@tenant-a.test`, role: 'user' }, ID.wsA);
+  tokB = generateToken({ id: ID.userB, email: `${P}-b@tenant-b.test`, role: 'user' }, ID.wsB);
 });
-test.after(() => {
-  server.close();
-  db.close();
+
+test.after(async () => {
+  try {
+    if (app) {
+      // No FK to devices on these two tables: delete this file's rows explicitly.
+      for (const d of [ID.devA, ID.devB]) {
+        await db.prepare('DELETE FROM device_usage_daily WHERE device_id = ?').run(d);
+        await db.prepare('DELETE FROM outage_history WHERE device_id = ?').run(d);
+      }
+      await cleanupUsers(db, [ID.userOrphan, ID.userB, ID.userA]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 function authed(token) {
@@ -218,9 +173,10 @@ test('(c) SQL metacharacters in a "contains" filter also stay literal', async ()
   });
   assert.equal(status, 200);
   assert.equal(json.rows.length, 0);
-  // Prove the table really is still there and still has tenant A's row.
-  const stillThere = db.prepare('SELECT COUNT(*) AS c FROM devices').get();
-  assert.equal(stillThere.c, 2);
+  // Prove the table really is still there and still has this file's two device rows
+  // (counted by id: the shared test DB holds other files' devices too).
+  const stillThere = await db.prepare('SELECT COUNT(*) AS c FROM devices WHERE id IN (?, ?)').get(ID.devA, ID.devB);
+  assert.equal(Number(stillThere.c), 2);
 });
 
 // --- (d) THE CRITICAL TEST: cross-workspace isolation ----------------------
@@ -229,9 +185,9 @@ test('(d) device-domain query: tenant A sees ONLY its own device, zero rows from
     fields: ['device_id', 'device_name', 'device_manufacturer', 'device_model'],
   });
   assert.equal(json.rows.length, 1);
-  assert.equal(json.rows[0][0], 'device-a');
+  assert.equal(json.rows[0][0], ID.devA);
   assert.doesNotMatch(JSON.stringify(json.rows), /TENANT-B-ONLY/);
-  assert.doesNotMatch(JSON.stringify(json.rows), /device-b/);
+  assert.ok(!JSON.stringify(json.rows).includes(ID.devB));
 });
 
 test('(d) uptime domain: tenant A sees only its own device_usage_daily rows', async () => {
@@ -265,7 +221,7 @@ test('(d) proof_of_play domain: tenant A sees only its own play_logs rows, never
 test('(d) reverse direction: tenant B sees only its own data across all 4 domains', async () => {
   const { json: deviceJson } = await preview(tokB, { fields: ['device_id', 'device_name'] });
   assert.equal(deviceJson.rows.length, 1);
-  assert.equal(deviceJson.rows[0][0], 'device-b');
+  assert.equal(deviceJson.rows[0][0], ID.devB);
 
   const { json: popJson } = await preview(tokB, { fields: ['pop_content_name'] });
   assert.deepEqual(popJson.rows, [['TENANT-B-ONLY Promo']]);
@@ -286,7 +242,7 @@ test('(d) plausible cross-boundary attempt: filtering by a value that only exist
 test('(d) plausible cross-boundary attempt: filtering device_id directly to the OTHER tenant\'s device id still returns zero rows', async () => {
   const { status, json } = await preview(tokA, {
     fields: ['device_name'],
-    filters: [{ fieldId: 'device_id', operator: 'eq', value: 'device-b' }],
+    filters: [{ fieldId: 'device_id', operator: 'eq', value: ID.devB }],
   });
   assert.equal(status, 200);
   assert.equal(json.rows.length, 0); // workspace scope wins even when the caller names the other tenant's device_id explicitly
@@ -297,8 +253,8 @@ test('(d) a user with NO workspace membership at all -> empty result, not an err
   // falls back to the caller's first workspace_members row (tenancy.js:162-167),
   // by design, so user-a (a real ws-a member) still resolves to ws-a even with a
   // null claim. The real "no workspace" case is a user with zero memberships.
-  db.prepare("INSERT INTO users (id, email, role) VALUES ('user-orphan', 'orphan@nowhere.test', 'user')").run();
-  const tokOrphan = generateToken({ id: 'user-orphan', email: 'orphan@nowhere.test', role: 'user' }, null);
+  await db.prepare("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')").run(ID.userOrphan, `${P}-orphan@nowhere.test`);
+  const tokOrphan = generateToken({ id: ID.userOrphan, email: `${P}-orphan@nowhere.test`, role: 'user' }, null);
   const { status, json } = await preview(tokOrphan, { fields: ['device_name'] });
   assert.equal(status, 200);
   assert.equal(json.rows.length, 0);

@@ -3,14 +3,20 @@
 // GET /api/dashboard/overview/export (CSV/XLSX/PDF): the Overview page's
 // headline numbers as a Metric/Value report.
 //
-// Same shape as dashboard-content-export.test.js: in-memory sqlite swapped in
-// for ../db/database, the REAL requireAuth + resolveTenancy chain, mounted the
-// way server.js mounts dashboard-overview. lib/sla-overview's
-// buildSlaOverview is stubbed (it has its own suite, sla-overview.test.js, and
-// needs the full outage/usage schema) - what's tested here is that the export
-// averages its per-device availability the way OverviewView does, counts only
-// the caller's open tickets, gates issues to platform admins, and that each
-// format decodes to the expected rows.
+// The REAL requireAuth + resolveTenancy chain and dashboard-overview router
+// (helpers/inprocess-app.js) against the REAL MySQL test DB (beamos_test via npm test).
+// lib/sla-overview's buildSlaOverview is stubbed (it has its own suite,
+// sla-overview.test.js, and needs the full outage/usage data) - what's tested here is
+// that the export averages its per-device availability the way OverviewView does, counts
+// only the caller's open tickets, gates issues to platform admins, and that each format
+// decodes to the expected rows.
+//
+// Fixtures are test-owned (doe- prefix, generated ids). The issue count is GLOBAL (every
+// player_debug_logs row in the period, any device): the exact count below holds because
+// no other test file writes player_debug_logs (today only this one does) and the runner
+// recreates beamos_test per run. player_debug_logs has no FK, so this file deletes its
+// own rows by id; the rest goes with the users (orgs, workspaces, devices, play_logs,
+// tickets cascade).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -18,52 +24,18 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const Database = require('better-sqlite3');
 const ExcelJS = require('exceljs');
 
-process.env.JWT_SECRET = 'test-secret-dashboard-overview-export';
-
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE devices (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT DEFAULT '', status TEXT DEFAULT 'offline'
-  );
-  CREATE TABLE play_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, content_id TEXT,
-    content_name TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL, completed INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE tickets (
-    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, status TEXT NOT NULL
-  );
-  CREATE TABLE player_debug_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, error_fingerprint TEXT, created_at INTEGER NOT NULL
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
+const P = `doe-${crypto.randomBytes(4).toString('hex')}`;
+const id = (name) => `${P}-${name}`;
+const ID = {
+  userA: id('user-a'), userB: id('user-b'), admin: id('admin'), orgA: id('org-a'), orgB: id('org-b'),
+  wsA: id('ws-a'), wsB: id('ws-b'),
+};
 
 // Stub: ws-a has three devices, one with no data in the period (must be
 // skipped, not averaged in as 0) -> fleet uptime = (98 + 94) / 2 = 96.0.
+// Installed before the router (which requires it) loads.
 const slaModulePath = require.resolve('../lib/sla-overview');
 require.cache[slaModulePath] = {
   id: slaModulePath,
@@ -73,7 +45,7 @@ require.cache[slaModulePath] = {
     buildSlaOverview: async (_db, req) => ({
       target: { uptime_target_pct: 99 },
       devices:
-        req.workspaceId === 'ws-a'
+        req.workspaceId === ID.wsA
           ? [{ availability_pct: 98 }, { availability_pct: '94.0' }, { availability_pct: null }]
           : [{ availability_pct: 50 }],
     }),
@@ -81,64 +53,72 @@ require.cache[slaModulePath] = {
   },
 };
 
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveTenancy } = require('../lib/tenancy');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { cleanupUsers } = require('./helpers/disposable');
 
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-a', 'a@tenant-a.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-b', 'b@tenant-b.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('admin', 'admin@platform.test', 'superadmin')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-a', 'Org A', 'user-a')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-b', 'Org B', 'user-b')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a', 'org-a', 'Workspace A')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-b', 'org-b', 'Workspace B')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'user-a', 'workspace_viewer')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-b', 'user-b', 'workspace_viewer')").run();
-
-for (const [id, status] of [['d-a1', 'online'], ['d-a2', 'online'], ['d-a3', 'offline']]) {
-  db.prepare("INSERT INTO devices (id, workspace_id, status) VALUES (?, 'ws-a', ?)").run(id, status);
-}
-db.prepare("INSERT INTO devices (id, workspace_id, status) VALUES ('d-b1', 'ws-b', 'online')").run();
-
-const now = Math.floor(Date.now() / 1000);
-// ws-a: 4 plays, 3 completed -> 75.0%
-for (const done of [1, 1, 1, 0]) {
-  db.prepare("INSERT INTO play_logs (device_id, started_at, completed) VALUES ('d-a1', ?, ?)").run(now - 3600, done);
-}
-db.prepare("INSERT INTO play_logs (device_id, started_at, completed) VALUES ('d-b1', ?, 0)").run(now - 3600);
-
-// ws-a: 2 open-ish (open + in_progress), 1 resolved; ws-b: 5 open (must not count for A)
-for (const [id, ws, status] of [
-  ['t1', 'ws-a', 'open'], ['t2', 'ws-a', 'in_progress'], ['t3', 'ws-a', 'resolved'],
-  ['t4', 'ws-b', 'open'], ['t5', 'ws-b', 'open'], ['t6', 'ws-b', 'open'], ['t7', 'ws-b', 'open'], ['t8', 'ws-b', 'open'],
-]) {
-  db.prepare('INSERT INTO tickets (id, workspace_id, status) VALUES (?, ?, ?)').run(id, ws, status);
-}
-
-// 3 distinct fingerprints in the period (one repeated), one old one outside it.
-for (const [fp, at] of [['fp1', now - 60], ['fp1', now - 120], ['fp2', now - 60], ['fp3', now - 60], ['fp-old', now - 90 * 86400]]) {
-  db.prepare('INSERT INTO player_debug_logs (device_id, error_fingerprint, created_at) VALUES (?, ?, ?)').run('x', fp, at);
-}
-
-const tokA = generateToken({ id: 'user-a', email: 'a@tenant-a.test', role: 'user' }, 'ws-a');
-const tokAdmin = generateToken({ id: 'admin', email: 'admin@platform.test', role: 'superadmin' }, 'ws-a');
-
-const app = express();
-app.use(express.json());
-app.use('/api/dashboard/overview', requireAuth, resolveTenancy, require('../routes/dashboard-overview'));
-app.use((err, req, res, _next) => {
-  res.status(500).json({ error: err.message });
-});
-
-const server = app.listen(0);
+let app;
 let base;
+let tokA;
+let tokAdmin;
+const debugLogIds = [];
+
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/dashboard/overview'] });
+  base = app.base;
+  const run = (sql, ...p) => app.db.prepare(sql).run(...p);
+  const user = "INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, ?, NULL, 'local')";
+  await run(user, ID.userA, `${P}-a@tenant-a.test`, 'user');
+  await run(user, ID.userB, `${P}-b@tenant-b.test`, 'user');
+  await run(user, ID.admin, `${P}-admin@platform.test`, 'superadmin');
+  const org = "INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')";
+  await run(org, ID.orgA, `${P} Org A`, ID.userA);
+  await run(org, ID.orgB, `${P} Org B`, ID.userB);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'Workspace A');
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsB, ID.orgB, 'Workspace B');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_viewer')", ID.wsA, ID.userA);
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_viewer')", ID.wsB, ID.userB);
+
+  for (const [dev, status] of [['d-a1', 'online'], ['d-a2', 'online'], ['d-a3', 'offline']]) {
+    await run('INSERT INTO devices (id, workspace_id, status) VALUES (?, ?, ?)', id(dev), ID.wsA, status);
+  }
+  await run("INSERT INTO devices (id, workspace_id, status) VALUES (?, ?, 'online')", id('d-b1'), ID.wsB);
+
+  const now = Math.floor(Date.now() / 1000);
+  // ws-a: 4 plays, 3 completed -> 75.0%
+  for (const done of [1, 1, 1, 0]) {
+    await run('INSERT INTO play_logs (device_id, started_at, completed) VALUES (?, ?, ?)', id('d-a1'), now - 3600, done);
+  }
+  await run('INSERT INTO play_logs (device_id, started_at, completed) VALUES (?, ?, 0)', id('d-b1'), now - 3600);
+
+  // ws-a: 2 open-ish (open + in_progress), 1 resolved; ws-b: 5 open (must not count for A)
+  for (const [t, ws, status] of [
+    ['t1', ID.wsA, 'open'], ['t2', ID.wsA, 'in_progress'], ['t3', ID.wsA, 'resolved'],
+    ['t4', ID.wsB, 'open'], ['t5', ID.wsB, 'open'], ['t6', ID.wsB, 'open'], ['t7', ID.wsB, 'open'], ['t8', ID.wsB, 'open'],
+  ]) {
+    await run('INSERT INTO tickets (id, workspace_id, title, status) VALUES (?, ?, ?, ?)', id(t), ws, `${P} ${t}`, status);
+  }
+
+  // 3 distinct fingerprints in the period (one repeated), one old one outside it.
+  for (const [fp, at] of [['fp1', now - 60], ['fp1', now - 120], ['fp2', now - 60], ['fp3', now - 60], ['fp-old', now - 90 * 86400]]) {
+    const r = await run('INSERT INTO player_debug_logs (device_id, error_fingerprint, created_at) VALUES (?, ?, ?)', 'x', id(fp), at);
+    debugLogIds.push(r.lastInsertRowid);
+  }
+
+  tokA = generateToken({ id: ID.userA, email: `${P}-a@tenant-a.test`, role: 'user' }, ID.wsA);
+  tokAdmin = generateToken({ id: ID.admin, email: `${P}-admin@platform.test`, role: 'superadmin' }, ID.wsA);
 });
-test.after(() => {
-  server.close();
-  db.close();
+
+test.after(async () => {
+  try {
+    if (app) {
+      for (const rowId of debugLogIds) await app.db.prepare('DELETE FROM player_debug_logs WHERE id = ?').run(rowId);
+      await cleanupUsers(app.db, [ID.admin, ID.userB, ID.userA]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 const start = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);

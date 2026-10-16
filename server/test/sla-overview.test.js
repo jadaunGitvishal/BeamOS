@@ -3,9 +3,13 @@
 // Ref 51 (SLA Dashboard, Stage 1) — verification for
 // GET /api/dashboard/reports/sla-overview.
 //
-// Same harness as dashboard-content-export.test.js: in-memory sqlite swapped in
-// for ../db/database, the REAL requireAuth + resolveTenancy chain, the router
-// mounted exactly as server.js mounts it.
+// Same harness as dashboard-content-export.test.js: the REAL requireAuth +
+// resolveTenancy chain and router (helpers/inprocess-app.js) against the REAL MySQL test
+// DB (beamos_test via npm test). Fixtures are test-owned (slo- prefix, generated ids);
+// device_status_log, device_usage_daily and outage_history have no FK to devices, so this
+// file deletes its own rows by device id; the rest goes with the users. app_settings: the
+// schema seeds the two SLA keys with the config defaults (99.0 / 4); the override test
+// writes its own values and restores the seeded rows exactly (value + updated_at).
 //
 // The data below is hand-constructed so every output number can be checked by
 // hand (see the comment on each device). It exercises each edge case the spec
@@ -21,155 +25,131 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
-
-process.env.JWT_SECRET = 'test-secret-sla-overview';
-
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL);
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL);
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE devices (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT DEFAULT '', status TEXT DEFAULT 'offline',
-    sort_order INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0
-  );
-  CREATE TABLE device_usage_daily (
-    device_id TEXT NOT NULL, day TEXT NOT NULL, online_seconds INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (device_id, day)
-  );
-  CREATE TABLE device_status_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, status TEXT NOT NULL, timestamp INTEGER NOT NULL
-  );
-  CREATE TABLE app_settings (\`key\` TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER DEFAULT 0);
-  CREATE TABLE outage_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
-    started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, duration_seconds INTEGER NOT NULL,
-    likely_cause TEXT, recorded_at INTEGER NOT NULL DEFAULT 0, UNIQUE (device_id, started_at)
-  );
-  -- Step 5 Stage A: runOutageHistory now classifies likely_cause off telemetry.
-  CREATE TABLE device_telemetry (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
-    wifi_rssi INTEGER, storage_free_mb INTEGER, reported_at INTEGER NOT NULL
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveTenancy } = require('../lib/tenancy');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
 const appSettings = require('../lib/app-settings');
 const { runOutageHistory } = require('../services/outage-history');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-// --- Two tenants ----------------------------------------------------------
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-a', 'a@t.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-b', 'b@t.test', 'user')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-a', 'Org A', 'user-a')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-b', 'Org B', 'user-b')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a', 'org-a', 'WS A')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-b', 'org-b', 'WS B')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'user-a', 'workspace_admin')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-b', 'user-b', 'workspace_admin')").run();
-
-const dev = (id, ws, name, sort) =>
-  db.prepare("INSERT INTO devices (id, workspace_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, 0)").run(id, ws, name, sort);
-dev('dev1', 'ws-a', 'Lobby', 1);
-dev('dev2', 'ws-a', 'Cafeteria', 2);
-dev('dev3', 'ws-a', 'Reception', 3);
-dev('dev4', 'ws-a', 'Boardroom', 4);
-dev('dev-b', 'ws-b', 'Other-Tenant Screen', 1);
+const P = `slo-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const DEV = (name) => id(name);
+const ID = { userA: id('user-a'), userB: id('user-b'), orgA: id('org-a'), orgB: id('org-b'), wsA: id('ws-a'), wsB: id('ws-b') };
+const devices = [];
 
 const H = 3600;
 const now = Math.floor(Date.now() / 1000);
-const log = (device, status, ago) =>
-  db.prepare("INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)").run(device, status, now - ago);
-const usage = (device, dayOffset, seconds) =>
-  db.prepare("INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)")
-    .run(device, new Date((now - dayOffset * 86400) * 1000).toISOString().slice(0, 10), seconds);
 
-// NOTE (Stage 2): completed-outage MTTR is now read from outage_history, which
-// test.before() populates by running the real recorder once over this same
-// device_status_log data. Ongoing / live-breach detection still reads the log
-// live. The hand-checked numbers below are unchanged by that move.
+let app;
+let tokA;
+let tokB;
 
-// dev1: outage A = 10h..9h ago (3600s); outage B = 5h..4.5h ago (1800s).
-//       MTTR = (3600 + 1800) / 2 = 2700s. completed_outages = 2.
-//       usage: 2 days @ 85968s -> 85968/86400*100 = 99.5% -> compliant (>= 99.0)
-log('dev1', 'offline', 10 * H);
-log('dev1', 'online', 9 * H);
-log('dev1', 'offline', 5 * H);
-log('dev1', 'online', Math.round(4.5 * H));
-usage('dev1', 1, 85968);
-usage('dev1', 2, 85968);
-
-// dev2: online 20h ago, offline 6h ago, never recovered.
-//       ongoing_outage_seconds ~= 6h = 21600s > threshold 4h (14400s) -> live breach.
-//       completed_outages = 0, mttr = null.
-//       usage: 3 days @ 69120s -> 69120/86400*100 = 80.0% -> breach (< 99.0)
-log('dev2', 'online', 20 * H);
-log('dev2', 'offline', 6 * H);
-usage('dev2', 1, 69120);
-usage('dev2', 2, 69120);
-usage('dev2', 3, 69120);
-
-// dev3: FIRST row is 'online' 8h ago (device was already offline before the
-//       window opened) -> must NOT invent a phantom outage.
-//       Then 'offline' 2h ago, never recovered -> ongoing_outage_seconds ~= 7200s,
-//       which is UNDER the 14400s threshold -> ongoing but NOT a live breach.
-//       completed_outages = 0, mttr = null.
-//       No usage rows -> availability_pct null -> sla_status 'unknown'.
-log('dev3', 'online', 8 * H);
-log('dev3', 'offline', 2 * H);
-
-// dev4: 'offline' 12h ago, 'offline_timeout' 11.5h ago (same outage, escalated by
-//       the heartbeat checker), 'online' 11h ago. Must collapse to ONE completed
-//       outage of 12h-11h = 3600s, NOT two.
-//       usage: 1 day @ 85536s -> 85536/86400*100 = 99.0% -> compliant (boundary, >=)
-log('dev4', 'offline', 12 * H);
-log('dev4', 'offline_timeout', Math.round(11.5 * H));
-log('dev4', 'online', 11 * H);
-usage('dev4', 1, 85536);
-
-// dev-b: outage + usage in the OTHER workspace. Must never surface for WS A.
-log('dev-b', 'offline', 9 * H);
-log('dev-b', 'online', 8 * H);
-usage('dev-b', 1, 1000);
-
-const tokA = generateToken({ id: 'user-a', email: 'a@t.test', role: 'user' }, 'ws-a');
-const tokB = generateToken({ id: 'user-b', email: 'b@t.test', role: 'user' }, 'ws-b');
-
-const app = express();
-app.use(express.json());
-app.use('/api/dashboard/reports', requireAuth, resolveTenancy, require('../routes/dashboard-reports'));
-app.use((err, req, res, _next) => { res.status(500).json({ error: err.message, stack: err.stack }); });
-
-const server = app.listen(0);
-let base;
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/dashboard/reports'] });
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+
+  // --- Two tenants ----------------------------------------------------------
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.userA, `${P}-a@t.test`);
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.userB, `${P}-b@t.test`);
+  const org = "INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')";
+  await run(org, ID.orgA, `${P} Org A`, ID.userA);
+  await run(org, ID.orgB, `${P} Org B`, ID.userB);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'WS A');
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsB, ID.orgB, 'WS B');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsA, ID.userA);
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsB, ID.userB);
+
+  const dev = (name, ws, label, sort) => {
+    devices.push(DEV(name));
+    return run('INSERT INTO devices (id, workspace_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, 0)', DEV(name), ws, label, sort);
+  };
+  await dev('dev1', ID.wsA, 'Lobby', 1);
+  await dev('dev2', ID.wsA, 'Cafeteria', 2);
+  await dev('dev3', ID.wsA, 'Reception', 3);
+  await dev('dev4', ID.wsA, 'Boardroom', 4);
+  await dev('dev-b', ID.wsB, 'Other-Tenant Screen', 1);
+
+  const log = (name, status, ago) =>
+    run('INSERT INTO device_status_log (device_id, status, timestamp) VALUES (?, ?, ?)', DEV(name), status, now - ago);
+  const usage = (name, dayOffset, seconds) =>
+    run('INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)',
+      DEV(name), new Date((now - dayOffset * 86400) * 1000).toISOString().slice(0, 10), seconds);
+
+  // NOTE (Stage 2): completed-outage MTTR is now read from outage_history, which
+  // this hook populates by running the real recorder once over this same
+  // device_status_log data. Ongoing / live-breach detection still reads the log
+  // live. The hand-checked numbers below are unchanged by that move.
+
+  // dev1: outage A = 10h..9h ago (3600s); outage B = 5h..4.5h ago (1800s).
+  //       MTTR = (3600 + 1800) / 2 = 2700s. completed_outages = 2.
+  //       usage: 2 days @ 85968s -> 85968/86400*100 = 99.5% -> compliant (>= 99.0)
+  await log('dev1', 'offline', 10 * H);
+  await log('dev1', 'online', 9 * H);
+  await log('dev1', 'offline', 5 * H);
+  await log('dev1', 'online', Math.round(4.5 * H));
+  await usage('dev1', 1, 85968);
+  await usage('dev1', 2, 85968);
+
+  // dev2: online 20h ago, offline 6h ago, never recovered.
+  //       ongoing_outage_seconds ~= 6h = 21600s > threshold 4h (14400s) -> live breach.
+  //       completed_outages = 0, mttr = null.
+  //       usage: 3 days @ 69120s -> 69120/86400*100 = 80.0% -> breach (< 99.0)
+  await log('dev2', 'online', 20 * H);
+  await log('dev2', 'offline', 6 * H);
+  await usage('dev2', 1, 69120);
+  await usage('dev2', 2, 69120);
+  await usage('dev2', 3, 69120);
+
+  // dev3: FIRST row is 'online' 8h ago (device was already offline before the
+  //       window opened) -> must NOT invent a phantom outage.
+  //       Then 'offline' 2h ago, never recovered -> ongoing_outage_seconds ~= 7200s,
+  //       which is UNDER the 14400s threshold -> ongoing but NOT a live breach.
+  //       completed_outages = 0, mttr = null.
+  //       No usage rows -> availability_pct null -> sla_status 'unknown'.
+  await log('dev3', 'online', 8 * H);
+  await log('dev3', 'offline', 2 * H);
+
+  // dev4: 'offline' 12h ago, 'offline_timeout' 11.5h ago (same outage, escalated by
+  //       the heartbeat checker), 'online' 11h ago. Must collapse to ONE completed
+  //       outage of 12h-11h = 3600s, NOT two.
+  //       usage: 1 day @ 85536s -> 85536/86400*100 = 99.0% -> compliant (boundary, >=)
+  await log('dev4', 'offline', 12 * H);
+  await log('dev4', 'offline_timeout', Math.round(11.5 * H));
+  await log('dev4', 'online', 11 * H);
+  await usage('dev4', 1, 85536);
+
+  // dev-b: outage + usage in the OTHER workspace. Must never surface for WS A.
+  await log('dev-b', 'offline', 9 * H);
+  await log('dev-b', 'online', 8 * H);
+  await usage('dev-b', 1, 1000);
+
+  tokA = generateToken({ id: ID.userA, email: `${P}-a@t.test`, role: 'user' }, ID.wsA);
+  tokB = generateToken({ id: ID.userB, email: `${P}-b@t.test`, role: 'user' }, ID.wsB);
+
   // Populate outage_history from the seeded status log, exactly as the scheduled
   // service does in production.
   await runOutageHistory(db);
 });
-test.after(() => { server.close(); db.close(); });
+
+test.after(async () => {
+  try {
+    if (app) {
+      // No FK to devices on these tables: delete this file's rows explicitly.
+      for (const d of devices) {
+        await db.prepare('DELETE FROM device_status_log WHERE device_id = ?').run(d);
+        await db.prepare('DELETE FROM device_usage_daily WHERE device_id = ?').run(d);
+        await db.prepare('DELETE FROM outage_history WHERE device_id = ?').run(d);
+      }
+      await cleanupUsers(db, [ID.userB, ID.userA]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
 
 const get = (token) =>
-  fetch(`${base}/api/dashboard/reports/sla-overview`, { headers: { Authorization: `Bearer ${token}` } });
+  fetch(`${app.base}/api/dashboard/reports/sla-overview`, { headers: { Authorization: `Bearer ${token}` } });
 const byId = (devices) => Object.fromEntries(devices.map((d) => [d.device_id, d]));
 
 test('defaults: target comes from config when app_settings is empty', async () => {
@@ -180,7 +160,7 @@ test('defaults: target comes from config when app_settings is empty', async () =
 });
 
 test('dev1: MTTR is the mean of the two completed outages (2700s), 2 outages', async () => {
-  const d = byId((await (await get(tokA)).json()).devices).dev1;
+  const d = byId((await (await get(tokA)).json()).devices)[DEV('dev1')];
   assert.equal(d.completed_outages, 2);
   assert.equal(d.mttr_seconds, 2700);
   assert.equal(d.ongoing_outage_seconds, null);
@@ -190,7 +170,7 @@ test('dev1: MTTR is the mean of the two completed outages (2700s), 2 outages', a
 });
 
 test('dev2: ongoing outage over threshold is a live breach; uptime under target is a breach', async () => {
-  const d = byId((await (await get(tokA)).json()).devices).dev2;
+  const d = byId((await (await get(tokA)).json()).devices)[DEV('dev2')];
   assert.equal(d.completed_outages, 0);
   assert.equal(d.mttr_seconds, null);
   // ~6h ago; allow a few seconds of test runtime slack.
@@ -201,7 +181,7 @@ test('dev2: ongoing outage over threshold is a live breach; uptime under target 
 });
 
 test('dev3: no phantom outage from a leading online row; short ongoing outage is not a live breach', async () => {
-  const d = byId((await (await get(tokA)).json()).devices).dev3;
+  const d = byId((await (await get(tokA)).json()).devices)[DEV('dev3')];
   assert.equal(d.completed_outages, 0, 'leading online row must not create a completed outage');
   assert.equal(d.mttr_seconds, null);
   assert.ok(Math.abs(d.ongoing_outage_seconds - 2 * H) <= 60, `got ${d.ongoing_outage_seconds}`);
@@ -211,7 +191,7 @@ test('dev3: no phantom outage from a leading online row; short ongoing outage is
 });
 
 test('dev4: offline + offline_timeout + online collapses to ONE 3600s outage', async () => {
-  const d = byId((await (await get(tokA)).json()).devices).dev4;
+  const d = byId((await (await get(tokA)).json()).devices)[DEV('dev4')];
   assert.equal(d.completed_outages, 1);
   assert.equal(d.mttr_seconds, 3600);
   assert.equal(d.ongoing_outage_seconds, null);
@@ -232,27 +212,34 @@ test('summary tallies match the per-device rows', async () => {
 
 test('workspace isolation: WS A never sees the other tenant device', async () => {
   const bodyA = await (await get(tokA)).json();
-  assert.ok(!bodyA.devices.some((d) => d.device_id === 'dev-b'));
+  assert.ok(!bodyA.devices.some((d) => d.device_id === DEV('dev-b')));
   const bodyB = await (await get(tokB)).json();
-  assert.deepEqual(bodyB.devices.map((d) => d.device_id), ['dev-b']);
+  assert.deepEqual(bodyB.devices.map((d) => d.device_id), [DEV('dev-b')]);
 });
 
 test('app_settings override: lowering the threshold to 1h makes dev3 a live breach', async () => {
-  db.prepare("INSERT INTO app_settings (`key`, value) VALUES ('sla_escalation_threshold_hours', '1')").run();
-  db.prepare("INSERT INTO app_settings (`key`, value) VALUES ('sla_uptime_target_pct', '95')").run();
+  // Save the two keys exactly (the schema seeds them), override, restore in finally.
+  const KEYS = ['sla_escalation_threshold_hours', 'sla_uptime_target_pct'];
+  const saved = await db.prepare(`SELECT \`key\`, value, updated_at FROM app_settings WHERE \`key\` IN (?, ?)`).all(...KEYS);
+  const put = (k, v) => db.prepare('INSERT INTO app_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)').run(k, v);
+  await put('sla_escalation_threshold_hours', '1');
+  await put('sla_uptime_target_pct', '95');
   await appSettings.__reload();
   try {
     const body = await (await get(tokA)).json();
     assert.deepEqual(body.target, { uptime_target_pct: 95, escalation_threshold_hours: 1 });
     const d = byId(body.devices);
-    assert.equal(d.dev3.live_breach, true, '2h > 1h threshold now');
-    assert.equal(d.dev2.live_breach, true);
+    assert.equal(d[DEV('dev3')].live_breach, true, '2h > 1h threshold now');
+    assert.equal(d[DEV('dev2')].live_breach, true);
     assert.equal(body.summary.live_breaches, 2);
     // dev2 at 80% is still a breach vs the lowered 95% target; dev1/dev4 still compliant.
-    assert.equal(d.dev2.sla_status, 'breach');
-    assert.equal(d.dev1.sla_status, 'compliant');
+    assert.equal(d[DEV('dev2')].sla_status, 'breach');
+    assert.equal(d[DEV('dev1')].sla_status, 'compliant');
   } finally {
-    db.prepare("DELETE FROM app_settings").run();
+    await db.prepare('DELETE FROM app_settings WHERE `key` IN (?, ?)').run(...KEYS);
+    for (const r of saved) {
+      await db.prepare('INSERT INTO app_settings (`key`, value, updated_at) VALUES (?, ?, ?)').run(r.key, r.value, r.updated_at);
+    }
     await appSettings.__reload();
   }
 });

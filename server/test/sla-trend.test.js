@@ -2,88 +2,83 @@
 
 // Ref 51 Step 4 — GET /api/dashboard/reports/sla-trend
 //
-// In-memory sqlite + the real requireAuth + resolveTenancy chain, mounted
-// exactly as server.js mounts dashboard-reports. device_usage_daily is seeded
-// with hand-picked online_seconds so every returned avg_uptime_pct is checkable
-// by hand; a second workspace's rows prove the query is workspace-scoped.
+// The real requireAuth + resolveTenancy chain and dashboard-reports router
+// (helpers/inprocess-app.js) against the REAL MySQL test DB (beamos_test via npm test).
+// device_usage_daily is seeded with hand-picked online_seconds so every returned
+// avg_uptime_pct is checkable by hand; a second workspace's rows prove the query is
+// workspace-scoped. Days are relative to today (as before).
+//
+// Fixtures are test-owned (slt- prefix, generated ids). device_usage_daily has no FK to
+// devices, so this file deletes its own rows by device id; the rest goes with the users.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-process.env.JWT_SECRET = 'test-secret-sla-trend';
-
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL);
-  CREATE TABLE organization_members (id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT, user_id TEXT, role TEXT);
-  CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL);
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE devices (id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT DEFAULT '', status TEXT DEFAULT 'offline');
-  CREATE TABLE device_usage_daily (
-    device_id TEXT NOT NULL, day TEXT NOT NULL, online_seconds INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (device_id, day)
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveTenancy } = require('../lib/tenancy');
-
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-a', 'a@t.test', 'user')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-b', 'b@t.test', 'user')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-a', 'A', 'user-a')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-b', 'B', 'user-b')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a', 'org-a', 'WS A')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-b', 'org-b', 'WS B')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'user-a', 'workspace_admin')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-b', 'user-b', 'workspace_admin')").run();
-
-for (const id of ['a1', 'a2', 'a3']) db.prepare("INSERT INTO devices (id, workspace_id, name) VALUES (?, 'ws-a', ?)").run(id, id);
-db.prepare("INSERT INTO devices (id, workspace_id, name) VALUES ('b1', 'ws-b', 'b1')").run();
+const P = `slt-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const ID = {
+  userA: id('user-a'), userB: id('user-b'), userX: id('user-x'), orgA: id('org-a'), orgB: id('org-b'),
+  wsA: id('ws-a'), wsB: id('ws-b'),
+};
+const DEVICES = ['a1', 'a2', 'a3', 'b1'].map(id);
 
 const dayStr = (agoDays) => new Date(Date.now() - agoDays * 86400000).toISOString().slice(0, 10);
 const D0 = dayStr(0), D1 = dayStr(1), D2 = dayStr(2), D3 = dayStr(3);
-const usage = (device, day, sec) =>
-  db.prepare('INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)').run(device, day, sec);
 
-// D3 (oldest): 3 devices at 25% / 50% / 75%  -> avg 50.0
-usage('a1', D3, 21600); usage('a2', D3, 43200); usage('a3', D3, 64800);
-// D2: only 2 devices reported, 100% / 50%      -> avg 75.0
-usage('a1', D2, 86400); usage('a2', D2, 43200);
-// D1: 3 devices all at 10%                     -> avg 10.0
-usage('a1', D1, 8640); usage('a2', D1, 8640); usage('a3', D1, 8640);
-// D0 (today): 3 devices 90% / 95% / 100%       -> avg 95.0
-usage('a1', D0, 77760); usage('a2', D0, 82080); usage('a3', D0, 86400);
-// ws-b, D1: a full day — must never appear in ws-a's trend
-usage('b1', D1, 86400);
-
-const tokA = generateToken({ id: 'user-a', email: 'a@t.test', role: 'user' }, 'ws-a');
-const tokB = generateToken({ id: 'user-b', email: 'b@t.test', role: 'user' }, 'ws-b');
-
-const app = express();
-app.use(express.json());
-app.use('/api/dashboard/reports', requireAuth, resolveTenancy, require('../routes/dashboard-reports'));
-app.use((err, req, res, _next) => { res.status(500).json({ error: err.message, stack: err.stack }); });
-const server = app.listen(0);
+let app;
 let base;
+let tokA;
+let tokB;
+
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/dashboard/reports'] });
+  base = app.base;
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.userA, `${P}-a@t.test`);
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.userB, `${P}-b@t.test`);
+  const org = "INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')";
+  await run(org, ID.orgA, `${P} A`, ID.userA);
+  await run(org, ID.orgB, `${P} B`, ID.userB);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'WS A');
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsB, ID.orgB, 'WS B');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsA, ID.userA);
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsB, ID.userB);
+
+  for (const d of ['a1', 'a2', 'a3']) await run('INSERT INTO devices (id, workspace_id, name) VALUES (?, ?, ?)', id(d), ID.wsA, d);
+  await run('INSERT INTO devices (id, workspace_id, name) VALUES (?, ?, ?)', id('b1'), ID.wsB, 'b1');
+
+  const usage = (device, day, sec) =>
+    run('INSERT INTO device_usage_daily (device_id, day, online_seconds) VALUES (?, ?, ?)', id(device), day, sec);
+  // D3 (oldest): 3 devices at 25% / 50% / 75%  -> avg 50.0
+  await usage('a1', D3, 21600); await usage('a2', D3, 43200); await usage('a3', D3, 64800);
+  // D2: only 2 devices reported, 100% / 50%      -> avg 75.0
+  await usage('a1', D2, 86400); await usage('a2', D2, 43200);
+  // D1: 3 devices all at 10%                     -> avg 10.0
+  await usage('a1', D1, 8640); await usage('a2', D1, 8640); await usage('a3', D1, 8640);
+  // D0 (today): 3 devices 90% / 95% / 100%       -> avg 95.0
+  await usage('a1', D0, 77760); await usage('a2', D0, 82080); await usage('a3', D0, 86400);
+  // ws-b, D1: a full day — must never appear in ws-a's trend
+  await usage('b1', D1, 86400);
+
+  tokA = generateToken({ id: ID.userA, email: `${P}-a@t.test`, role: 'user' }, ID.wsA);
+  tokB = generateToken({ id: ID.userB, email: `${P}-b@t.test`, role: 'user' }, ID.wsB);
 });
-test.after(() => { server.close(); db.close(); });
+
+test.after(async () => {
+  try {
+    if (app) {
+      // device_usage_daily has no FK to devices: delete this file's rows explicitly.
+      for (const d of DEVICES) await db.prepare('DELETE FROM device_usage_daily WHERE device_id = ?').run(d);
+      await cleanupUsers(db, [ID.userX, ID.userB, ID.userA]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
 
 const get = (token, qs = '') =>
   fetch(`${base}/api/dashboard/reports/sla-trend${qs}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -126,8 +121,8 @@ test('days param clamps and defaults', async () => {
 
 test('no workspace context -> empty array, not an error', async () => {
   // a valid user with no workspace membership at all
-  db.prepare("INSERT INTO users (id, email, role) VALUES ('user-x', 'x@t.test', 'user')").run();
-  const tok = generateToken({ id: 'user-x', email: 'x@t.test', role: 'user' }, null);
+  await db.prepare("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')").run(ID.userX, `${P}-x@t.test`);
+  const tok = generateToken({ id: ID.userX, email: `${P}-x@t.test`, role: 'user' }, null);
   const res = await get(tok, '?days=7');
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), []);

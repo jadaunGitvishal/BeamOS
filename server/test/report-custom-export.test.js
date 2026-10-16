@@ -3,8 +3,11 @@
 // Ref 74 Stage 3: proves POST /api/reports/custom/export renders the SAME
 // data the Stage 2 preview endpoint returns, across all 3 real download
 // formats (csv/xlsx/pdf) plus json, reusing report-export.js's renderCsv/
-// renderXlsx/renderPdf exactly as every other export route does. Same
-// in-memory-sqlite + real-app harness as report-custom-query.test.js.
+// renderXlsx/renderPdf exactly as every other export route does. Same harness as
+// report-custom-query.test.js: the real reports router behind requireAuth + resolveTenancy
+// (helpers/inprocess-app.js) against the REAL MySQL test DB (beamos_test via npm test).
+// Fixtures are test-owned (rce- prefix, generated ids, fixed timestamps); deleting the user
+// cascades the org, workspace, device and (FK cascade) play_logs.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -12,96 +15,47 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const Database = require('better-sqlite3');
 const ExcelJS = require('exceljs');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { cleanupUsers } = require('./helpers/disposable');
 
-process.env.JWT_SECRET = 'test-secret-report-custom-export';
+const P = `rce-${crypto.randomBytes(4).toString('hex')}`;
+const id = (name) => `${P}-${name}`;
+const ID = { userA: id('user-a'), orgA: id('org-a'), wsA: id('ws-a'), devA: id('device-a') };
 
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE devices (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT DEFAULT '', status TEXT DEFAULT 'offline',
-    blocked INTEGER NOT NULL DEFAULT 0, manufacturer TEXT, model TEXT, android_version TEXT,
-    app_version TEXT, installed_at TEXT, warranty_expiry_date TEXT,
-    created_at INTEGER NOT NULL DEFAULT 0, last_heartbeat INTEGER
-  );
-  CREATE TABLE device_usage_daily (
-    device_id TEXT NOT NULL, day TEXT NOT NULL, online_seconds INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (device_id, day)
-  );
-  CREATE TABLE outage_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
-    started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, duration_seconds INTEGER NOT NULL,
-    likely_cause TEXT
-  );
-  CREATE TABLE play_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, content_id TEXT, widget_id TEXT,
-    zone_id TEXT, content_name TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL, ended_at INTEGER,
-    duration_sec INTEGER, completed INTEGER NOT NULL DEFAULT 0, trigger_type TEXT DEFAULT 'playlist',
-    created_at INTEGER NOT NULL DEFAULT 0, session_id TEXT
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveTenancy } = require('../lib/tenancy');
-
-db.prepare("INSERT INTO users (id, email, role) VALUES ('user-a', 'a@tenant-a.test', 'user')").run();
-db.prepare("INSERT INTO organizations (id, name, owner_user_id) VALUES ('org-a', 'Org A', 'user-a')").run();
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a', 'org-a', 'Workspace A')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws-a', 'user-a', 'workspace_admin')").run();
-
-db.prepare(`
-  INSERT INTO devices (id, workspace_id, name, status, manufacturer, model, created_at)
-  VALUES ('device-a', 'ws-a', 'Export Test Device', 'online', 'Acme', 'X1', 1700000000)
-`).run();
-db.prepare(`
-  INSERT INTO play_logs (device_id, content_id, content_name, started_at, ended_at, duration_sec, completed)
-  VALUES ('device-a', NULL, 'Export Test Promo', 1700000000, 1700001800, 1800, 1)
-`).run();
-
-const tokA = generateToken({ id: 'user-a', email: 'a@tenant-a.test', role: 'user' }, 'ws-a');
-
-const app = express();
-app.use(express.json());
-app.use('/api/reports', requireAuth, resolveTenancy, require('../routes/reports'));
-app.use((err, req, res, _next) => {
-  res.status(err.statusCode || 500).json({ error: err.message });
-});
-
-const server = app.listen(0);
+let app;
 let base;
+let tokA;
 let previewData;
+
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: ['/api/reports'] });
+  base = app.base;
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.userA, `${P}-a@tenant-a.test`);
+  await run("INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')", ID.orgA, `${P} Org A`, ID.userA);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'Workspace A');
+  await run("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')", ID.wsA, ID.userA);
+  await run(`
+    INSERT INTO devices (id, workspace_id, name, status, manufacturer, model, created_at)
+    VALUES (?, ?, 'Export Test Device', 'online', 'Acme', 'X1', 1700000000)
+  `, ID.devA, ID.wsA);
+  await run(`
+    INSERT INTO play_logs (device_id, content_id, content_name, started_at, ended_at, duration_sec, completed)
+    VALUES (?, NULL, 'Export Test Promo', 1700000000, 1700001800, 1800, 1)
+  `, ID.devA);
+  tokA = generateToken({ id: ID.userA, email: `${P}-a@tenant-a.test`, role: 'user' }, ID.wsA);
   previewData = await preview();
 });
-test.after(() => {
-  server.close();
-  db.close();
+
+test.after(async () => {
+  try {
+    if (app) await cleanupUsers(db, [ID.userA]);
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
 });
 
 const SELECTION = { fields: ['device_name', 'pop_content_name', 'pop_duration_sec'] };
