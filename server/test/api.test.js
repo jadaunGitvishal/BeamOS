@@ -354,7 +354,14 @@ test('token-auth: last_used_at is stamped on first use', async () => {
   const before = (await jfetch('/api/tokens', auth(S.jwt))).body.find(t => t.id === created.body.id);
   assert.equal(before.last_used_at, null, 'a fresh token has no last_used_at');
   await jfetch('/api/playlists', auth(created.body.token)); // use it once
-  const after = (await jfetch('/api/tokens', auth(S.jwt))).body.find(t => t.id === created.body.id);
+  // The app stamps last_used_at fire-and-forget (middleware/apiToken.js touchLastUsed), so
+  // the response can arrive before the UPDATE lands: poll (50ms, up to ~3s) before asserting.
+  let after;
+  for (let i = 0; i < 60; i++) {
+    after = (await jfetch('/api/tokens', auth(S.jwt))).body.find(t => t.id === created.body.id);
+    if (after.last_used_at) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
   assert.ok(after.last_used_at, 'last_used_at is set after first use');
 });
 
