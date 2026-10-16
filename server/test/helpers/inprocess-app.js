@@ -93,6 +93,12 @@ async function startInProcessApp({ only } = {}) {
   // Same auto-logger server.js mounts before the workspace routes.
   app.use(activityLogger);
 
+  // Public device-render endpoints, as server.js registers them BEFORE their parent
+  // router mounts: they set req._skipAuth so the renderBypass front below lets the
+  // unauthenticated GET through (widgets / kiosk /:id/render).
+  app.get('/api/widgets/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
+  app.get('/api/kiosk/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
+
   for (const r of PUBLIC_ROUTERS) {
     if (!want(r.path)) continue;
     const front = r.renderBypass

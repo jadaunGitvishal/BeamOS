@@ -6,54 +6,25 @@
 // ("org_owner also has billing.write ... not exposed in 2.1"). Both routes
 // now chain resolveTenancy + a canAdminOrg-gated requireBillingOwner.
 //
-// In-memory sqlite + the real stripe router, mounted exactly as server.js
-// mounts it (requireAuth only at the app level - the router does its own
-// resolveTenancy/requireBillingOwner internally, same shape as
-// routes/workspaces.js gating tickets). The 'stripe' package itself is
-// stubbed via require.cache (same technique used for '../db/database' in
-// tickets.test.js/regions.test.js) so a real Stripe secret key/network call
-// is never needed - this tests OUR authorization gate, not Stripe's API.
+// The REAL MySQL test DB (beamos_test via npm test) + the real stripe router, mounted
+// exactly as server.js mounts it (app.use('/api/stripe', router) - each route does its
+// own requireAuth + resolveTenancy + requireBillingOwner). The 'stripe' package itself is
+// stubbed via require.cache so a real Stripe secret key/network call is never needed -
+// this tests OUR authorization gate, not Stripe's API.
+//
+// Fixtures are test-owned (sba- prefix, generated ids), including the plan: the schema's
+// seeded 'pro' plan has no Stripe price ids, so this file adds its own plan with prices
+// (deleted by id afterwards). Deleting the users cascades their orgs and workspaces.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
 
-process.env.JWT_SECRET = 'test-secret-stripe';
+// A fake key so routes/stripe builds its (stubbed) client; read by config at load.
 process.env.STRIPE_SECRET_KEY = 'sk_test_fake_for_rbac_verification';
-
-const db = new Database(':memory:');
-db.function('UNIX_TIMESTAMP', () => Math.floor(Date.now() / 1000));
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
-    auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0,
-    stripe_customer_id TEXT, stripe_subscription_id TEXT, deactivated_at INTEGER
-  );
-  CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL);
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL,
-    slug TEXT, region_id TEXT, updated_at INTEGER DEFAULT 0
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL,
-    joined_at INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE plans (
-    id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
-    stripe_price_monthly TEXT, stripe_price_yearly TEXT
-  );
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = { id: dbModulePath, filename: dbModulePath, loaded: true, exports: { db } };
 
 // Stub the 'stripe' SDK itself - constructor returns a fake client whose
 // methods return just enough shape for the route handlers to succeed.
+// Installed (with the fake key above) before routes/stripe loads.
 const stripeModulePath = require.resolve('stripe');
 function fakeStripeFactory() {
   return {
@@ -70,65 +41,87 @@ function fakeStripeFactory() {
 }
 require.cache[stripeModulePath] = { id: stripeModulePath, filename: stripeModulePath, loaded: true, exports: fakeStripeFactory };
 
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers } = require('./helpers/disposable');
 
-// --- fixtures --------------------------------------------------------
-// org-a: owner u-orgowner (org_owner, no direct workspace_members row - acts
-// in via the org path, exactly how a real org_owner reaches a workspace they
-// didn't personally join). ws-a carries the workspace-tier roles under test.
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-plat','plat@t.test','platform_admin')").run();
-// stripe_customer_id is set here deliberately, to demonstrate the separate
-// pre-existing bug documented on the /portal test below: requireAuth never
-// selects this column, so it's undefined on req.user regardless of what's
-// actually in this row.
-db.prepare("INSERT INTO users (id,email,role,stripe_customer_id) VALUES ('u-orgowner','orgowner@t.test','user','cus_preexisting')").run();
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-wsadmin','wsadmin@t.test','user')").run();
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-editor','editor@t.test','user')").run();
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-viewer','viewer@t.test','user')").run();
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-other','other@t.test','user')").run(); // ws-b admin, different org
-db.prepare("INSERT INTO users (id,email,role) VALUES ('u-nobody','nobody@t.test','user')").run(); // no org, no workspace at all
-
-db.prepare("INSERT INTO organizations (id,name,owner_user_id) VALUES ('org-a','Org A','u-orgowner')").run();
-db.prepare("INSERT INTO organizations (id,name,owner_user_id) VALUES ('org-b','Org B','u-other')").run();
-db.prepare("INSERT INTO organization_members (organization_id,user_id,role) VALUES ('org-a','u-orgowner','org_owner')").run();
-db.prepare("INSERT INTO organization_members (organization_id,user_id,role) VALUES ('org-b','u-other','org_owner')").run();
-
-db.prepare("INSERT INTO workspaces (id,organization_id,name) VALUES ('ws-a','org-a','WS A')").run();
-db.prepare("INSERT INTO workspaces (id,organization_id,name) VALUES ('ws-b','org-b','WS B')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-a','u-wsadmin','workspace_admin')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-a','u-editor','workspace_editor')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-a','u-viewer','workspace_viewer')").run();
-db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws-b','u-other','workspace_admin')").run();
-
-db.prepare("INSERT INTO plans (id,display_name,stripe_price_monthly,stripe_price_yearly) VALUES ('pro','Pro','price_pro_monthly','price_pro_yearly')").run();
-
-// Tokens carry a real current_workspace_id, mirroring what a real login/
-// workspace-switch actually mints (unlike some older RBAC test files here
-// that pass null) - org_owner's JWT points at ws-a even though they have no
-// workspace_members row there, exactly like acting-as in the live app.
-const tok = (id, wsId) => generateToken(db.prepare('SELECT id,email,role FROM users WHERE id = ?').get(id), wsId || null);
-const T = {
-  plat: tok('u-plat', null),
-  orgOwner: tok('u-orgowner', 'ws-a'),
-  wsAdmin: tok('u-wsadmin', 'ws-a'),
-  editor: tok('u-editor', 'ws-a'),
-  viewer: tok('u-viewer', 'ws-a'),
-  other: tok('u-other', 'ws-b'),
-  nobody: tok('u-nobody', null),
+const P = `sba-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const U = {
+  plat: id('u-plat'), orgOwner: id('u-orgowner'), wsAdmin: id('u-wsadmin'), editor: id('u-editor'),
+  viewer: id('u-viewer'), other: id('u-other'), nobody: id('u-nobody'),
 };
+const ID = { orgA: id('org-a'), orgB: id('org-b'), wsA: id('ws-a'), wsB: id('ws-b'), plan: id('pro') };
 
-const app = express();
-app.use(express.json());
-app.use('/api/stripe', requireAuth, require('../routes/stripe'));
-app.use((err, req, res, _next) => { res.status(500).json({ error: err.message, stack: err.stack }); });
-const server = app.listen(0);
+let app;
 let base;
+const T = {};
+
 test.before(async () => {
-  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-  base = `http://127.0.0.1:${server.address().port}`;
+  app = await startInProcessApp({ only: [] });
+  app.app.use('/api/stripe', require('../routes/stripe'));
+  base = app.base;
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+
+  // --- fixtures --------------------------------------------------------
+  // org-a: owner u-orgowner (org_owner, no direct workspace_members row - acts
+  // in via the org path, exactly how a real org_owner reaches a workspace they
+  // didn't personally join). ws-a carries the workspace-tier roles under test.
+  const user = "INSERT INTO users (id, email, role, password_hash, auth_provider, stripe_customer_id) VALUES (?, ?, ?, NULL, 'local', ?)";
+  await run(user, U.plat, `${P}-plat@t.test`, 'platform_admin', null);
+  // stripe_customer_id is set here deliberately, to demonstrate the separate
+  // pre-existing bug documented on the /portal test below: requireAuth never
+  // selects this column, so it's undefined on req.user regardless of what's
+  // actually in this row.
+  await run(user, U.orgOwner, `${P}-orgowner@t.test`, 'user', 'cus_preexisting');
+  await run(user, U.wsAdmin, `${P}-wsadmin@t.test`, 'user', null);
+  await run(user, U.editor, `${P}-editor@t.test`, 'user', null);
+  await run(user, U.viewer, `${P}-viewer@t.test`, 'user', null);
+  await run(user, U.other, `${P}-other@t.test`, 'user', null); // ws-b admin, different org
+  await run(user, U.nobody, `${P}-nobody@t.test`, 'user', null); // no org, no workspace at all
+
+  const org = "INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')";
+  await run(org, ID.orgA, `${P} Org A`, U.orgOwner);
+  await run(org, ID.orgB, `${P} Org B`, U.other);
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", ID.orgA, U.orgOwner);
+  await run("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_owner')", ID.orgB, U.other);
+
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsA, ID.orgA, 'WS A');
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.wsB, ID.orgB, 'WS B');
+  const wm = 'INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)';
+  await run(wm, ID.wsA, U.wsAdmin, 'workspace_admin');
+  await run(wm, ID.wsA, U.editor, 'workspace_editor');
+  await run(wm, ID.wsA, U.viewer, 'workspace_viewer');
+  await run(wm, ID.wsB, U.other, 'workspace_admin');
+
+  await run("INSERT INTO plans (id, name, display_name, stripe_price_monthly, stripe_price_yearly) VALUES (?, ?, 'Pro', 'price_pro_monthly', 'price_pro_yearly')", ID.plan, ID.plan);
+
+  // Tokens carry a real current_workspace_id, mirroring what a real login/
+  // workspace-switch actually mints (unlike some older RBAC test files here
+  // that pass null) - org_owner's JWT points at ws-a even though they have no
+  // workspace_members row there, exactly like acting-as in the live app.
+  const tok = async (uid, wsId) => generateToken(await db.prepare('SELECT id, email, role FROM users WHERE id = ?').get(uid), wsId || null);
+  T.plat = await tok(U.plat, null);
+  T.orgOwner = await tok(U.orgOwner, ID.wsA);
+  T.wsAdmin = await tok(U.wsAdmin, ID.wsA);
+  T.editor = await tok(U.editor, ID.wsA);
+  T.viewer = await tok(U.viewer, ID.wsA);
+  T.other = await tok(U.other, ID.wsB);
+  T.nobody = await tok(U.nobody, null);
 });
-test.after(() => { server.close(); db.close(); });
+
+test.after(async () => {
+  try {
+    if (app) {
+      await db.prepare('DELETE FROM plans WHERE id = ?').run(ID.plan);
+      // Members before owners: an org owner is deletable once its other members are gone.
+      await cleanupUsers(db, [U.nobody, U.viewer, U.editor, U.wsAdmin, U.plat, U.other, U.orgOwner]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
 
 const call = (path, token, body) =>
   fetch(base + '/api/stripe' + path, {
@@ -140,7 +133,7 @@ const call = (path, token, body) =>
 // -------------------------------------------------------------------
 
 test('RBAC matrix: /checkout - full role sweep', async () => {
-  const body = { plan_id: 'pro', interval: 'monthly' };
+  const body = { plan_id: ID.plan, interval: 'monthly' };
 
   // Positive cases.
   const owner = await call('/checkout', T.orgOwner, body);
@@ -211,7 +204,7 @@ test('real org_owner flow is not broken: checkout genuinely succeeds end to end'
   // one role that should be able to do this at all. Uses the real
   // requireAuth (not a stub), so this reflects exactly what a live org_owner
   // session gets back.
-  const checkout = await call('/checkout', T.orgOwner, { plan_id: 'pro', interval: 'yearly' });
+  const checkout = await call('/checkout', T.orgOwner, { plan_id: ID.plan, interval: 'yearly' });
   assert.equal(checkout.status, 200);
   const checkoutBody = await checkout.json();
   assert.equal(checkoutBody.type, 'checkout');

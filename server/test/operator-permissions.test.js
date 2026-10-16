@@ -8,122 +8,91 @@
 //   (a) operator CAN update/delete a workspace-scoped content row, and
 //   (b) operator CANNOT update/delete a shared (workspace_id IS NULL) row.
 //
-// Same isolated-in-memory-DB harness as admin-users.test.js: inject the DB into
-// the require cache before any module that pulls ../db/database loads. Node v20
-// built-ins only. (node --test runs each file in its own process, so this
-// injection does not collide with the other suite's.)
+// The REAL content router behind bearerAuth + resolveTenancy (helpers/inprocess-app.js)
+// against the REAL MySQL test DB (beamos_test via npm test). Fixtures are test-owned
+// (opp- prefix, generated ids). The shared content row has no workspace, so it is deleted
+// by id; deleting the org owner cascades the org, workspace and its content.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
+const { db } = require('../db/database');
+const { generateToken } = require('../middleware/auth');
+const { startInProcessApp } = require('./helpers/inprocess-app');
+const { randTag, cleanupUsers, cleanupContent } = require('./helpers/disposable');
 
-process.env.JWT_SECRET = 'test-secret-operator-perms';
-
-const db = new Database(':memory:');
-db.pragma('foreign_keys = ON');
-db.exec(`
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL DEFAULT '',
-    password_hash TEXT, auth_provider TEXT NOT NULL DEFAULT 'local', avatar_url TEXT,
-    role TEXT NOT NULL DEFAULT 'user', plan_id TEXT DEFAULT 'free', email_alerts INTEGER DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')), deactivated_at INTEGER
-  );
-  CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL, slug TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-  );
-  CREATE TABLE organization_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, UNIQUE(organization_id, user_id)
-  );
-  CREATE TABLE workspace_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    role TEXT NOT NULL, joined_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    UNIQUE(workspace_id, user_id)
-  );
-  CREATE TABLE content (
-    id TEXT PRIMARY KEY, filename TEXT NOT NULL, filepath TEXT NOT NULL, mime_type TEXT NOT NULL,
-    file_size INTEGER NOT NULL, duration_sec REAL, thumbnail_path TEXT, width INTEGER, height INTEGER,
-    remote_url TEXT, user_id TEXT, folder TEXT, folder_id TEXT, workspace_id TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-  );
-  -- Empty, but the DELETE handler queries these for playlist cleanup.
-  CREATE TABLE devices (id TEXT PRIMARY KEY, playlist_id TEXT);
-  CREATE TABLE playlists (id TEXT PRIMARY KEY, workspace_id TEXT, published_snapshot TEXT);
-  CREATE TABLE playlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id TEXT, content_id TEXT);
-`);
-
-const dbModulePath = require.resolve('../db/database');
-require.cache[dbModulePath] = {
-  id: dbModulePath, filename: dbModulePath, loaded: true,
-  exports: { db, pruneTelemetry() {}, pruneScreenshots() {} },
-};
-
-const express = require('express');
-const { generateToken, requireAuth } = require('../middleware/auth');
-const { resolveTenancy } = require('../lib/tenancy');
-const contentRouter = require('../routes/content');
-
-// Seed: org + workspace, a platform_operator user, and two content rows.
-db.prepare("INSERT INTO workspaces (id, organization_id, name) VALUES ('ws-a','org-a','Workspace A')").run();
-db.prepare("INSERT INTO users (id, email, role) VALUES ('u-op','op@test.local','platform_operator')").run();
-const operator = { id: 'u-op', email: 'op@test.local', role: 'platform_operator' };
-// JWT carries current_workspace_id so resolveTenancy lands the operator (acting-as) in ws-a.
-const opToken = generateToken(operator, 'ws-a');
+const P = `opp-${randTag()}`;
+const id = (name) => `${P}-${name}`;
+const ID = { owner: id('owner'), op: id('u-op'), org: id('org-a'), ws: id('ws-a') };
 
 const wsContentId = uuidv4();
 const sharedContentId = uuidv4();
-function seedContent(id, workspaceId) {
-  db.prepare(`INSERT INTO content (id, filename, filepath, mime_type, file_size, workspace_id)
-              VALUES (?, 'orig.png', '/does/not/exist.png', 'image/png', 123, ?)`).run(id, workspaceId);
-}
-seedContent(wsContentId, 'ws-a');     // workspace-scoped
-seedContent(sharedContentId, null);   // shared / platform-global (workspace_id IS NULL)
-
-const app = express();
-app.use(express.json());
-app.use('/api/content', requireAuth, resolveTenancy, contentRouter);
-const server = app.listen(0);
+let app;
 let base;
-test.before(async () => {
-  await new Promise(r => server.listening ? r() : server.once('listening', r));
-  base = `http://127.0.0.1:${server.address().port}`;
-});
-test.after(() => { server.close(); db.close(); });
+let opToken;
 
-const op = (method, id, body) => fetch(`${base}/api/content/${id}`, {
+test.before(async () => {
+  app = await startInProcessApp({ only: ['/api/content'] });
+  base = app.base;
+  const run = (sql, ...p) => db.prepare(sql).run(...p);
+  // Seed: org + workspace (owned by a plain user), a platform_operator user, and two content rows.
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'user', NULL, 'local')", ID.owner, `${P}-owner@test.local`);
+  await run("INSERT INTO users (id, email, role, password_hash, auth_provider) VALUES (?, ?, 'platform_operator', NULL, 'local')", ID.op, `${P}-op@test.local`);
+  await run("INSERT INTO organizations (id, name, owner_user_id, plan_id, subscription_status) VALUES (?, ?, ?, 'enterprise', 'active')", ID.org, `${P} Org A`, ID.owner);
+  await run('INSERT INTO workspaces (id, organization_id, name) VALUES (?, ?, ?)', ID.ws, ID.org, 'Workspace A');
+  // JWT carries current_workspace_id so resolveTenancy lands the operator (acting-as) in ws-a.
+  opToken = generateToken({ id: ID.op, email: `${P}-op@test.local`, role: 'platform_operator' }, ID.ws);
+
+  const seedContent = (cid, workspaceId) => run(
+    `INSERT INTO content (id, filename, filepath, mime_type, file_size, workspace_id)
+     VALUES (?, 'orig.png', '/does/not/exist.png', 'image/png', 123, ?)`, cid, workspaceId);
+  await seedContent(wsContentId, ID.ws); // workspace-scoped
+  await seedContent(sharedContentId, null); // shared / platform-global (workspace_id IS NULL)
+});
+
+test.after(async () => {
+  try {
+    if (app) {
+      await cleanupContent(db, [sharedContentId, wsContentId]);
+      await cleanupUsers(db, [ID.op, ID.owner]);
+    }
+  } finally {
+    if (app) await app.stop(); else await db.close();
+  }
+});
+
+const op = (method, cid, body) => fetch(`${base}/api/content/${cid}`, {
   method,
   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${opToken}` },
   ...(body ? { body: JSON.stringify(body) } : {}),
 });
+const contentRow = (cid) => db.prepare('SELECT filename FROM content WHERE id = ?').get(cid);
 
 // (a) Proves the operator's cross-org write actually works (so (b) isn't just
 // "operator can't write anything").
 test('operator CAN update a workspace-scoped content row', async () => {
   const res = await op('PUT', wsContentId, { filename: 'renamed.png' });
   assert.equal(res.status, 200);
-  assert.equal(db.prepare('SELECT filename FROM content WHERE id=?').get(wsContentId).filename, 'renamed.png');
+  assert.equal((await contentRow(wsContentId)).filename, 'renamed.png');
 });
 
 // (b) The separate PLATFORM_ROLES gate on workspace_id IS NULL must deny operator.
 test('operator CANNOT update a shared (workspace_id IS NULL) content row -> 403', async () => {
   const res = await op('PUT', sharedContentId, { filename: 'hijacked.png' });
   assert.equal(res.status, 403);
-  assert.equal(db.prepare('SELECT filename FROM content WHERE id=?').get(sharedContentId).filename, 'orig.png',
+  assert.equal((await contentRow(sharedContentId)).filename, 'orig.png',
     'shared row must be unchanged');
 });
 
 test('operator CANNOT delete a shared (workspace_id IS NULL) content row -> 403', async () => {
   const res = await op('DELETE', sharedContentId);
   assert.equal(res.status, 403);
-  assert.ok(db.prepare('SELECT 1 FROM content WHERE id=?').get(sharedContentId), 'shared row must still exist');
+  assert.ok(await contentRow(sharedContentId), 'shared row must still exist');
 });
 
 // Delete last so the workspace-scoped row survives the update assertion above.
 test('operator CAN delete a workspace-scoped content row', async () => {
   const res = await op('DELETE', wsContentId);
   assert.equal(res.status, 200);
-  assert.ok(!db.prepare('SELECT 1 FROM content WHERE id=?').get(wsContentId), 'workspace row deleted');
+  assert.ok(!(await contentRow(wsContentId)), 'workspace row deleted');
 });
