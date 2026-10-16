@@ -111,7 +111,13 @@ function serializeCode(row) {
 // (`auditFields(row)` -> auditInTx) commit together, so no code exists without its row
 // (an audit failure throws AuditUnavailableError: 503, no code). A duplicate code rolls
 // back only that attempt.
-async function mintCode({ workspaceId, plannedName, createdBy, auditFields }) {
+// `replaceId` (regenerate): the code being replaced. Its row is locked first, in the same
+// transaction, and must still be 'unused'; it is then marked 'replaced' (kept as a record,
+// no longer claimable) as the new code is inserted - so there is never a moment with zero
+// or two live codes, and a concurrent regenerate of the same code waits here and then
+// finds it replaced. Returns { refused: 'not_found' | 'not_unused', status } instead of
+// a row when the old code is gone or no longer unused.
+async function mintCode({ workspaceId, plannedName, createdBy, auditFields, replaceId = null }) {
   const now = Math.floor(Date.now() / 1000);
   for (let attempt = 0; attempt < GEN_MAX_ATTEMPTS; attempt++) {
     const code = String(CODE_MIN + crypto.randomInt(CODE_SPAN));
@@ -121,19 +127,28 @@ async function mintCode({ workspaceId, plannedName, createdBy, auditFields }) {
     if (clash) continue;
     const id = crypto.randomUUID();
     const expiresAt = now + CODE_TTL_SECONDS;
+    let refused = null;
     try {
-      await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+      refused = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        if (replaceId) {
+          const old = await tx.prepare('SELECT status FROM registration_codes WHERE id = ? FOR UPDATE').get(replaceId);
+          if (!old) return { refused: 'not_found' };
+          if (old.status !== 'unused') return { refused: 'not_unused', status: old.status };
+          await tx.prepare("UPDATE registration_codes SET status = 'replaced' WHERE id = ?").run(replaceId);
+        }
         await tx.prepare(`
           INSERT INTO registration_codes (id, code, workspace_id, planned_device_name, status, created_by, created_at, expires_at)
           VALUES (?, ?, ?, ?, 'unused', ?, ?, ?)
         `).run(id, code, workspaceId, plannedName, createdBy, now, expiresAt);
         await auditInTx(tx, auditFields({ id, workspace_id: workspaceId, planned_device_name: plannedName, expires_at: expiresAt }));
+        return null;
       })());
     } catch (e) {
       // MySQL: ER_DUP_ENTRY. better-sqlite3 (tests): SQLITE_CONSTRAINT_UNIQUE.
       if (e.code === 'ER_DUP_ENTRY' || /duplicate entry|unique/i.test(e.message || '')) continue;
       throw e;
     }
+    if (refused) return refused;
     return db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(id);
   }
   return null;
@@ -164,27 +179,36 @@ router.post('/registration-codes', asyncHandler(async (req, res) => {
 }));
 
 // POST /api/provisioning/registration-codes/:id/regenerate
-// -> mints a FRESH code (+ new 30-day expiry) reusing the old row's workspace and
-// planned_device_name, so staff don't re-fill the form when a code lapsed unused.
-// The old row is left exactly as it is (expired, unused) for the audit trail.
+// -> REPLACES the code: mints a FRESH code (+ new 30-day expiry) reusing the old row's
+// workspace and planned_device_name, so staff don't re-fill the form when a code lapsed
+// unused. The old row is kept for the records but marked 'replaced' in the same
+// transaction (mintCode replaceId), so it can't be claimed any more. A code that is no
+// longer unused (claimed, or already replaced by a concurrent regenerate) -> 409; a code
+// deleted meanwhile -> 404.
 router.post('/registration-codes/:id/regenerate', asyncHandler(async (req, res) => {
   const old = await db.prepare('SELECT * FROM registration_codes WHERE id = ?').get(req.params.id);
   if (!old) return res.status(404).json({ error: 'Registration code not found' });
   const ws = await loadAdminWorkspace(req, res, old.workspace_id);
   if (!ws) return;
   // Only an UNUSED code can be regenerated - a claimed code already has its device.
-  if (old.status !== 'unused') {
-    return res.status(409).json({ error: 'That code was already claimed by a device and cannot be regenerated.' });
-  }
+  const notUnused = (status) => res.status(409).json({
+    error: status === 'replaced'
+      ? 'That code was already replaced by a newer code.'
+      : 'That code was already claimed by a device and cannot be regenerated.',
+  });
+  if (old.status !== 'unused') return notUnused(old.status);
   const row = await mintCode({
     workspaceId: old.workspace_id,
     plannedName: old.planned_device_name || null,
     createdBy: req.user.id,
     auditFields: (r) => codeAuditFields(req, 'registration_code_regenerated', r, ws, old.id),
+    replaceId: old.id,
   });
   if (!row) {
     return res.status(503).json({ error: 'Could not allocate a unique code, please retry' });
   }
+  if (row.refused === 'not_found') return res.status(404).json({ error: 'Registration code not found' });
+  if (row.refused) return notUnused(row.status);
   res.status(201).json(serializeCode(row));
 }));
 

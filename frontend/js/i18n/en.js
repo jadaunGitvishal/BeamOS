@@ -508,6 +508,7 @@ export default {
   "provisioning.col_actions": "Actions",
   "provisioning.status_unused": "Unused",
   "provisioning.status_claimed": "Claimed",
+  "provisioning.status_replaced": "Replaced",
   "provisioning.status_expired": "Expired",
   "provisioning.show_qr": "Show QR",
   "provisioning.qr_alt": "QR code for {code}",

@@ -10,6 +10,10 @@
 //   - codes are scoped to the workspace they were minted for
 //   - RBAC: only workspace_admin and above can generate / list codes
 //   - the QR endpoint returns a valid PNG that DECODES to the /activate/<code> URL
+//   - regenerate REPLACES a code: the old row is kept but marked 'replaced' (the device
+//     claim endpoint - the real claimRouter on a small app of its own, since the JWT-only
+//     /api/provisioning mount would sit in front of it here - refuses it), and two
+//     concurrent regenerates of one code leave exactly one live code
 //
 // Fixtures are test-owned (rc- prefix, generated ids) and removed afterwards:
 // registration_codes.created_by has no ON DELETE action, so this file's codes are
@@ -21,6 +25,7 @@ const sharp = require('sharp');
 const jsQR = require('jsqr');
 const { db } = require('../db/database');
 const { generateToken } = require('../middleware/auth');
+const express = require('express');
 const { startInProcessApp } = require('./helpers/inprocess-app');
 const { randTag, cleanupUsers } = require('./helpers/disposable');
 
@@ -31,9 +36,18 @@ const U = {};
 const tok = {};
 const userIds = [];
 let app;
+let claimServer;
+let claimBase;
 
 test.before(async () => {
   app = await startInProcessApp({ only: ['/api/provisioning'] });
+  // The public device claim endpoint, mounted as server.js does (no auth).
+  const claimApp = express();
+  claimApp.use(express.json());
+  claimApp.use('/claim', require('../routes/registration-codes').claimRouter);
+  claimServer = claimApp.listen(0);
+  await new Promise((r) => (claimServer.listening ? r() : claimServer.once('listening', r)));
+  claimBase = `http://127.0.0.1:${claimServer.address().port}`;
   const run = (sql, ...p) => app.db.prepare(sql).run(...p);
 
   // --- Seed: two orgs / workspaces, and a user at every role tier ---
@@ -68,6 +82,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
+  if (claimServer) await new Promise((r) => claimServer.close(r));
   try {
     if (app) {
       await app.db.prepare('DELETE FROM registration_codes WHERE workspace_id IN (?, ?)').run(ID.wsA, ID.wsB);
@@ -90,6 +105,9 @@ const postJson = (token, body) => ({
   body: JSON.stringify(body),
 });
 const codes = () => `${app.base}/api/provisioning/registration-codes`;
+const claim = (code) => fetch(`${claimBase}/claim`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }),
+});
 
 test('generate: workspace_admin mints a 6-digit unused code, persisted + scoped', async () => {
   const res = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA, planned_device_name: '  Lobby screen  ' }));
@@ -144,7 +162,7 @@ test('list: an unused code past expires_at is reported expired:true', async () =
   assert.equal(row.expired, true);
 });
 
-test('regenerate: expired unused code -> fresh code + expiry, old row untouched (audit trail)', async () => {
+test('regenerate: expired unused code -> fresh code + expiry, old row kept as \'replaced\' (audit trail)', async () => {
   const mk = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA, planned_device_name: 'Warehouse gate' }));
   const oldRow = await mk.json();
   // Age it out.
@@ -164,20 +182,47 @@ test('regenerate: expired unused code -> fresh code + expiry, old row untouched 
   assert.equal(fresh.expired, false);
   assert.ok(fresh.expires_at > t0 + 29 * 24 * 60 * 60, 'fresh 30-day expiry');
 
-  // Old row is NOT deleted and NOT mutated - still unused, still with its stale expiry.
+  // Old row is NOT deleted - kept for the records - but replaced: no longer claimable.
   const stillThere = await codeRow(oldRow.id);
   assert.ok(stillThere, 'old row kept for the audit trail');
-  assert.equal(stillThere.status, 'unused');
+  assert.equal(stillThere.status, 'replaced');
   assert.equal(stillThere.expires_at, staleExpiry, 'old expiry unchanged');
   assert.equal(stillThere.code, oldRow.code);
 });
 
-test('regenerate: works on a still-valid unused code too', async () => {
+test('regenerate replaces a still-valid code: the old one can no longer be claimed, the new one can', async () => {
   const mk = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA }));
   const oldRow = await mk.json();
   const regen = await fetch(`${codes()}/${oldRow.id}/regenerate`, postJson(tok.admin, {}));
   assert.equal(regen.status, 201);
-  assert.notEqual((await regen.json()).code, oldRow.code);
+  const fresh = await regen.json();
+  assert.notEqual(fresh.code, oldRow.code);
+
+  const oldClaim = await claim(oldRow.code);
+  assert.equal(oldClaim.status, 409, 'the replaced code is refused');
+  assert.equal((await oldClaim.json()).error, 'That activation code is no longer available.');
+  const listed = await fetch(`${codes()}?workspace_id=${ID.wsA}`, authed(tok.admin)).then((r) => r.json());
+  assert.equal(listed.find((c) => c.id === oldRow.id).status, 'replaced');
+
+  const newClaim = await claim(fresh.code);
+  assert.equal(newClaim.status, 201, 'the new code works');
+  assert.equal((await codeRow(fresh.id)).status, 'claimed');
+});
+
+test('regenerate: two concurrent regenerates of one code -> one 201, one 409, exactly one live code', async () => {
+  const name = `${P} race ${randTag()}`;
+  const mk = await fetch(codes(), postJson(tok.admin, { workspace_id: ID.wsA, planned_device_name: name }));
+  const oldRow = await mk.json();
+  const results = await Promise.all([1, 2].map(() => fetch(`${codes()}/${oldRow.id}/regenerate`, postJson(tok.admin, {}))
+    .then(async (r) => ({ status: r.status, body: await r.json() }))));
+  assert.deepEqual(results.map((r) => r.status).sort(), [201, 409], JSON.stringify(results));
+  assert.equal(results.find((r) => r.status === 409).body.error, 'That code was already replaced by a newer code.');
+  const rows = await app.db.prepare('SELECT id, status FROM registration_codes WHERE planned_device_name = ?').all(name);
+  assert.deepEqual(rows.filter((r) => r.status === 'unused').map((r) => r.id), [results.find((r) => r.status === 201).body.id], 'one live code');
+  assert.equal(rows.find((r) => r.id === oldRow.id).status, 'replaced');
+  assert.equal(rows.length, 2);
+  const audited = await app.db.prepare("SELECT details FROM activity_log WHERE action = 'registration_code_regenerated' AND details LIKE ?").all(`%, from: ${oldRow.id}`);
+  assert.equal(audited.length, 1, 'exactly one registration_code_regenerated row names the old code');
 });
 
 test('regenerate: a claimed code cannot be regenerated (409)', async () => {

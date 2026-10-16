@@ -714,6 +714,9 @@ export async function render(container) {
       if (c.status === "claimed") {
         label = t("provisioning.status_claimed");
         color = "var(--text-muted)";
+      } else if (c.status === "replaced") {
+        label = t("provisioning.status_replaced");
+        color = "var(--text-muted)";
       } else if (c.expired) {
         label = t("provisioning.status_expired");
         color = "var(--danger)";
