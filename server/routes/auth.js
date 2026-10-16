@@ -18,7 +18,8 @@ const {
   ACCOUNT_DEACTIVATED_MESSAGE,
 } = require("../middleware/auth");
 const { resolveTenancy, accessContext, accessibleWorkspaceIds } = require("../lib/tenancy");
-const { logActivity, auditOrWarn, auditInTx, getClientIp, auditRead } = require("../services/activity");
+const { logActivity, auditOrWarn, auditInTx, AuditUnavailableError, getClientIp, auditRead } = require("../services/activity");
+const { isPlatformDemotion } = require("../lib/grant-direction"); // Phase 1C
 const { maskPhone } = require("../lib/mask");
 const totp = require("../lib/totp");
 const totpLockout = require("../lib/totp-lockout");
@@ -63,8 +64,11 @@ const ROLE_SYNC_FAILED = {
 // returned (idempotent). When allowCreate is false and the user has no
 // membership, returns null - the caller is created org-less and an admin /
 // operator assigns them to a workspace afterward.
-async function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
-  const existing = await db
+// Phase 1C: `tx` - run on the caller's transaction (account creation: the user, their org
+// and the audit row commit together) instead of a transaction of its own.
+async function ensureDefaultOrgForUser(user, { allowCreate = true, tx = null } = {}) {
+  const h = tx || db;
+  const existing = await h
     .prepare(
       `
     SELECT w.id FROM workspaces w
@@ -79,13 +83,13 @@ async function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
   // a field_technician, an org admin of someone else's org, ...) is never minted a
   // personal org. They land in the first workspace they can reach - their own
   // membership-based access, never platform-wide - or in none.
-  const anyOrg = await db
+  const anyOrg = await h
     .prepare("SELECT 1 AS hit FROM organization_members WHERE user_id = ? LIMIT 1")
     .get(user.id);
   if (anyOrg) {
     const ids = await accessibleWorkspaceIds(user.id, "user");
     if (!ids.length) return null;
-    const first = await db
+    const first = await h
       .prepare(`SELECT id FROM workspaces WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY name, id LIMIT 1`)
       .get(...ids);
     return first ? first.id : null;
@@ -101,7 +105,7 @@ async function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
       : `${user.email}'s organization`;
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
   // must be prepared from it, not the outer db, to actually participate in the transaction.
-  const tx = db.transaction(async (t) => {
+  const mint = async (t) => {
     await t.prepare(
       `INSERT INTO organizations (
       id, name, owner_user_id, plan_id,
@@ -127,10 +131,45 @@ async function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
     await t.prepare(
       `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')`,
     ).run(wsId, user.id);
-  });
-  await tx();
+  };
+  if (tx) await mint(tx);
+  else await db.transaction(mint)();
   return wsId;
 }
+
+// Phase 1C: a new account - by registration or a first Google / Microsoft sign-in - is
+// created in ONE transaction:
+//   1. the platform-admins lock (lib/platform-admin-guard.js; it must be the first
+//      statement), so concurrent creations are decided one at a time;
+//   2. the user count, read under that lock: the FIRST account on an install becomes
+//      platform_admin - exactly one, however many sign up at once - and, when public
+//      registration is disabled, only that first account may be created;
+//   3. the users row (`insertUser(tx, id, role)`), the optional personal org / workspace
+//      (`allowOrg(isFirst)`, via ensureDefaultOrgForUser on the same transaction);
+//   4. the audit row (`auditFields({ user, role, org, workspaceId })`), last.
+// No audit row, no account: auditInTx throws AuditUnavailableError (503). Returns
+// { refused: true } when registration is closed, else { user, role, org, workspaceId }.
+// A duplicate email (lost race) surfaces as the INSERT's duplicate-key error.
+async function createAccountTx({ insertUser, allowOrg, auditFields }) {
+  return db.retryOnDeadlock(() => db.transaction(async (tx) => {
+    await lockPlatformAdmins(tx);
+    const count = Number((await tx.prepare("SELECT COUNT(*) AS count FROM users").get()).count);
+    if (config.disableRegistration && count > 0) return { refused: true };
+    const isFirst = count === 0;
+    const role = isFirst ? "platform_admin" : "user";
+    const id = uuidv4();
+    await insertUser(tx, id, role);
+    const user = await tx.prepare("SELECT * FROM users WHERE id = ?").get(id);
+    const workspaceId = await ensureDefaultOrgForUser(user, { allowCreate: allowOrg(isFirst), tx });
+    const org = workspaceId
+      ? await tx.prepare("SELECT id, name FROM organizations WHERE owner_user_id = ? LIMIT 1").get(id)
+      : null;
+    await auditInTx(tx, auditFields({ user, role, org, workspaceId }));
+    return { user, role, org, workspaceId };
+  })());
+}
+const REGISTRATION_DISABLED = { error: "Public registration is disabled. Contact your administrator." };
+const auditUnavailable = (res, err) => res.status(err.status).json({ error: err.message, code: err.code });
 
 async function logFailedLogin(email, ip, reason) {
   // Ref 17: via logActivity so it lands in the tamper-evident hash chain like
@@ -190,70 +229,61 @@ router.post("/register", asyncHandler(async (req, res) => {
   if (existing)
     return res.status(409).json({ error: "Email already registered" });
 
-  const id = uuidv4();
   const passwordHash = bcrypt.hashSync(password, 10);
-
-  // First user becomes platform_admin with enterprise plan (self-hosted) or free plan with Pro trial.
-  // Phase 1 renamed the legacy 'superadmin' role to 'platform_admin'; new bootstrap users get the new name directly.
-  const userCount = (await db
-    .prepare("SELECT COUNT(*) as count FROM users")
-    .get()).count;
-  const role = userCount === 0 ? "platform_admin" : "user";
-  const isFirstUser = userCount === 0;
   // const plan = isFirstUser && config.selfHosted ? "enterprise" : "pro"; // Start on Pro trial
   const plan = "enterprise"; // Every account is enterprise for BeamOS
   // const trialStarted =
   //   isFirstUser && config.selfHosted ? null : Math.floor(Date.now() / 1000);
   const trialStarted = null; // BeamOS: no trial countdown, enterprise is permanent
 
-  await db.prepare(
-    `
-    INSERT INTO users (id, email, name, password_hash, auth_provider, role, plan_id, trial_started, trial_plan)
-    VALUES (?, ?, ?, ?, 'local', ?, ?, ?, ?)
-  `,
-  ).run(
-    id,
-    email.toLowerCase(),
-    name || email.split("@")[0],
-    passwordHash,
-    role,
-    plan,
-    trialStarted,
-    trialStarted ? "pro" : null,
-  );
-
-  const user = await db
-    .prepare(
-      "SELECT id, email, name, role, auth_provider, avatar_url, plan_id, stripe_customer_id, stripe_subscription_id, subscription_status, subscription_ends FROM users WHERE id = ?",
-    )
-    .get(id);
+  // First user becomes platform_admin (decided under a lock, see createAccountTx).
+  // Phase 1 renamed the legacy 'superadmin' role to 'platform_admin'; new bootstrap users get the new name directly.
   // #12: org-on-create. Per-request createOrg overrides the deployment default
   // (config.autoCreateOrgOnSignup). The first user is always given an org so a
   // fresh install is never left headless. When neither applies, the user is
   // created org-less and lands on the "no workspaces yet" state until an admin
   // assigns them.
-  const createOrgForUser =
-    isFirstUser ||
-    (createOrg !== undefined ? !!createOrg : config.autoCreateOrgOnSignup);
-  const workspaceId = await ensureDefaultOrgForUser(user, {
-    allowCreate: createOrgForUser,
-  });
+  // Audit: a brand-new user owns an org only if it was just created for them.
+  let created;
+  try {
+    created = await createAccountTx({
+      insertUser: (tx, id, role) => tx.prepare(
+        `
+        INSERT INTO users (id, email, name, password_hash, auth_provider, role, plan_id, trial_started, trial_plan)
+        VALUES (?, ?, ?, ?, 'local', ?, ?, ?, ?)
+      `,
+      ).run(
+        id,
+        email.toLowerCase(),
+        name || email.split("@")[0],
+        passwordHash,
+        role,
+        plan,
+        trialStarted,
+        trialStarted ? "pro" : null,
+      ),
+      allowOrg: (isFirst) => isFirst || (createOrg !== undefined ? !!createOrg : config.autoCreateOrgOnSignup),
+      auditFields: ({ user: u, role, org, workspaceId: ws }) => ({
+        userId: u.id,
+        action: "user_registered",
+        details: `email: ${u.email}, role: ${role}, org_created: ${!!org}` + (org ? `, org: ${org.name} (${org.id})` : ""),
+        ipAddress: getClientIp(req),
+        workspaceId: ws,
+        organizationId: org ? org.id : null,
+      }),
+    });
+  } catch (e) {
+    if (isDuplicateKeyError(e)) return res.status(409).json({ error: "Email already registered" });
+    throw e;
+  }
+  if (created.refused) return res.status(403).json(REGISTRATION_DISABLED);
+  const { workspaceId } = created;
+  const user = await db
+    .prepare(
+      "SELECT id, email, name, role, auth_provider, avatar_url, plan_id, stripe_customer_id, stripe_subscription_id, subscription_status, subscription_ends FROM users WHERE id = ?",
+    )
+    .get(created.user.id);
   const token = generateToken(user, workspaceId);
-
-  // Audit (awaited): a brand-new user owns an org only if it was just created for them.
-  const ownOrg = await db
-    .prepare("SELECT id, name FROM organizations WHERE owner_user_id = ? LIMIT 1")
-    .get(id);
-  await auditOrWarn({
-    userId: id,
-    action: "user_registered",
-    details: `email: ${user.email}, role: ${role}, org_created: ${!!ownOrg}` +
-      (ownOrg ? `, org: ${ownOrg.name} (${ownOrg.id})` : ""),
-    target: id,
-    ipAddress: getClientIp(req),
-    workspaceId,
-    organizationId: ownOrg ? ownOrg.id : null,
-  });
 
   res.status(201).json({ token, user, current_workspace_id: workspaceId });
 
@@ -613,42 +643,40 @@ router.post("/google", async (req, res) => {
           error: "Public registration is disabled. Contact your administrator.",
         });
       }
-      const id = uuidv4();
-      const userCount = (await db
-        .prepare("SELECT COUNT(*) as count FROM users")
-        .get()).count;
-      const role = userCount === 0 ? "platform_admin" : "user";
-      const isFirst = userCount === 0;
       // const plan = isFirst && config.selfHosted ? "enterprise" : "pro";
       const plan = "enterprise";
       // const trialStarted = isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
       const trialStarted = null; // BeamOS: no trial countdown, enterprise is permanent
 
-      await db.prepare(
-        `
-        INSERT INTO users (id, email, name, auth_provider, provider_id, avatar_url, role, plan_id, trial_started, trial_plan)
-        VALUES (?, ?, ?, 'google', ?, ?, ?, ?, ?, ?)
-      `,
-      ).run(
-        id,
-        email.toLowerCase(),
-        name || "",
-        googleId,
-        picture || "",
-        role,
-        plan,
-        trialStarted,
-        trialStarted ? "pro" : null,
-      );
-
-      user = await db.prepare("SELECT * FROM users WHERE id = ?").get(id);
-      await auditOrWarn({
-        userId: id,
-        action: "user_created_sso",
-        details: `email: ${user.email}, provider: google, role: ${role}`,
-        target: id,
-        ipAddress: getClientIp(req),
+      // Phase 1C: user + personal org (when auto-created) + audit row in one transaction;
+      // the first account on an install becomes platform_admin (see createAccountTx).
+      const created = await createAccountTx({
+        insertUser: (tx, id, role) => tx.prepare(
+          `
+          INSERT INTO users (id, email, name, auth_provider, provider_id, avatar_url, role, plan_id, trial_started, trial_plan)
+          VALUES (?, ?, ?, 'google', ?, ?, ?, ?, ?, ?)
+        `,
+        ).run(
+          id,
+          email.toLowerCase(),
+          name || "",
+          googleId,
+          picture || "",
+          role,
+          plan,
+          trialStarted,
+          trialStarted ? "pro" : null,
+        ),
+        allowOrg: () => config.autoCreateOrgOnSignup,
+        auditFields: ({ user: u, role }) => ({
+          userId: u.id,
+          action: "user_created_sso",
+          details: `email: ${u.email}, provider: google, role: ${role}`,
+          ipAddress: getClientIp(req),
+        }),
       });
+      if (created.refused) return res.status(403).json(REGISTRATION_DISABLED);
+      user = created.user;
     } else if (user.auth_provider !== "google") {
       // Existing account with different provider — do NOT silently overwrite auth_provider.
       // If they have a local password, require them to log in locally and link from settings.
@@ -658,18 +686,22 @@ router.post("/google", async (req, res) => {
             "An account with this email already exists. Please log in with your password.",
         });
       }
-      // No password (e.g. Microsoft → Google switch) — allow linking
-      await db.prepare(
-        "UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?",
-      ).run("google", googleId, picture || user.avatar_url, user.id);
+      // No password (e.g. Microsoft → Google switch) — allow linking.
+      // Phase 1C: a new sign-in method is credential issuance - the link and its audit
+      // row commit together (no row, no link: 503).
+      const linked = user;
+      await db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        await tx.prepare(
+          "UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?",
+        ).run("google", googleId, picture || linked.avatar_url, linked.id);
+        await auditInTx(tx, {
+          userId: linked.id,
+          action: "account_linked_google",
+          details: linked.email,
+          ipAddress: getClientIp(req),
+        });
+      })());
       user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
-      await auditOrWarn({
-        userId: user.id,
-        action: "account_linked_google",
-        details: user.email,
-        target: user.id,
-        ipAddress: getClientIp(req),
-      });
     }
 
     const workspaceId = await ensureDefaultOrgForUser(user, {
@@ -682,6 +714,8 @@ router.post("/google", async (req, res) => {
     // Welcome + admin-notify only when this Google login created a new account.
     if (isNewUser) sendSignupEmails(user, req);
   } catch (err) {
+    // Phase 1C: an account / link whose audit row couldn't be written was not created.
+    if (err instanceof AuditUnavailableError) return auditUnavailable(res, err);
     console.error("Google auth error:", err);
     res.status(401).json({ error: "Google authentication failed" });
   }
@@ -799,43 +833,57 @@ router.post("/microsoft", async (req, res) => {
           error: "Public registration is disabled. Contact your administrator.",
         });
       }
-      const id = uuidv4();
-      const userCount = (await db
-        .prepare("SELECT COUNT(*) as count FROM users")
-        .get()).count;
-      const role = userCount === 0 ? "platform_admin" : "user";
-      const isFirst = userCount === 0;
       // const plan = isFirst && config.selfHosted ? "enterprise" : "pro";
       const plan = "enterprise";
       // const trialStarted =
       //   isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
       const trialStarted = null; // BeamOS: no trial countdown, enterprise is permanent
 
-      await db.prepare(
-        `
-        INSERT INTO users (id, email, name, auth_provider, provider_id, role, plan_id, trial_started, trial_plan)
-        VALUES (?, ?, ?, 'microsoft', ?, ?, ?, ?, ?)
-      `,
-      ).run(
-        id,
-        email,
-        name,
-        microsoftId,
-        role,
-        plan,
-        trialStarted,
-        trialStarted ? "pro" : null,
-      );
-
-      user = await db.prepare("SELECT * FROM users WHERE id = ?").get(id);
-      await auditOrWarn({
-        userId: id,
-        action: "user_created_sso",
-        details: `email: ${user.email}, provider: microsoft, role: ${role}`,
-        target: id,
-        ipAddress: getClientIp(req),
+      // Phase 1C: user + personal org (when auto-created) + audit row in one transaction;
+      // the first account on an install becomes platform_admin (see createAccountTx).
+      const created = await createAccountTx({
+        insertUser: (tx, id, role) => tx.prepare(
+          `
+          INSERT INTO users (id, email, name, auth_provider, provider_id, role, plan_id, trial_started, trial_plan)
+          VALUES (?, ?, ?, 'microsoft', ?, ?, ?, ?, ?)
+        `,
+        ).run(
+          id,
+          email,
+          name,
+          microsoftId,
+          role,
+          plan,
+          trialStarted,
+          trialStarted ? "pro" : null,
+        ),
+        // On the tenant-restricted path the Entra role sync below runs first and may give
+        // the user mapped workspaces - then no personal org is minted - so the org is
+        // left to ensureDefaultOrgForUser after the sync, as before.
+        allowOrg: () => !tenantRestricted && config.autoCreateOrgOnSignup,
+        auditFields: ({ user: u, role }) => ({
+          userId: u.id,
+          action: "user_created_sso",
+          details: `email: ${u.email}, provider: microsoft, role: ${role}`,
+          ipAddress: getClientIp(req),
+        }),
       });
+      if (created.refused) return res.status(403).json(REGISTRATION_DISABLED);
+      user = created.user;
     } else if (user.auth_provider !== "microsoft") {
+      // Phase 1C: linking Microsoft as a sign-in method is credential issuance - the link
+      // and its audit row commit together (no row, no link: 503). Used by both link paths.
+      const linkMicrosoft = (u) => db.retryOnDeadlock(() => db.transaction(async (tx) => {
+        await tx.prepare(
+          "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
+        ).run("microsoft", microsoftId, u.id);
+        await auditInTx(tx, {
+          userId: u.id,
+          action: "account_linked_microsoft",
+          details: u.email,
+          ipAddress: getClientIp(req),
+        });
+      })());
       // Existing account with different provider — do NOT silently overwrite auth_provider.
       if (user.password_hash) {
         // Ref 5: exception - a member of an SSO-only org can no longer use the
@@ -843,10 +891,7 @@ router.post("/microsoft", async (req, res) => {
         // VERIFIED id_token of the configured tenant (tenantRestricted), link the
         // account to Microsoft instead. Every other case keeps the 409.
         if (tenantRestricted && await isSsoOnlyUser(db, user)) {
-          await db.prepare(
-            "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
-          ).run("microsoft", microsoftId, user.id);
-          await logActivity(user.id, "account_linked_microsoft", user.email, null, getClientIp(req), null);
+          await linkMicrosoft(user);
           user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
         } else {
           return res.status(409).json({
@@ -855,17 +900,8 @@ router.post("/microsoft", async (req, res) => {
           });
         }
       } else {
-        await db.prepare(
-          "UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?",
-        ).run("microsoft", microsoftId, user.id);
+        await linkMicrosoft(user);
         user = await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
-        await auditOrWarn({
-          userId: user.id,
-          action: "account_linked_microsoft",
-          details: user.email,
-          target: user.id,
-          ipAddress: getClientIp(req),
-        });
       }
     }
 
@@ -893,6 +929,8 @@ router.post("/microsoft", async (req, res) => {
     // Welcome + admin-notify only when this Microsoft login created a new account.
     if (isNewUser) sendSignupEmails(user, req);
   } catch (err) {
+    // Phase 1C: an account / link whose audit row couldn't be written was not created.
+    if (err instanceof AuditUnavailableError) return auditUnavailable(res, err);
     console.error("Microsoft auth error:", err);
     res.status(401).json({ error: "Microsoft authentication failed" });
   }
@@ -1247,27 +1285,34 @@ router.put("/users/:id/role", requireAuth, requireSuperAdmin, asyncHandler(async
   // a demotion of the last active platform admin is refused (409), decided one change
   // at a time. The audited "before" is read under the target's row lock, so concurrent
   // changes are recorded in the order they actually applied.
-  let before;
+  // Phase 1C: the direction is decided from the locked "before" role. A change that is not
+  // strictly lower (user < platform_operator < platform_admin) is a grant - its audit row
+  // is this transaction's last statement (lock order: app_locks, the users row, the chain
+  // row; no row, no change: 503). A demotion keeps the awaited row after commit.
+  const roleAudit = (cur) => ({
+    userId: req.user.id,
+    action: "platform_role_changed",
+    details: `target: ${cur.email}, role: ${cur.role} -> ${role}`,
+    ipAddress: getClientIp(req),
+  });
+  let outcome;
   try {
-    before = await db.transaction(async (tx) => {
+    outcome = await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       await lockPlatformAdmins(tx); // MUST be this transaction's first statement
       const cur = await tx.prepare("SELECT email, role, deactivated_at FROM users WHERE id = ? FOR UPDATE").get(req.params.id);
       if (cur && !isPlatformRole(role)) await assertNotLastActivePlatformAdmin(tx, cur);
       await tx.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
-      return cur || null;
-    })();
+      const grant = !!cur && cur.role !== role && !isPlatformDemotion(cur.role, role);
+      if (grant) await auditInTx(tx, roleAudit(cur));
+      return { before: cur || null, grant };
+    })());
   } catch (e) {
     if (e instanceof LastPlatformAdminError) return res.status(409).json({ error: e.message });
     throw e;
   }
-  if (before && before.role !== role) {
-    await auditOrWarn({
-      userId: req.user.id,
-      action: "platform_role_changed",
-      details: `target: ${before.email}, role: ${before.role} -> ${role}`,
-      target: req.params.id,
-      ipAddress: getClientIp(req),
-    });
+  const { before } = outcome;
+  if (before && before.role !== role && !outcome.grant) {
+    await auditOrWarn({ ...roleAudit(before), target: req.params.id });
   }
   res.json({ success: true });
 }));

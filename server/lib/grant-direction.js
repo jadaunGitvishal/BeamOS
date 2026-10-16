@@ -11,6 +11,8 @@
 // equal rank are NOT comparable (different, non-nested permissions).
 const ORG_ROLE_RANK = { org_owner: 3, org_admin: 2, field_technician: 1, regional_viewer: 1 };
 const WORKSPACE_ROLE_RANK = { workspace_admin: 3, workspace_editor: 2, workspace_viewer: 1 };
+// Platform roles (users.role). 'superadmin' is the legacy name of platform_admin.
+const PLATFORM_ROLE_RANK = { platform_admin: 3, superadmin: 3, platform_operator: 2, user: 1 };
 
 function strictlyLower(ranks, before, after) {
   const b = ranks[before];
@@ -21,5 +23,8 @@ function strictlyLower(ranks, before, after) {
 // true when before -> after is a demotion (strictly fewer rights).
 const isOrgDemotion = (before, after) => strictlyLower(ORG_ROLE_RANK, before, after);
 const isWorkspaceDemotion = (before, after) => strictlyLower(WORKSPACE_ROLE_RANK, before, after);
+const isPlatformDemotion = (before, after) => strictlyLower(PLATFORM_ROLE_RANK, before, after);
 
-module.exports = { isOrgDemotion, isWorkspaceDemotion, ORG_ROLE_RANK, WORKSPACE_ROLE_RANK };
+module.exports = {
+  isOrgDemotion, isWorkspaceDemotion, isPlatformDemotion, ORG_ROLE_RANK, WORKSPACE_ROLE_RANK, PLATFORM_ROLE_RANK,
+};

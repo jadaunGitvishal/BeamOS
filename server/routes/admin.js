@@ -104,6 +104,10 @@ router.post("/users", asyncHandler(async (req, res) => {
   // as already-handled. See services/signupEmails.js + services/activationNudge.js.
   // db.transaction()'s callback gets a transaction-scoped handle (tx) - statements
   // must be prepared from it, not the outer db, to actually participate in the transaction.
+  // Phase 1C: a new account with a workspace role is a grant - the user, the membership
+  // and the audit row (who created whom, where, with what role; never the password)
+  // commit together (no row, no account: 503). A concurrent create of the same email
+  // loses on the users.email unique key: 409, not a 500.
   const txn = db.transaction(async (tx) => {
     await tx.prepare(
       `
@@ -128,19 +132,23 @@ router.post("/users", asyncHandler(async (req, res) => {
       VALUES (?, ?, ?, ?)
     `,
     ).run(ws.id, id, role, req.user.id);
+    await auditInTx(tx, {
+      userId: req.user.id,
+      action: "admin_create_user",
+      details: `target: ${email}, role: ${role}`,
+      ipAddress: getClientIp(req),
+      workspaceId: ws.id,
+      organizationId: ws.organization_id,
+    });
   });
-  await txn();
-
-  // Explicit audit row - who created whom, where, with what role. Never the
-  // plaintext password (and the generic activityLogger only summarizes name).
-  logActivity(
-    req.user.id,
-    "admin_create_user",
-    `target: ${email}, role: ${role}`,
-    null,
-    getClientIp(req),
-    ws.id,
-  );
+  try {
+    await db.retryOnDeadlock(() => txn());
+  } catch (e) {
+    if (e && e.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({ error: "A user with that email already exists" });
+    }
+    throw e;
+  }
 
   // Response never includes password or hash.
   const created = await db

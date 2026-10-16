@@ -18,7 +18,7 @@
 // manual role change on an 'entra' row sets source back to NULL (manual takeover,
 // in the member routes), after which the sync leaves it alone too.
 
-const { logActivity } = require('../services/activity');
+const { auditInTx } = require('../services/activity');
 
 const SOURCE_ENTRA = 'entra';
 
@@ -188,17 +188,18 @@ async function syncEntraRoles(db, userId, roleClaims, opts = {}) {
           .run(r.workspace_id, userId);
         summary.removed.push(`ws:${r.workspace_id}:${r.role}`);
       }
+      // Only when something changed; skipped_manual rides along but never triggers
+      // an entry on its own (it would otherwise repeat at every sign-in).
+      // Phase 1C: written in this transaction, last - the sync grants roles, so no row
+      // means no change (auditInTx throws, everything rolls back, and the caller's
+      // fail-closed path refuses the sign-in).
+      if (summary.added.length || summary.updated.length || summary.removed.length) {
+        await auditInTx(tx, { userId, action: 'entra_role_sync', details: JSON.stringify(summary), ipAddress: opts.ip || null });
+      }
       return summary;
     })();
 
-  const summary = db.retryOnDeadlock ? await db.retryOnDeadlock(run) : await run();
-
-  // Only when something changed; skipped_manual rides along but never triggers
-  // an entry on its own (it would otherwise repeat at every sign-in).
-  if (summary.added.length || summary.updated.length || summary.removed.length) {
-    await logActivity(userId, 'entra_role_sync', JSON.stringify(summary), null, opts.ip || null, null);
-  }
-  return summary;
+  return db.retryOnDeadlock ? await db.retryOnDeadlock(run) : await run();
 }
 
 module.exports = {

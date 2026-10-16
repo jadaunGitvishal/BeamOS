@@ -45,7 +45,7 @@ const { isPlatformRole } = require('../middleware/auth');
 const { scimAuth, scimError } = require('../middleware/scimAuth');
 const { setUserDeactivated } = require('../lib/user-deactivation');
 const { LastPlatformAdminError } = require('../lib/platform-admin-guard');
-const { logActivity, getClientIp } = require('../services/activity');
+const { logActivity, auditInTx, AuditUnavailableError, getClientIp } = require('../services/activity');
 const { isDuplicateKeyError } = require('../lib/outage-format');
 
 const router = express.Router();
@@ -472,6 +472,10 @@ router.get('/Users/:id', asyncHandler(async (req, res) => {
   send(res, 200, toScimUser(row, baseUrl(req)));
 }));
 
+const scimAuditFields = (req, action, email) => ({
+  userId: null, action, details: `${email} (SCIM token "${req.scim.name}")`, ipAddress: getClientIp(req),
+  organizationId: req.scim.organizationId,
+});
 const auditScim = (req, action, email) =>
   logActivity(null, action, `${email} (SCIM token "${req.scim.name}")`, null, getClientIp(req), null).catch(() => {});
 
@@ -501,19 +505,23 @@ router.post('/Users', asyncHandler(async (req, res) => {
   } else if (existing) {
     userId = existing.id;
     if (input.active === false) await assertNotLastPlatformAdmin(existing);
-    await db.transaction(async (tx) => {
+    // Phase 1C: adopting an account into the org is a grant - the membership, the SCIM
+    // identity and the audit row commit together (no row, no change: 503 SCIM error).
+    await db.retryOnDeadlock(() => db.transaction(async (tx) => {
       await tx.prepare('INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, ?)').run(orgId, userId, SCIM_ORG_ROLE);
       await tx.prepare(
         `UPDATE users SET scim_user_name = ?, scim_external_id = ?, name = COALESCE(?, name), updated_at = UNIX_TIMESTAMP() WHERE id = ?`,
       ).run(input.userName, input.externalId ?? null, input.displayName ?? null, userId);
-    })();
+      await auditInTx(tx, scimAuditFields(req, 'scim:user_linked', email));
+    })());
     if (input.active !== undefined) await deactivateViaScim(req, userId, !input.active);
-    auditScim(req, 'scim:user_linked', email);
   } else {
     userId = crypto.randomUUID();
     const displayName = input.displayName || input.userName.split('@')[0];
     try {
-      await db.transaction(async (tx) => {
+      // Phase 1C: a new account in the org is a grant - the user, the membership and the
+      // audit row commit together (no row, no account: 503 SCIM error).
+      await db.retryOnDeadlock(() => db.transaction(async (tx) => {
         // auth_provider 'microsoft': a SCIM-provisioned account signs in via the
         // same Entra tenant's "Sign in with Microsoft" (routes/auth.js matches it by
         // email). No password - there is no local credential to leak.
@@ -523,13 +531,13 @@ router.post('/Users', asyncHandler(async (req, res) => {
         ).run(userId, email, displayName, input.userName, input.externalId ?? null,
           input.active === false ? Math.floor(Date.now() / 1000) : null);
         await tx.prepare('INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, ?)').run(orgId, userId, SCIM_ORG_ROLE);
-      })();
+        await auditInTx(tx, scimAuditFields(req, 'scim:user_created', email));
+      })());
     } catch (e) {
       // Two concurrent creates for the same userName: the loser hits users.email UNIQUE.
       if (isDuplicateKeyError(e)) return scimError(res, 409, `A user with userName "${input.userName}" already exists`, 'uniqueness');
       throw e;
     }
-    auditScim(req, 'scim:user_created', email);
   }
 
   const row = await findMember(orgId, userId);
@@ -638,6 +646,9 @@ router.use((req, res) => scimError(res, 404, `Unknown SCIM endpoint ${req.method
 // eslint-disable-next-line no-unused-vars
 router.use((err, req, res, _next) => {
   if (err instanceof ScimError) return scimError(res, err.status, err.message, err.scimType);
+  // Phase 1C: a grant whose audit row couldn't be written was rolled back - a retryable
+  // 503 in the SCIM error shape (Entra's provisioning service retries 5xx).
+  if (err instanceof AuditUnavailableError) return scimError(res, 503, err.message);
   if (err && err.type === 'entity.parse.failed') return scimError(res, 400, 'Request body is not valid JSON', 'invalidSyntax');
   if (err && err.type === 'entity.too.large') return scimError(res, 413, 'Request body too large');
   console.error(`[scim] ${req.method} ${req.originalUrl}:`, err);
